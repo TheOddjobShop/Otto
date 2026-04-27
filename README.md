@@ -10,16 +10,16 @@ Design spec: [`docs/superpowers/specs/2026-04-24-otto-design.md`](docs/superpowe
 ./setup.sh
 ```
 
-The script is idempotent — re-run anytime to add credentials or fix things; it skips what's already done. It will:
+The script is idempotent — re-run anytime to add credentials or fix things; it skips what's already done. It detects Arch Linux (`pacman`) or macOS (`brew`) and adapts; the systemd unit is Linux-only. It will:
 
-1. Install system deps via `pacman` (`go`, `nodejs`, `npm`, `jq`, `curl`, `python`, `lsof`, `base-devel`).
+1. Install system deps (`go`, `nodejs`, `npm`, `jq`, `curl`, `python`, `lsof`, plus `base-devel` on Arch).
 2. Install Claude Code CLI globally via `npm`.
 3. Build the `otto` binary into `~/.local/bin/`.
 4. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
 5. Browser sign-ins for Google Calendar, Drive, Gmail.
 6. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
 7. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms.
-8. Install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy.
+8. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy.
 
 ## Manual smoke test
 
@@ -30,7 +30,8 @@ After `setup.sh` reports success, on Telegram:
 - Send `/new` then `What's my name?` — should not remember.
 - Send `/whoami` — prints your Telegram user ID and current session ID.
 - Send `/status` — prints uptime + session.
-- Send a photo with caption "describe this" — Otto downloads it and forwards to Claude.
+- Send `/restart` — acks the in-flight call (no-op; messages already serialize).
+- Send a photo with caption "describe this" — Otto downloads it and forwards to Claude via `@<path>`.
 - Send "what's on my calendar today?" — exercises the Google Calendar MCP.
 
 ## Operations
@@ -45,8 +46,10 @@ systemctl --user stop otto            # stop
 ## Build / test
 
 ```bash
-make build       # builds ./otto
-make test        # unit tests for all internal packages
+make build              # builds ./otto
+make test               # unit tests for all packages
+make test-integration   # integration tests (uses testdata/fake-claude.sh as a stub claude)
+make vet                # go vet + gofmt check
 go test -race ./...
 ```
 
@@ -54,18 +57,21 @@ go test -race ./...
 
 ```
 .
-├── cmd/otto/             # daemon entrypoint, message handler, bot commands
+├── cmd/otto/             # daemon entrypoint, message handler, bot commands, markdown stripping
 ├── internal/
 │   ├── config/           # TOML config loader
 │   ├── auth/             # single-user allowlist
-│   ├── telegram/         # Bot API wrapper, chunking, image download
-│   └── claude/           # subprocess Runner + stream-json parser + session ID
-├── systemd/otto.service  # user-service template
-├── setup.sh
+│   ├── telegram/         # Bot API wrapper, chunking, image download, inline keyboards
+│   ├── claude/           # subprocess Runner + stream-json parser + session ID persistence
+│   └── permissions/      # pending tool-denial decisions + settings.json writer
+├── systemd/otto.service  # user-service template (Linux only)
+├── setup.sh              # idempotent installer (Arch + macOS)
+├── testdata/             # fake-claude.sh stub for integration tests
 ├── docs/superpowers/
 │   ├── specs/            # design specs
 │   └── plans/            # implementation plans
-└── go.mod
+├── SYSTEM.md             # default contents for ~/.config/otto/system_prompt.md
+└── go.mod                # Go 1.26.2; deps: BurntSushi/toml, go-telegram-bot-api/v5
 ```
 
 ## Tool permissions
@@ -74,7 +80,13 @@ Otto invokes `claude` with `--dangerously-skip-permissions`. Claude Code's norma
 
 The threat model that makes this acceptable: Otto is a single-user bot on your own server, every incoming message is checked against `telegram_allowed_user_id` before reaching Claude, and you're texting your own bot from your own phone. Anyone with bot-token + allowlisted-user-ID could in theory spoof Telegram, but that's a different security perimeter — Otto's gate is at the Telegram allowlist, not at Claude's per-tool prompt.
 
-If you want stricter behavior (e.g., require Telegram inline-keyboard approval per tool call), that's a future feature — for now, every tool call goes through.
+When a tool call still slips through and is denied (Claude returns `permission_denials` on its result event), Otto surfaces it as a Telegram message with three inline-keyboard buttons:
+
+- **Allow once** — replays the original prompt with `--allowed-tools <pattern>`; no persistent change.
+- **Allow always** — writes the pattern (e.g. `mcp__gmail-personal__*`) into `~/.claude/settings.json`'s `permissions.allow` array, then replays.
+- **Deny** — silent ack.
+
+Pending decisions are kept in memory (capped, GC'd by age) keyed by a short opaque ID embedded in the callback data, so a tap auto-replays without re-sending. Image attachments aren't preserved across replays — re-send the photo if you need it.
 
 ## Claude Code authentication
 
