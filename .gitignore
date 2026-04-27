@@ -1,0 +1,16 @@
+# Binaries
+/otto
+/google-mcp
+*.exe
+*.test
+*.out
+
+# Local config / secrets — never commit
+/config.toml
+/client_secret.json
+/google_token.json
+/mcp.json
+
+# Build artifacts
+/dist/
+/coverage.out

@@ -1,0 +1,17 @@
+[Unit]
+Description=Otto — Telegram bot for Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/otto
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
