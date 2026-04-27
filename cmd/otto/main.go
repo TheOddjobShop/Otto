@@ -157,9 +157,6 @@ func operationalContextFooter(servers []string) string {
 	b.WriteString("      really needs headers — but prefer plain prose with blank-line separators\n\n")
 	b.WriteString("  Keep replies concise — phone-screen brevity. A few short paragraphs separated by\n")
 	b.WriteString("  blank lines will read better than a wall of bullets.\n\n")
-	b.WriteString("ENVIRONMENT:\n")
-	b.WriteString("  Running on the user's Arch Linux home server in their home directory (~/), with\n")
-	b.WriteString("  full filesystem access. You can read, write, and execute commands as needed.\n\n")
 	if len(servers) > 0 {
 		b.WriteString("AVAILABLE MCP TOOLS:\n")
 		for _, s := range servers {

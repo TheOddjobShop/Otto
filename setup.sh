@@ -497,12 +497,13 @@ write_toml_field claude_binary_path "$CLAUDE_BIN" "$CONFIG_FILE"
 write_toml_field mcp_config_path "$MCP_FILE" "$CONFIG_FILE"
 write_toml_field session_id_path "$OTTO_STATE_DIR/session_id" "$CONFIG_FILE"
 
-# System prompt: copy repo's SYSTEM.md to ~/.config/otto/system_prompt.md on
-# first run; never overwrite once it's there so user edits survive re-runs.
-if [ ! -f "$SYSTEM_PROMPT_FILE" ] && [ -f "$DIR/SYSTEM.md" ]; then
+# System prompt: SYSTEM.md is the source of truth. Every setup.sh run copies
+# it to ~/.config/otto/system_prompt.md, overwriting any previous version.
+# Edit SYSTEM.md (in the repo) → re-run ./setup.sh → restart otto.
+if [ -f "$DIR/SYSTEM.md" ]; then
   cp "$DIR/SYSTEM.md" "$SYSTEM_PROMPT_FILE"
   chmod 600 "$SYSTEM_PROMPT_FILE"
-  echo "  [ok] Installed system prompt at $SYSTEM_PROMPT_FILE"
+  echo "  [ok] Synced system prompt: $DIR/SYSTEM.md → $SYSTEM_PROMPT_FILE"
 fi
 [ -f "$SYSTEM_PROMPT_FILE" ] && write_toml_field system_prompt_path "$SYSTEM_PROMPT_FILE" "$CONFIG_FILE"
 
