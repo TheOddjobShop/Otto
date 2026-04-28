@@ -56,6 +56,27 @@ func main() {
 
 	runner := claude.NewExecRunner(cfg.ClaudeBinaryPath, cfg.MCPConfigPath, systemPrompt, home)
 
+	// Toto: separate runner with no MCP config (the empty mcpConfigPath
+	// makes NewExecRunner skip the --mcp-config flag entirely), separate
+	// session ID file, and a separate persona file. Toto's --model and
+	// --disallowedTools are set per-call inside Toto.Reply.
+	totoPersona, err := readTotoPersona(cfg.TotoPersonaPath)
+	if err != nil {
+		log.Fatalf("toto persona: %v", err)
+	}
+	totoRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, "", "", home)
+	totoSessionPath := cfg.TotoSessionIDPath
+	if totoSessionPath == "" {
+		// Default: sibling of the Otto session file. Keeps Toto's
+		// conversation memory persistent without requiring an extra
+		// config field for users on older config.toml templates.
+		totoSessionPath = cfg.SessionIDPath + "_toto"
+	}
+	totoSession, err := claude.LoadSession(totoSessionPath)
+	if err != nil {
+		log.Fatalf("toto session: %v", err)
+	}
+
 	settingsPath := cfg.ClaudeSettingsPath
 	if settingsPath == "" {
 		settingsPath = home + "/.claude/settings.json"
@@ -69,6 +90,13 @@ func main() {
 		pending:      permissions.New(64),
 		settingsPath: settingsPath,
 		startedAt:    time.Now(),
+		otto:         newOttoState(),
+		toto: &Toto{
+			bot:     bot,
+			runner:  totoRunner,
+			session: totoSession,
+			persona: totoPersona,
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -81,13 +109,32 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("otto: starting; session=%s allowed_user=%d cwd=%s sysprompt=%dB",
-		session.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt))
+	log.Printf("otto: starting; session=%s toto_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB",
+		session.ID(), totoSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona))
 	if err := h.runPollingLoop(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("polling loop: %v", err)
 	}
+	// Drain in-flight dispatches so Otto/Toto goroutines get a chance to
+	// finish their Telegram replies before the process exits.
+	h.WaitDispatches()
 	log.Printf("otto: stopped")
 }
+
+// readTotoPersona returns the contents of the Toto persona file, or empty
+// string if the path is empty (Toto runs with Claude Code's defaults).
+// A missing-but-configured file is a hard error so misconfiguration is
+// noisy at startup rather than silently disabling Toto's character.
+func readTotoPersona(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read toto persona %s: %w", path, err)
+	}
+	return strings.TrimRight(string(body), "\n"), nil
+}
+
 
 func defaultConfigPath() string {
 	home, err := os.UserHomeDir()

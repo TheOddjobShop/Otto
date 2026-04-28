@@ -22,19 +22,135 @@ const callbackPrefixPerm = "perm:"
 const (
 	pollErrorBaseBackoff = time.Second
 	pollErrorMaxBackoff  = time.Minute
-	claudeCallTimeout    = 5 * time.Minute
 )
 
 type handler struct {
-	bot           telegram.BotClient
-	allow         *auth.Allowlist
-	session       *claude.Session
-	runner        claude.Runner
-	pending       *permissions.Pending
-	settingsPath  string // ~/.claude/settings.json (or override)
-	startedAt     time.Time
+	bot          telegram.BotClient
+	allow        *auth.Allowlist
+	session      *claude.Session
+	runner       claude.Runner
+	pending      *permissions.Pending
+	settingsPath string
+	startedAt    time.Time
 
-	mu sync.Mutex // serializes Claude calls per design spec
+	otto *ottoState
+	toto *Toto
+
+	// dispatchWG tracks in-flight dispatch goroutines so the polling
+	// loop's caller (main.go on shutdown, or tests after their window)
+	// can wait for them to drain instead of returning while goroutines
+	// still hold the Otto slot.
+	dispatchWG sync.WaitGroup
+}
+
+// WaitDispatches blocks until all dispatch goroutines spawned by the
+// polling loop have returned. Call after runPollingLoop returns to ensure
+// in-flight Telegram messages finish processing.
+func (h *handler) WaitDispatches() { h.dispatchWG.Wait() }
+
+// ottoState gates concurrent access to the single Otto subprocess slot and
+// holds metadata about the in-flight call (used by the watchdog to detect
+// hangs and by Toto to give context-aware replies while Otto is busy).
+//
+// "Busy" is a single boolean under mu, not a sync.Mutex, because we need
+// non-blocking checks (so a fresh Telegram message can route to Toto
+// without waiting) and blocking waits (so a permission-button replay
+// queues behind any in-flight call). A waiter list signaled on release
+// supports the blocking case.
+type ottoState struct {
+	mu            sync.Mutex
+	busy          bool
+	waiters       []chan struct{}
+	currentPrompt string
+	cancel        context.CancelFunc
+	lastEvent     time.Time
+	suppressError bool
+}
+
+func newOttoState() *ottoState {
+	return &ottoState{}
+}
+
+// tryAcquire is non-blocking. Returns true if Otto was free and is now
+// claimed; false if Otto was already busy.
+func (s *ottoState) tryAcquire(prompt string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.busy {
+		return false
+	}
+	s.busy = true
+	s.currentPrompt = prompt
+	s.lastEvent = time.Now()
+	s.suppressError = false
+	return true
+}
+
+// acquire blocks until Otto is free or ctx is cancelled. Used by the
+// permission-button replay path so that taps queue behind an in-flight
+// Otto call (preserving the original h.mu serialization semantics).
+func (s *ottoState) acquire(ctx context.Context, prompt string) error {
+	for {
+		s.mu.Lock()
+		if !s.busy {
+			s.busy = true
+			s.currentPrompt = prompt
+			s.lastEvent = time.Now()
+			s.suppressError = false
+			s.mu.Unlock()
+			return nil
+		}
+		wait := make(chan struct{})
+		s.waiters = append(s.waiters, wait)
+		s.mu.Unlock()
+		select {
+		case <-wait:
+			// Re-check — another waiter may have grabbed the slot first.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (s *ottoState) release() {
+	s.mu.Lock()
+	s.busy = false
+	s.currentPrompt = ""
+	s.cancel = nil
+	waiters := s.waiters
+	s.waiters = nil
+	s.mu.Unlock()
+	for _, w := range waiters {
+		close(w)
+	}
+}
+
+func (s *ottoState) setCancel(c context.CancelFunc) {
+	s.mu.Lock()
+	s.cancel = c
+	s.mu.Unlock()
+}
+
+func (s *ottoState) markEvent() {
+	s.mu.Lock()
+	s.lastEvent = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *ottoState) markSuppressError() {
+	s.mu.Lock()
+	s.suppressError = true
+	s.mu.Unlock()
+}
+
+// shouldSuppressError reports whether the last cancellation came from the
+// watchdog (so the resulting context.Canceled error from runner.Run should
+// not be surfaced to the user as a Claude error — Toto already messaged
+// them about the reboot).
+func (s *ottoState) shouldSuppressError() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.suppressError
 }
 
 func (h *handler) runPollingLoop(ctx context.Context) error {
@@ -66,7 +182,13 @@ func (h *handler) runPollingLoop(ctx context.Context) error {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
-			h.dispatch(ctx, u)
+			// Async dispatch so Otto's long-running call doesn't block
+			// the polling loop or Toto's fallback replies.
+			h.dispatchWG.Add(1)
+			go func(u telegram.Update) {
+				defer h.dispatchWG.Done()
+				h.dispatch(ctx, u)
+			}(u)
 		}
 	}
 }
@@ -83,27 +205,35 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 	if strings.TrimSpace(u.Text) == "" && len(u.PhotoIDs) == 0 {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	// Commands are read-only or session-only — they don't acquire the Otto
+	// slot, so /whoami / /status etc. work even while Otto is busy.
 	if cmd := h.tryCommand(ctx, u); cmd.handled {
 		if err := telegram.SendChunked(ctx, h.bot, u.ChatID, cmd.reply); err != nil {
 			log.Printf("send error (command reply): %v", err)
 		}
 		return
 	}
-	h.handleMessage(ctx, u)
+	// Try to claim Otto. If he's free, run him; if he's busy, hand off to
+	// Toto so the user gets a reply instead of silence.
+	if h.otto.tryAcquire(u.Text) {
+		defer h.otto.release()
+		h.handleMessage(ctx, u)
+		return
+	}
+	// Toto path: capture Otto's in-flight prompt so Toto can refer to it.
+	h.otto.mu.Lock()
+	ottoPrompt := h.otto.currentPrompt
+	h.otto.mu.Unlock()
+	h.toto.Reply(ctx, u.ChatID, u.Text, ottoPrompt)
 }
 
 // handleCallback processes an inline-keyboard button tap. Currently only
 // "perm:<id>:<once|always|deny>" callbacks (from the permission-denial flow)
 // are recognized; anything else just dismisses the loading spinner.
 //
-// once  — replay the original prompt with --allowed-tools <pattern>; no
-//         persistent settings.json change.
-// always — write the pattern into ~/.claude/settings.json's permissions.allow,
-//         then replay (also with --allowed-tools as belt-and-suspenders so
-//         we don't depend on claude re-reading settings.json mid-stream).
-// deny   — silent acknowledgement.
+// Replays acquire the Otto slot via blocking acquire — taps that arrive
+// while Otto is mid-call queue behind it (preserving the pre-Toto
+// serialization semantics for permission button taps specifically).
 func (h *handler) handleCallback(ctx context.Context, u telegram.Update) {
 	if !strings.HasPrefix(u.CallbackData, callbackPrefixPerm) {
 		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "")
@@ -131,18 +261,21 @@ func (h *handler) handleCallback(ctx context.Context, u telegram.Update) {
 				return
 			}
 		}
-		// Acknowledge before the long-running replay (Telegram dismisses
-		// the button's loading spinner once we answer).
 		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "Replaying…")
+		if err := h.otto.acquire(ctx, entry.Prompt); err != nil {
+			log.Printf("callback acquire: %v", err)
+			return
+		}
+		defer h.otto.release()
 
-		// Take the same per-Claude-call lock as a regular message would, so
-		// any user message that arrives while we're replaying queues behind
-		// us instead of interleaving --resume against the same session.
-		h.mu.Lock()
-		defer h.mu.Unlock()
-
-		callCtx, cancel := context.WithTimeout(ctx, claudeCallTimeout)
+		callCtx, cancel := context.WithCancel(ctx)
+		h.otto.setCancel(cancel)
 		defer cancel()
+
+		done := make(chan struct{})
+		defer close(done)
+		go h.runWatchdog(ctx, entry.ChatID, done)
+
 		h.runAndReply(callCtx, ctx, entry.ChatID, claude.RunArgs{
 			Prompt:       entry.Prompt,
 			SessionID:    h.session.ID(),
@@ -168,8 +301,6 @@ func (h *handler) surfaceDenials(ctx context.Context, chatID int64, originalProm
 	seen := map[string]struct{}{}
 	for _, d := range denials {
 		pattern := permissions.PatternFor(d.ToolName)
-		// One prompt per pattern (collapsing multiple denials of the same
-		// MCP server family into a single button group).
 		if _, dup := seen[pattern]; dup {
 			continue
 		}
@@ -194,9 +325,17 @@ func (h *handler) surfaceDenials(ctx context.Context, chatID int64, originalProm
 	}
 }
 
+// handleMessage runs an Otto turn. Caller must have already acquired the
+// Otto slot via h.otto.tryAcquire / acquire and is responsible for calling
+// h.otto.release.
 func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
-	callCtx, cancel := context.WithTimeout(ctx, claudeCallTimeout)
+	callCtx, cancel := context.WithCancel(ctx)
+	h.otto.setCancel(cancel)
 	defer cancel()
+
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	go h.runWatchdog(ctx, u.ChatID, watchdogDone)
 
 	tmpDir, err := os.MkdirTemp("", "otto-photos-")
 	if err != nil {
@@ -209,7 +348,7 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 
 	var imagePaths []string
 	for _, pid := range u.PhotoIDs {
-		path, err := telegram.DownloadPhotoToTemp(callCtx, h.bot, pid, tmpDir)
+		path, err := telegram.DownloadPhotoToTemp(ctx, h.bot, pid, tmpDir)
 		if err != nil {
 			if sendErr := telegram.SendChunked(ctx, h.bot, u.ChatID, fmt.Sprintf("⚠️ photo download: %v", err)); sendErr != nil {
 				log.Printf("send error (photo download failure): %v", sendErr)
@@ -227,14 +366,16 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 }
 
 // runAndReply runs claude with args, drains the event stream, captures the
-// session ID, sends replies under sendCtx (parent ctx — so the reply isn't
-// cancelled by the 5-minute Claude timeout), and surfaces any permission
-// denials as inline-keyboard buttons. Shared between handleMessage and the
-// permission-button replay path so both paths handle errors, ResultEvent
-// failures, and follow-up denials identically.
+// session ID, sends replies, and surfaces any permission denials as inline-
+// keyboard buttons. Shared between handleMessage and the permission-button
+// replay path so both paths handle errors, ResultEvent failures, and follow-
+// up denials identically.
 //
-// callCtx governs the Claude subprocess (timeout); sendCtx governs Telegram
-// replies (parent, longer-lived).
+// Side effect: every event consumed bumps h.otto.lastEvent, which the
+// watchdog uses to detect hangs. If callCtx was cancelled by the watchdog,
+// h.otto.suppressError is set, and we drop the resulting "context canceled"
+// error rather than echoing it as a Claude error (Toto already informed
+// the user about the reboot).
 func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, args claude.RunArgs) {
 	events := make(chan claude.Event, 64)
 	args.Events = events
@@ -247,6 +388,7 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	go func() {
 		defer close(doneParsing)
 		for ev := range events {
+			h.otto.markEvent()
 			switch e := ev.(type) {
 			case claude.AssistantTextEvent:
 				assistantText.WriteString(e.Text)
@@ -262,10 +404,6 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	close(events)
 	<-doneParsing
 
-	// Persist whatever session ID Claude Code reported, even on error —
-	// often the system/init event arrives before a downstream failure, and
-	// we want subsequent messages to resume the same conversation rather
-	// than start a fresh one.
 	if capturedSessionID != "" && capturedSessionID != h.session.ID() {
 		if setErr := h.session.Set(capturedSessionID); setErr != nil {
 			log.Printf("session save: %v", setErr)
@@ -273,6 +411,10 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	}
 
 	if err != nil {
+		if h.otto.shouldSuppressError() {
+			// Watchdog already messaged the user about the reboot.
+			return
+		}
 		if sendErr := telegram.SendChunked(sendCtx, h.bot, chatID, fmt.Sprintf("⚠️ Claude error: %s", err)); sendErr != nil {
 			log.Printf("send error (claude failure): %v", sendErr)
 		}
@@ -294,9 +436,6 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	if out == "" {
 		out = "(no response)"
 	}
-	// Belt-and-suspenders: the system prompt says no markdown, but claude
-	// slips. Telegram doesn't render markdown without parse_mode, so any
-	// leftover markup would appear literally. Strip it.
 	out = stripMarkdown(out)
 	if err := telegram.SendChunked(sendCtx, h.bot, chatID, out); err != nil {
 		log.Printf("send error: %v", err)

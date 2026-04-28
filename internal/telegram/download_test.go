@@ -18,6 +18,9 @@ func (f *fakeDownloader) GetUpdates(ctx context.Context, offset int) ([]Update, 
 func (f *fakeDownloader) SendMessage(ctx context.Context, chatID int64, text string) error {
 	return nil
 }
+func (f *fakeDownloader) SendMessageHTML(ctx context.Context, chatID int64, text string) error {
+	return nil
+}
 func (f *fakeDownloader) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
 	return f.data, f.contentType, nil
 }

@@ -49,6 +49,10 @@ type InlineButton struct {
 type BotClient interface {
 	GetUpdates(ctx context.Context, offset int) ([]Update, error)
 	SendMessage(ctx context.Context, chatID int64, text string) error
+	// SendMessageHTML sends `text` with parse_mode=HTML so tags like
+	// <pre>...</pre> render as monospace. Caller is responsible for
+	// escaping any literal <, >, & in the body via html.EscapeString.
+	SendMessageHTML(ctx context.Context, chatID int64, text string) error
 	SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]InlineButton) error
 	AnswerCallbackQuery(ctx context.Context, queryID, text string) error
 	DownloadFile(ctx context.Context, fileID string) ([]byte, string, error)
@@ -88,6 +92,15 @@ func (c *realClient) SendMessage(ctx context.Context, chatID int64, text string)
 	msg := tgbotapi.NewMessage(chatID, text)
 	if _, err := c.api.Send(msg); err != nil {
 		return fmt.Errorf("telegram: send: %w", err)
+	}
+	return nil
+}
+
+func (c *realClient) SendMessageHTML(ctx context.Context, chatID int64, text string) error {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
+	if _, err := c.api.Send(msg); err != nil {
+		return fmt.Errorf("telegram: send-html: %w", err)
 	}
 	return nil
 }

@@ -54,7 +54,19 @@ type RunArgs struct {
 	// pattern here ensures the retry succeeds even if claude hasn't
 	// re-read settings.json.
 	AllowedTools []string
-	Events       chan<- Event
+	// DisallowedTools is forwarded as --disallowedTools <csv>. Used by the
+	// Toto fallback to deny everything ("*") so the lightweight assistant
+	// can talk but can't act on the filesystem or call MCP servers.
+	DisallowedTools []string
+	// Model overrides Claude Code's default model selection (e.g.
+	// "claude-haiku-4-5" for the Toto fallback). Empty = inherit default.
+	Model string
+	// AppendSystemPrompt, when non-empty, replaces the runner's configured
+	// systemPrompt for this single call. Used by Toto so a dynamic per-
+	// call prompt (cat persona + Otto's in-flight prompt as context) can
+	// be injected without rebuilding the runner.
+	AppendSystemPrompt string
+	Events             chan<- Event
 }
 
 // Runner runs Claude Code subprocesses.
@@ -112,7 +124,10 @@ func (r *execRunner) WithEnv(extra map[string]string) Runner {
 // when SessionID is non-empty (otherwise Claude Code rejects with "No
 // conversation found"), and that --append-system-prompt is only added when
 // a non-empty system prompt is configured.
-func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt string, imagePaths, allowedTools []string) []string {
+//
+// mcpConfigPath empty = no --mcp-config flag (used by the Toto fallback,
+// which runs without any MCP servers).
+func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model string, imagePaths, allowedTools, disallowedTools []string) []string {
 	for _, p := range imagePaths {
 		// Verify exact CLI syntax against the installed Claude Code version
 		// during integration testing; this @path form is the documented
@@ -121,7 +136,6 @@ func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt string, imagePa
 	}
 	cmdArgs := []string{
 		"-p", prompt,
-		"--mcp-config", mcpConfigPath,
 		"--output-format", "stream-json",
 		"--verbose",
 		// Skip the interactive tool-permission prompt: in -p mode there's
@@ -131,11 +145,20 @@ func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt string, imagePa
 		// every message that reaches claude is by definition the owner.
 		"--dangerously-skip-permissions",
 	}
+	if mcpConfigPath != "" {
+		cmdArgs = append(cmdArgs, "--mcp-config", mcpConfigPath)
+	}
+	if model != "" {
+		cmdArgs = append(cmdArgs, "--model", model)
+	}
 	if systemPrompt != "" {
 		cmdArgs = append(cmdArgs, "--append-system-prompt", systemPrompt)
 	}
 	if len(allowedTools) > 0 {
 		cmdArgs = append(cmdArgs, "--allowed-tools", strings.Join(allowedTools, ","))
+	}
+	if len(disallowedTools) > 0 {
+		cmdArgs = append(cmdArgs, "--disallowedTools", strings.Join(disallowedTools, ","))
 	}
 	// Only --resume an existing session. Empty SessionID means start fresh —
 	// Claude Code will allocate a new session ID, which our parser captures
@@ -147,7 +170,11 @@ func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt string, imagePa
 }
 
 func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
-	cmdArgs := buildCmdArgs(args.Prompt, args.SessionID, r.mcpConfigPath, r.systemPrompt, args.ImagePaths, args.AllowedTools)
+	systemPrompt := r.systemPrompt
+	if args.AppendSystemPrompt != "" {
+		systemPrompt = args.AppendSystemPrompt
+	}
+	cmdArgs := buildCmdArgs(args.Prompt, args.SessionID, r.mcpConfigPath, systemPrompt, args.Model, args.ImagePaths, args.AllowedTools, args.DisallowedTools)
 	cmd := exec.CommandContext(ctx, r.binary, cmdArgs...)
 	if r.workDir != "" {
 		cmd.Dir = r.workDir

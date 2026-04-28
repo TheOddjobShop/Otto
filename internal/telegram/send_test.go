@@ -17,6 +17,10 @@ func (f *fakeClient) SendMessage(ctx context.Context, chatID int64, text string)
 	f.sent = append(f.sent, text)
 	return nil
 }
+func (f *fakeClient) SendMessageHTML(ctx context.Context, chatID int64, text string) error {
+	f.sent = append(f.sent, text)
+	return nil
+}
 func (f *fakeClient) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
 	return nil, "", nil
 }

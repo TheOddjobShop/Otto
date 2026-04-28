@@ -23,6 +23,16 @@ type Config struct {
 	// the inline-keyboard permission flow. Defaults to ~/.claude/settings.json
 	// when empty.
 	ClaudeSettingsPath string `toml:"claude_settings_path"`
+	// TotoSessionIDPath is where the secondary "Toto" persona persists its
+	// own conversation session ID. Toto is the lightweight cat-themed
+	// stand-in that replies while Otto is busy on a long-running task.
+	// Required when Toto is enabled (which is the default); empty disables
+	// the Toto fallback entirely.
+	TotoSessionIDPath string `toml:"toto_session_id_path"`
+	// TotoPersonaPath optionally points to a Markdown file appended to
+	// Toto's built-in system prompt via --append-system-prompt. Mirrors
+	// SystemPromptPath but for the Toto persona.
+	TotoPersonaPath string `toml:"toto_persona_path"`
 }
 
 func Load(path string) (*Config, error) {

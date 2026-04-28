@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,13 @@ type fakeBot struct {
 	idx      int
 	sent     []sentMsg
 	answered []string // queryIDs answered via AnswerCallbackQuery
+	mu       sync.Mutex
+	// betweenBatches is an optional pause inserted before returning the
+	// 2nd, 3rd, ... batch. Multi-batch tests use this to ensure each
+	// batch's async dispatches complete before the next batch arrives,
+	// preserving Otto's serialization semantics for tests that depend on
+	// session-ID handoff between calls.
+	betweenBatches time.Duration
 }
 
 type sentMsg struct {
@@ -36,22 +44,42 @@ func (f *fakeBot) GetUpdates(ctx context.Context, offset int) ([]telegram.Update
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
+	if f.idx > 0 && f.betweenBatches > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(f.betweenBatches):
+		}
+	}
 	u := f.updates[f.idx]
 	f.idx++
 	return u, nil
 }
 
 func (f *fakeBot) SendMessage(ctx context.Context, chatID int64, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, sentMsg{chatID: chatID, text: text})
+	return nil
+}
+
+func (f *fakeBot) SendMessageHTML(ctx context.Context, chatID int64, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sent = append(f.sent, sentMsg{chatID: chatID, text: text})
 	return nil
 }
 
 func (f *fakeBot) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]telegram.InlineButton) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sent = append(f.sent, sentMsg{chatID: chatID, text: text, buttons: buttons})
 	return nil
 }
 
 func (f *fakeBot) AnswerCallbackQuery(ctx context.Context, queryID, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.answered = append(f.answered, queryID)
 	return nil
 }
@@ -96,6 +124,10 @@ func newTestHandler(t *testing.T, bot telegram.BotClient, runner claude.Runner) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	totoSess, err := claude.LoadSession(filepath.Join(dir, "toto-sid"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &handler{
 		bot:          bot,
 		allow:        auth.New(99),
@@ -104,17 +136,26 @@ func newTestHandler(t *testing.T, bot telegram.BotClient, runner claude.Runner) 
 		pending:      permissions.New(8),
 		settingsPath: filepath.Join(dir, "settings.json"),
 		startedAt:    time.Now(),
+		otto:         newOttoState(),
+		toto: &Toto{
+			bot:     bot,
+			runner:  runner,
+			session: totoSess,
+			persona: "test toto",
+		},
 	}
 }
 
 // runForBriefWindow runs the polling loop for a short, deterministic window,
-// then returns. The fakeBot blocks on ctx.Done() once updates are exhausted,
-// so the loop returns as soon as ctx expires.
+// then waits for any in-flight dispatch goroutines to finish before returning.
+// The fakeBot blocks on ctx.Done() once updates are exhausted, so the loop
+// returns as soon as ctx expires.
 func runForBriefWindow(t *testing.T, h *handler) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_ = h.runPollingLoop(ctx)
+	h.WaitDispatches()
 }
 
 func TestHandlerForwardsTextMessage(t *testing.T) {
@@ -146,6 +187,9 @@ func TestHandlerCapturesAndReusesSessionID(t *testing.T) {
 			{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "first"}},
 			{{UpdateID: 2, ChatID: 100, UserID: 99, Text: "second"}},
 		},
+		// Async dispatch means batch 2 must wait for batch 1's Otto call
+		// to release the slot, otherwise message 2 routes to Toto.
+		betweenBatches: 50 * time.Millisecond,
 	}
 	runner := &fakeRunner{respond: "ok", emitSession: "sess-real-uuid"}
 	h := newTestHandler(t, bot, runner)
@@ -170,6 +214,7 @@ func TestHandlerNewCommandClearsSessionAndNextMessageIsFresh(t *testing.T) {
 			{{UpdateID: 2, ChatID: 100, UserID: 99, Text: "/new"}},
 			{{UpdateID: 3, ChatID: 100, UserID: 99, Text: "after-new"}},
 		},
+		betweenBatches: 50 * time.Millisecond,
 	}
 	runner := &fakeRunner{respond: "ok", emitSession: "sess-1"}
 	h := newTestHandler(t, bot, runner)
