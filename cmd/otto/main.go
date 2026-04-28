@@ -25,6 +25,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", defaultConfigPath(), "path to config.toml")
+	ttyMode := flag.Bool("tty", false, "test mode: read messages from stdin, write replies to stdout (no Telegram)")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -34,9 +35,18 @@ func main() {
 
 	allow := auth.New(cfg.TelegramAllowedUserID)
 
-	bot, err := telegram.NewBotClient(cfg.TelegramBotToken, "https://api.telegram.org/bot%s/%s")
-	if err != nil {
-		log.Fatalf("telegram: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var bot telegram.BotClient
+	if *ttyMode {
+		bot = newTTYBot(cfg.TelegramAllowedUserID, cancel)
+		fmt.Fprintln(os.Stderr, "[tty] type messages and press enter; ctrl-d to exit")
+	} else {
+		bot, err = telegram.NewBotClient(cfg.TelegramBotToken, "https://api.telegram.org/bot%s/%s")
+		if err != nil {
+			log.Fatalf("telegram: %v", err)
+		}
 	}
 
 	session, err := claude.LoadSession(cfg.SessionIDPath)
@@ -99,8 +109,6 @@ func main() {
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
