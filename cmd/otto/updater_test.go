@@ -2,7 +2,14 @@
 
 package main
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestAssetForPlatform(t *testing.T) {
 	assets := []releaseAsset{
@@ -32,5 +39,54 @@ func TestAssetForPlatform(t *testing.T) {
 				t.Errorf("URL=%q, want %q", got.URL, c.wantURL)
 			}
 		})
+	}
+}
+
+func TestFetchLatest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"tag_name": "v1.2.3",
+			"body": "What's Changed\n* Add /update (#1)\n* Fix denial UX (#2)",
+			"assets": [
+				{"name": "otto-linux-amd64", "browser_download_url": "https://x/otto-linux-amd64"},
+				{"name": "otto-darwin-arm64", "browser_download_url": "https://x/otto-darwin-arm64"}
+			]
+		}`)
+	}))
+	defer server.Close()
+
+	u := &updater{
+		httpClient:  server.Client(),
+		releasesURL: server.URL,
+	}
+	rel, err := u.fetchLatest(context.Background())
+	if err != nil {
+		t.Fatalf("fetchLatest: %v", err)
+	}
+	if rel.TagName != "v1.2.3" {
+		t.Errorf("TagName=%q, want v1.2.3", rel.TagName)
+	}
+	if !strings.Contains(rel.Body, "What's Changed") {
+		t.Errorf("Body missing patch notes: %q", rel.Body)
+	}
+	if len(rel.Assets) != 2 {
+		t.Fatalf("got %d assets, want 2", len(rel.Assets))
+	}
+	if rel.Assets[0].Name != "otto-linux-amd64" {
+		t.Errorf("Assets[0].Name=%q", rel.Assets[0].Name)
+	}
+}
+
+func TestFetchLatestNon200(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rate limited", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	u := &updater{httpClient: server.Client(), releasesURL: server.URL}
+	_, err := u.fetchLatest(context.Background())
+	if err == nil {
+		t.Fatal("expected error on 403 response")
 	}
 }
