@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -103,4 +105,84 @@ func assetForPlatform(assets []releaseAsset, goos, goarch string) (releaseAsset,
 		}
 	}
 	return releaseAsset{}, false
+}
+
+// checkOnce hits releases/latest and, if the latest tag differs from
+// both the current version and the previously-announced tag, sends a
+// Toot announcement and records the pending install.
+//
+// If the release exists but has no asset for the current platform, we
+// still announce (so the user knows an update is out) but record no
+// pending — /update will explain the mismatch.
+func (u *updater) checkOnce(ctx context.Context) {
+	rel, err := u.fetchLatest(ctx)
+	if err != nil {
+		log.Printf("updater: %v", err)
+		return
+	}
+	if rel.TagName == u.currentVersion {
+		return
+	}
+	u.mu.Lock()
+	if rel.TagName == u.lastAnnounced {
+		u.mu.Unlock()
+		return
+	}
+	asset, ok := assetForPlatform(rel.Assets, runtime.GOOS, runtime.GOARCH)
+	if ok {
+		u.pending = &pendingUpdate{
+			Tag:       rel.TagName,
+			AssetName: asset.Name,
+			AssetURL:  asset.URL,
+		}
+	} else {
+		u.pending = nil
+	}
+	u.lastAnnounced = rel.TagName
+	u.mu.Unlock()
+
+	msg := buildAnnounceMessage(u.currentVersion, rel.TagName, rel.Body, ok)
+	if err := u.toot.Send(ctx, u.chatID, msg); err != nil {
+		log.Printf("updater: toot send: %v", err)
+	}
+}
+
+// Pending returns the current pending install, or nil if none.
+// Safe to call from any goroutine.
+func (u *updater) Pending() *pendingUpdate {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.pending
+}
+
+// buildAnnounceMessage composes Toot's announcement body. Patch notes
+// from the release are included verbatim when present; trailing
+// whitespace is trimmed so we don't leave a dangling blank line before
+// the "Reply /update" hint.
+func buildAnnounceMessage(currentVersion, newTag, body string, hasPlatformAsset bool) string {
+	header := fmt.Sprintf("%s → %s", currentVersion, newTag)
+	footer := "Reply /update to install."
+	if !hasPlatformAsset {
+		footer = fmt.Sprintf(
+			"No binary for %s/%s in this release. Build manually or wait for the next one.",
+			runtime.GOOS, runtime.GOARCH,
+		)
+	}
+	if body = trimRight(body); body == "" {
+		return header + "\n\n" + footer
+	}
+	return header + "\n\n" + body + "\n\n" + footer
+}
+
+// trimRight strips trailing whitespace including blank lines.
+func trimRight(s string) string {
+	for len(s) > 0 {
+		c := s[len(s)-1]
+		if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	return s
 }
