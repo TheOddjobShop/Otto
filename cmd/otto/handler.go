@@ -49,13 +49,10 @@ func (h *handler) WaitDispatches() { h.dispatchWG.Wait() }
 //
 // "Busy" is a single boolean under mu, not a sync.Mutex, because we need
 // non-blocking checks (so a fresh Telegram message can route to Toto via
-// the dispatch busy-detect handoff, without waiting). A blocking acquire
-// with a waiter list is also supported but currently has no production
-// callers — kept for the slot-acquisition pattern.
+// the dispatch busy-detect handoff, without waiting).
 type ottoState struct {
 	mu            sync.Mutex
 	busy          bool
-	waiters       []chan struct{}
 	currentPrompt string
 	cancel        context.CancelFunc
 	lastEvent     time.Time
@@ -92,45 +89,13 @@ func (s *ottoState) tryAcquire(prompt string) bool {
 	return true
 }
 
-// acquire blocks until Otto is free or ctx is cancelled. No production
-// callers as of A3 (the permission-button replay path that used it has
-// been removed); kept for the slot-acquisition pattern.
-// TODO(A6): consider removing if still unused after Part A.
-func (s *ottoState) acquire(ctx context.Context, prompt string) error {
-	for {
-		s.mu.Lock()
-		if !s.busy {
-			s.busy = true
-			s.currentPrompt = prompt
-			s.lastEvent = time.Now()
-			s.suppressError = false
-			s.mu.Unlock()
-			return nil
-		}
-		wait := make(chan struct{})
-		s.waiters = append(s.waiters, wait)
-		s.mu.Unlock()
-		select {
-		case <-wait:
-			// Re-check — another waiter may have grabbed the slot first.
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
-
 func (s *ottoState) release() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.busy = false
 	s.currentPrompt = ""
 	s.lastSnippet = ""
 	s.cancel = nil
-	waiters := s.waiters
-	s.waiters = nil
-	s.mu.Unlock()
-	for _, w := range waiters {
-		close(w)
-	}
 }
 
 func (s *ottoState) setCancel(c context.CancelFunc) {
@@ -294,7 +259,7 @@ func patternForTool(toolName string) string {
 }
 
 // handleMessage runs an Otto turn. Caller must have already acquired the
-// Otto slot via h.otto.tryAcquire / acquire and is responsible for calling
+// Otto slot via h.otto.tryAcquire and is responsible for calling
 // h.otto.release.
 func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 	callCtx, cancel := context.WithCancel(ctx)
