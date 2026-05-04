@@ -38,17 +38,53 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 			handled: true,
 		}
 	case "/restart":
-		// In-flight Claude calls hold h.mu; tryCommand runs under h.mu, so by
-		// the time we get here any in-flight call has already returned. The
-		// command exists for symmetry with the design and as a no-op ack.
-		return commandResult{reply: "🔄 No in-flight call. (Send /new to start fresh.)", handled: true}
+		// Force-cancel an in-flight Otto call. Used when Otto seems wedged,
+		// or when a long task isn't worth waiting for. The watchdog uses
+		// the same suppress-error → cancel sequence at 10 minutes; this
+		// just exposes the same lever to the user on demand.
+		h.otto.mu.Lock()
+		busy := h.otto.busy
+		cancel := h.otto.cancel
+		inflight := h.otto.currentPrompt
+		h.otto.mu.Unlock()
+		if !busy {
+			return commandResult{reply: "🔄 Otto isn't busy. Nothing to interrupt.", handled: true}
+		}
+		h.otto.markSuppressError()
+		if cancel != nil {
+			cancel()
+		}
+		preview := inflight
+		if len(preview) > 80 {
+			preview = preview[:80] + "…"
+		}
+		return commandResult{
+			reply:   fmt.Sprintf("🛑 Interrupted Otto. He was on: %q\nSession is preserved — re-send if you want him to resume.", preview),
+			handled: true,
+		}
 	case "/status":
 		sid := h.session.ID()
 		if sid == "" {
 			sid = "(none yet)"
 		}
+		h.otto.mu.Lock()
+		busy := h.otto.busy
+		inflight := h.otto.currentPrompt
+		lastEvent := h.otto.lastEvent
+		h.otto.mu.Unlock()
+
+		state := "idle"
+		if busy {
+			preview := inflight
+			if len(preview) > 60 {
+				preview = preview[:60] + "…"
+			}
+			silence := time.Since(lastEvent).Round(time.Second)
+			state = fmt.Sprintf("BUSY (silence=%s) on: %q", silence, preview)
+		}
 		return commandResult{
-			reply:   fmt.Sprintf("uptime=%s session=%s", time.Since(h.startedAt).Round(time.Second), sid),
+			reply: fmt.Sprintf("uptime=%s\nstate=%s\nsession=%s",
+				time.Since(h.startedAt).Round(time.Second), state, sid),
 			handled: true,
 		}
 	}

@@ -65,7 +65,18 @@ type ottoState struct {
 	cancel        context.CancelFunc
 	lastEvent     time.Time
 	suppressError bool
+	// lastSnippet is the tail of Otto's in-flight assistant text, capped
+	// to snippetCap bytes. Surfaced to Toto so that during Otto's busy
+	// window Toto can ground replies in what Otto is actually saying
+	// right now ("he's typing about your gmail, hold on") instead of
+	// just "he's busy."
+	lastSnippet string
 }
+
+// snippetCap bounds how many tail bytes of Otto's stream we expose to
+// Toto. ~600 leaves room for a sentence or two, enough to be useful as
+// progress context without blowing up Toto's haiku prompt.
+const snippetCap = 600
 
 func newOttoState() *ottoState {
 	return &ottoState{}
@@ -116,6 +127,7 @@ func (s *ottoState) release() {
 	s.mu.Lock()
 	s.busy = false
 	s.currentPrompt = ""
+	s.lastSnippet = ""
 	s.cancel = nil
 	waiters := s.waiters
 	s.waiters = nil
@@ -135,6 +147,19 @@ func (s *ottoState) markEvent() {
 	s.mu.Lock()
 	s.lastEvent = time.Now()
 	s.mu.Unlock()
+}
+
+// appendSnippet adds streamed assistant text to the tail buffer, trimming
+// from the front when it grows past snippetCap. Concurrency: called from
+// the runAndReply event-consumer goroutine; protected by mu so the Toto
+// dispatch path's snapshot read is race-free.
+func (s *ottoState) appendSnippet(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSnippet += text
+	if len(s.lastSnippet) > snippetCap {
+		s.lastSnippet = "…" + s.lastSnippet[len(s.lastSnippet)-snippetCap:]
+	}
 }
 
 func (s *ottoState) markSuppressError() {
@@ -220,11 +245,24 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 		h.handleMessage(ctx, u)
 		return
 	}
-	// Toto path: capture Otto's in-flight prompt so Toto can refer to it.
+	// Toto path: capture Otto's in-flight prompt and the tail of his
+	// streamed reply so Toto can refer to both.
 	h.otto.mu.Lock()
 	ottoPrompt := h.otto.currentPrompt
+	ottoSnippet := h.otto.lastSnippet
+	silence := time.Since(h.otto.lastEvent)
 	h.otto.mu.Unlock()
-	h.toto.Reply(ctx, u.ChatID, u.Text, ottoPrompt)
+	previewIn := truncate(u.Text, 60)
+	previewOut := truncate(ottoPrompt, 60)
+	log.Printf("otto busy → toto (silence=%s) msg=%q inflight=%q", silence.Round(time.Second), previewIn, previewOut)
+	h.toto.Reply(ctx, u.ChatID, u.Text, ottoPrompt, ottoSnippet)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // handleCallback processes an inline-keyboard button tap. Currently only
@@ -392,6 +430,7 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 			switch e := ev.(type) {
 			case claude.AssistantTextEvent:
 				assistantText.WriteString(e.Text)
+				h.otto.appendSnippet(e.Text)
 			case claude.SessionEvent:
 				capturedSessionID = e.ID
 			case claude.ResultEvent:

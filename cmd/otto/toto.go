@@ -121,13 +121,16 @@ type Toto struct {
 }
 
 // Reply runs a Toto turn and sends the result to chatID. ottoPrompt is the
-// in-flight Otto prompt (so Toto can refer to it). userMessage is what the
-// user just sent that arrived while Otto was busy.
+// in-flight Otto prompt (so Toto can refer to it). ottoSnippet is the tail
+// of what Otto has streamed so far this turn — partial assistant text Otto
+// is mid-way through emitting — so Toto can ground replies in real
+// progress instead of hand-waving. userMessage is what the user just sent
+// that arrived while Otto was busy.
 //
 // Toto is invoked with no MCP config and --disallowedTools "*", so even if
 // the model tried to call a tool, Claude Code would refuse. Belt-and-
 // suspenders against any prompt-injected behaviour.
-func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt string) {
+func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -137,6 +140,13 @@ func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt 
 		systemPrompt += "OTTO IS CURRENTLY WORKING ON THIS FOR THE USER:\n"
 		systemPrompt += "───────────────────────────────────────────────\n\n"
 		systemPrompt += ottoPrompt
+	}
+	if ottoSnippet != "" {
+		systemPrompt += "\n\n───────────────────────────────────────────────\n"
+		systemPrompt += "WHAT OTTO HAS PARTIALLY SAID SO FAR (in-progress, the tail of his streamed reply — NOT a finished answer):\n"
+		systemPrompt += "───────────────────────────────────────────────\n\n"
+		systemPrompt += ottoSnippet
+		systemPrompt += "\n\nUse this only to ground your reply in reality — e.g. 'he's typing about your gmail right now' if the snippet is about gmail. Do NOT relay Otto's words to the user verbatim or pretend his answer is yours."
 	}
 
 	events := make(chan claude.Event, 32)
