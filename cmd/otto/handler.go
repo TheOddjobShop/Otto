@@ -28,8 +28,9 @@ type handler struct {
 	runner    claude.Runner
 	startedAt time.Time
 
-	otto *ottoState
-	toto *Toto
+	otto    *ottoState
+	toto    *Toto
+	updater *updater
 
 	// dispatchWG tracks in-flight dispatch goroutines so the polling
 	// loop's caller (main.go on shutdown, or tests after their window)

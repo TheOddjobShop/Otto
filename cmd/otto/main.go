@@ -106,6 +106,10 @@ func main() {
 		},
 	}
 
+	toot := newToot(bot)
+	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
+	go h.updater.Run(ctx)
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

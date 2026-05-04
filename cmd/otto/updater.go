@@ -177,6 +177,46 @@ func buildAnnounceMessage(currentVersion, newTag, body string, hasPlatformAsset 
 	return header + "\n\n" + body + "\n\n" + footer
 }
 
+// newUpdater constructs an updater that polls the default GitHub URL.
+// Pass version="dev" for local builds — Run will short-circuit and not
+// poll at all.
+func newUpdater(toot *Toot, chatID int64, currentVersion string) *updater {
+	return &updater{
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		releasesURL:    releasesURLDefault,
+		currentVersion: currentVersion,
+		toot:           toot,
+		chatID:         chatID,
+	}
+}
+
+// Run polls for updates until ctx is cancelled. No-op when the binary
+// was built without a version tag (currentVersion == "dev").
+func (u *updater) Run(ctx context.Context) {
+	if u.currentVersion == "dev" {
+		log.Printf("updater: version=dev, skipping poll loop")
+		return
+	}
+	log.Printf("updater: starting (interval=%s, initial=%s, repo=%s)",
+		updateCheckInterval, updateInitialDelay, u.releasesURL)
+	select {
+	case <-time.After(updateInitialDelay):
+	case <-ctx.Done():
+		return
+	}
+	u.checkOnce(ctx)
+	ticker := time.NewTicker(updateCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			u.checkOnce(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // trimRight strips trailing whitespace including blank lines.
 func trimRight(s string) string {
 	for len(s) > 0 {
