@@ -93,28 +93,6 @@ func (t *ttyBot) SendMessageHTML(ctx context.Context, chatID int64, text string)
 	return nil
 }
 
-// SendMessageWithButtons prints the message plus the inline-keyboard
-// labels and their callback data. Buttons aren't tappable in TTY mode;
-// to simulate a tap, type "/cb <callback_data>" as your next message
-// (handled by ttyBot.GetUpdates -> dispatch -> handleCallback path).
-func (t *ttyBot) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]telegram.InlineButton) error {
-	fmt.Printf("\n\033[1;36motto:\033[0m %s\n", text)
-	for _, row := range buttons {
-		for _, b := range row {
-			fmt.Printf("  [%s]  /cb %s\n", b.Text, b.CallbackData)
-		}
-	}
-	fmt.Println()
-	return nil
-}
-
-func (t *ttyBot) AnswerCallbackQuery(ctx context.Context, queryID, text string) error {
-	if text != "" {
-		fmt.Printf("\033[2m[ack: %s]\033[0m\n", text)
-	}
-	return nil
-}
-
 func (t *ttyBot) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
 	return nil, "", fmt.Errorf("tty mode: photo download not supported")
 }

@@ -24,13 +24,6 @@ func (f *fakeClient) SendMessageHTML(ctx context.Context, chatID int64, text str
 func (f *fakeClient) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
 	return nil, "", nil
 }
-func (f *fakeClient) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]InlineButton) error {
-	f.sent = append(f.sent, text)
-	return nil
-}
-func (f *fakeClient) AnswerCallbackQuery(ctx context.Context, queryID, text string) error {
-	return nil
-}
 
 func TestSendChunkedShortMessage(t *testing.T) {
 	f := &fakeClient{}

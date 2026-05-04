@@ -12,31 +12,14 @@ import (
 
 var downloadHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-// Update is the slice of a Telegram update Otto cares about. It carries
-// either a regular message (Text/PhotoIDs) or a button-tap (CallbackQueryID
-// non-empty) — never both.
+// Update is the slice of a Telegram update Otto cares about. It carries a
+// regular message (Text and/or PhotoIDs).
 type Update struct {
 	UpdateID int
 	ChatID   int64
 	UserID   int64
 	Text     string
 	PhotoIDs []string // largest-size photo file_id per photo, if any
-
-	// Set when this update is a tap on an inline-keyboard button.
-	CallbackQueryID   string
-	CallbackData      string
-	CallbackMessageID int // ID of the message that owned the keyboard
-}
-
-// IsCallback reports whether this update is an inline-keyboard button tap
-// rather than a normal message.
-func (u Update) IsCallback() bool { return u.CallbackQueryID != "" }
-
-// InlineButton is one cell in an inline keyboard. CallbackData is sent back
-// when the button is tapped (max 64 bytes per the Telegram Bot API).
-type InlineButton struct {
-	Text         string
-	CallbackData string
 }
 
 // BotClient is the surface of Telegram operations Otto needs. Defined as an
@@ -53,8 +36,6 @@ type BotClient interface {
 	// <pre>...</pre> render as monospace. Caller is responsible for
 	// escaping any literal <, >, & in the body via html.EscapeString.
 	SendMessageHTML(ctx context.Context, chatID int64, text string) error
-	SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]InlineButton) error
-	AnswerCallbackQuery(ctx context.Context, queryID, text string) error
 	DownloadFile(ctx context.Context, fileID string) ([]byte, string, error)
 }
 
@@ -105,31 +86,6 @@ func (c *realClient) SendMessageHTML(ctx context.Context, chatID int64, text str
 	return nil
 }
 
-func (c *realClient) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]InlineButton) error {
-	msg := tgbotapi.NewMessage(chatID, text)
-	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(buttons))
-	for _, row := range buttons {
-		cells := make([]tgbotapi.InlineKeyboardButton, 0, len(row))
-		for _, b := range row {
-			cells = append(cells, tgbotapi.NewInlineKeyboardButtonData(b.Text, b.CallbackData))
-		}
-		rows = append(rows, cells)
-	}
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
-	if _, err := c.api.Send(msg); err != nil {
-		return fmt.Errorf("telegram: send-with-buttons: %w", err)
-	}
-	return nil
-}
-
-func (c *realClient) AnswerCallbackQuery(ctx context.Context, queryID, text string) error {
-	cb := tgbotapi.NewCallback(queryID, text)
-	if _, err := c.api.Request(cb); err != nil {
-		return fmt.Errorf("telegram: answer callback: %w", err)
-	}
-	return nil
-}
-
 func (c *realClient) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
 	url, err := c.api.GetFileDirectURL(fileID)
 	if err != nil {
@@ -140,19 +96,6 @@ func (c *realClient) DownloadFile(ctx context.Context, fileID string) ([]byte, s
 
 func fromTGUpdate(u tgbotapi.Update) Update {
 	out := Update{UpdateID: u.UpdateID}
-	// Inline-keyboard taps come through as a CallbackQuery, not a Message.
-	if u.CallbackQuery != nil {
-		out.CallbackQueryID = u.CallbackQuery.ID
-		out.CallbackData = u.CallbackQuery.Data
-		if u.CallbackQuery.From != nil {
-			out.UserID = u.CallbackQuery.From.ID
-		}
-		if u.CallbackQuery.Message != nil {
-			out.ChatID = u.CallbackQuery.Message.Chat.ID
-			out.CallbackMessageID = u.CallbackQuery.Message.MessageID
-		}
-		return out
-	}
 	if u.Message == nil {
 		return out
 	}

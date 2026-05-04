@@ -18,11 +18,10 @@ import (
 )
 
 type fakeBot struct {
-	updates  [][]telegram.Update
-	idx      int
-	sent     []sentMsg
-	answered []string // queryIDs answered via AnswerCallbackQuery
-	mu       sync.Mutex
+	updates [][]telegram.Update
+	idx     int
+	sent    []sentMsg
+	mu      sync.Mutex
 	// betweenBatches is an optional pause inserted before returning the
 	// 2nd, 3rd, ... batch. Multi-batch tests use this to ensure each
 	// batch's async dispatches complete before the next batch arrives,
@@ -32,9 +31,8 @@ type fakeBot struct {
 }
 
 type sentMsg struct {
-	chatID  int64
-	text    string
-	buttons [][]telegram.InlineButton // populated only for SendMessageWithButtons
+	chatID int64
+	text   string
 }
 
 func (f *fakeBot) GetUpdates(ctx context.Context, offset int) ([]telegram.Update, error) {
@@ -65,20 +63,6 @@ func (f *fakeBot) SendMessageHTML(ctx context.Context, chatID int64, text string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, sentMsg{chatID: chatID, text: text})
-	return nil
-}
-
-func (f *fakeBot) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]telegram.InlineButton) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.sent = append(f.sent, sentMsg{chatID: chatID, text: text, buttons: buttons})
-	return nil
-}
-
-func (f *fakeBot) AnswerCallbackQuery(ctx context.Context, queryID, text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.answered = append(f.answered, queryID)
 	return nil
 }
 

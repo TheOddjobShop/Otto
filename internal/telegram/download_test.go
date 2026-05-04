@@ -24,12 +24,6 @@ func (f *fakeDownloader) SendMessageHTML(ctx context.Context, chatID int64, text
 func (f *fakeDownloader) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
 	return f.data, f.contentType, nil
 }
-func (f *fakeDownloader) SendMessageWithButtons(ctx context.Context, chatID int64, text string, buttons [][]InlineButton) error {
-	return nil
-}
-func (f *fakeDownloader) AnswerCallbackQuery(ctx context.Context, queryID, text string) error {
-	return nil
-}
 
 func TestDownloadPhotoToTemp(t *testing.T) {
 	f := &fakeDownloader{data: []byte("\x89PNG\x0D\x0A\x1A\x0A"), contentType: "image/png"}
