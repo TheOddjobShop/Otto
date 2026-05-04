@@ -326,41 +326,40 @@ func (h *handler) handleCallback(ctx context.Context, u telegram.Update) {
 	}
 }
 
-// surfaceDenials sends one inline-keyboard message per denied tool. Called
-// after each Claude turn — denials are typically empty (the skip-permissions
-// flag works), but when something slips through we want a tappable approval
-// rather than a wall of text telling the user to edit settings.json.
-//
-// originalPrompt is captured into the pending entry so a tap on Allow can
-// auto-replay without making the user re-send. Image attachments are not
-// preserved (their tempdir is cleaned up when the originating handleMessage
-// returns); image-message replays would need to re-download from Telegram.
-func (h *handler) surfaceDenials(ctx context.Context, chatID int64, originalPrompt string, denials []claude.PermissionDenial) {
+// surfaceDenials sends one plain-text message per unique denied-tool pattern
+// with copy-pasteable instructions for editing ~/.claude/settings.json.
+// Called after each Claude turn — denials are typically empty (the
+// skip-permissions flag works), but when something slips through we want
+// the user to know what to add and where.
+func (h *handler) surfaceDenials(ctx context.Context, chatID int64, _ string, denials []claude.PermissionDenial) {
 	seen := map[string]struct{}{}
 	for _, d := range denials {
-		pattern := permissions.PatternFor(d.ToolName)
+		pattern := patternForTool(d.ToolName)
 		if _, dup := seen[pattern]; dup {
 			continue
 		}
 		seen[pattern] = struct{}{}
-		id := h.pending.Add(permissions.Entry{
-			ToolName:  d.ToolName,
-			Pattern:   pattern,
-			ChatID:    chatID,
-			Prompt:    originalPrompt,
-			SessionID: h.session.ID(),
-		})
-		buttons := [][]telegram.InlineButton{{
-			{Text: "✅ Once", CallbackData: callbackPrefixPerm + id + ":once"},
-			{Text: "✅ Always", CallbackData: callbackPrefixPerm + id + ":always"},
-			{Text: "❌ Skip", CallbackData: callbackPrefixPerm + id + ":deny"},
-		}}
-		text := fmt.Sprintf("⚠️ Claude tried `%s` and was denied.\n\n• *Once* — allow this retry only\n• *Always* — save `%s` to settings and retry\n• *Skip* — do nothing",
-			d.ToolName, pattern)
-		if err := h.bot.SendMessageWithButtons(ctx, chatID, text, buttons); err != nil {
-			log.Printf("send error (denial buttons): %v", err)
+		text := fmt.Sprintf(
+			"⚠️ Claude tried to use %s and was denied.\n\nTo allow it next time, add %s to permissions.allow in ~/.claude/settings.json, then /restart.",
+			d.ToolName, pattern,
+		)
+		if err := telegram.SendChunked(ctx, h.bot, chatID, text); err != nil {
+			log.Printf("send error (denial text): %v", err)
 		}
 	}
+}
+
+// patternForTool turns a tool name into a permission pattern suitable for
+// settings.json's permissions.allow array. MCP tools become a wildcard
+// over the whole server family; built-in tool names are returned verbatim.
+func patternForTool(toolName string) string {
+	if strings.HasPrefix(toolName, "mcp__") {
+		rest := strings.TrimPrefix(toolName, "mcp__")
+		if i := strings.LastIndex(rest, "__"); i > 0 {
+			return "mcp__" + rest[:i] + "__*"
+		}
+	}
+	return toolName
 }
 
 // handleMessage runs an Otto turn. Caller must have already acquired the

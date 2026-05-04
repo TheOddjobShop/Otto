@@ -299,46 +299,34 @@ func (f *fakeBotWithDownload) DownloadFile(ctx context.Context, fileID string) (
 	return f.files[fileID], f.cts[fileID], nil
 }
 
-func TestHandlerSurfacesPermissionDenialButtons(t *testing.T) {
-	bot := &fakeBot{
-		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "check email"}}},
-	}
-	runner := &fakeRunner{
-		respond: "I tried but got blocked",
-		resultEv: &claude.ResultEvent{
-			Subtype: "success",
-			PermissionDenials: []claude.PermissionDenial{
-				{ToolName: "mcp__gmail-personal__search_emails", ToolUseID: "tu_abc"},
-			},
-		},
-	}
-	h := newTestHandler(t, bot, runner)
+func TestSurfaceDenialsAsPlainText(t *testing.T) {
+	bot := &fakeBot{}
+	// surfaceDenials only touches h.bot — no need to wire other fields.
+	h := &handler{bot: bot}
 
-	runForBriefWindow(t, h)
+	denials := []claude.PermissionDenial{
+		{ToolName: "mcp__gmail-personal__send_message", ToolUseID: "tu_1"},
+		{ToolName: "mcp__gmail-personal__search_emails", ToolUseID: "tu_2"},
+		{ToolName: "Bash", ToolUseID: "tu_3"},
+	}
+	h.surfaceDenials(context.Background(), 999, "send a test email", denials)
 
-	// Expect ≥2 sends: the assistant text reply, then the buttons prompt.
-	if len(bot.sent) < 2 {
-		t.Fatalf("expected ≥2 sends, got %d", len(bot.sent))
+	// Both gmail tools share the wildcard pattern, so we expect one message
+	// for the family + one for Bash = 2 messages total.
+	if len(bot.sent) != 2 {
+		t.Fatalf("got %d messages, want 2", len(bot.sent))
 	}
-	// The button message should be the last one and have a non-nil keyboard.
-	last := bot.sent[len(bot.sent)-1]
-	if last.buttons == nil {
-		t.Fatalf("last message had no buttons; sent = %+v", bot.sent)
+	want0 := "mcp__gmail-personal__*"
+	want1 := "Bash"
+	if !strings.Contains(bot.sent[0].text, want0) {
+		t.Errorf("msg 0 missing pattern %q: %q", want0, bot.sent[0].text)
 	}
-	if !strings.Contains(last.text, "mcp__gmail-personal__search_emails") {
-		t.Errorf("denial text doesn't name the tool: %q", last.text)
+	if !strings.Contains(bot.sent[1].text, want1) {
+		t.Errorf("msg 1 missing pattern %q: %q", want1, bot.sent[1].text)
 	}
-	// One row, three buttons: Once / Always / Skip.
-	if len(last.buttons) != 1 || len(last.buttons[0]) != 3 {
-		t.Fatalf("buttons shape = %v, want 1 row of 3", last.buttons)
-	}
-	for i, want := range []string{":once", ":always", ":deny"} {
-		got := last.buttons[0][i].CallbackData
-		if !strings.HasSuffix(got, want) {
-			t.Errorf("button[%d] callback = %q, want suffix %q", i, got, want)
-		}
-		if !strings.HasPrefix(got, "perm:") {
-			t.Errorf("button[%d] callback = %q, want perm: prefix", i, got)
+	for _, m := range bot.sent {
+		if !strings.Contains(m.text, "permissions.allow") {
+			t.Errorf("msg missing settings.json hint: %q", m.text)
 		}
 	}
 }
