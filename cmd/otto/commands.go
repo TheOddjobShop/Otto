@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"runtime"
 	"strings"
 	"time"
@@ -68,6 +69,8 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 			reply:   fmt.Sprintf("version=%s os=%s/%s", version, runtime.GOOS, runtime.GOARCH),
 			handled: true,
 		}
+	case "/update":
+		return h.handleUpdateCommand()
 	case "/status":
 		sid := h.session.ID()
 		if sid == "" {
@@ -95,4 +98,56 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		}
 	}
 	return commandResult{}
+}
+
+// handleUpdateCommand returns the synchronous reply for /update and,
+// when an install is actually available, kicks off the install +
+// shutdown sequence in a goroutine. The goroutine outlives this call.
+func (h *handler) handleUpdateCommand() commandResult {
+	if h.updater == nil {
+		return commandResult{reply: "Updater not initialized.", handled: true}
+	}
+	p := h.updater.Pending()
+	if p == nil {
+		return commandResult{
+			reply:   fmt.Sprintf("No update available. You're on %s.", h.updater.currentVersion),
+			handled: true,
+		}
+	}
+
+	h.otto.mu.Lock()
+	busy := h.otto.busy
+	inflight := h.otto.currentPrompt
+	h.otto.mu.Unlock()
+
+	reply := fmt.Sprintf(
+		"Starting update to %s for %s/%s…",
+		p.Tag, runtime.GOOS, runtime.GOARCH,
+	)
+	if busy {
+		preview := inflight
+		if len(preview) > 60 {
+			preview = preview[:60] + "…"
+		}
+		reply += fmt.Sprintf(" (Otto is mid-task on %q — that work will be interrupted.)", preview)
+	}
+
+	go h.runUpdate()
+	return commandResult{reply: reply, handled: true}
+}
+
+// runUpdate is the side-effect goroutine spawned by /update. Reports
+// failures back to the user; on success, sends a confirmation and
+// exits the process.
+func (h *handler) runUpdate() {
+	ctx := context.Background()
+	chatID := h.updater.chatID
+	if err := h.updater.Install(ctx); err != nil {
+		msg := fmt.Sprintf("⚠️ Update failed: %v", err)
+		if sendErr := telegram.SendChunked(ctx, h.bot, chatID, msg); sendErr != nil {
+			log.Printf("update: send failure msg: %v", sendErr)
+		}
+		return
+	}
+	h.updater.Exit()
 }
