@@ -9,8 +9,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -63,6 +66,12 @@ type updater struct {
 	mu            sync.Mutex
 	pending       *pendingUpdate
 	lastAnnounced string
+
+	// Hooks for testing — production callers leave these at zero values
+	// (nil), which means use defaults: os.Executable + filepath.EvalSymlinks
+	// for exePath, and syscall.Kill(SIGTERM) for exitFunc.
+	exePath  func() (string, error)
+	exitFunc func()
 }
 
 // fetchLatest hits the releases/latest endpoint and parses the response.
@@ -228,4 +237,92 @@ func trimRight(s string) string {
 		break
 	}
 	return s
+}
+
+// Install downloads the pending update and atomically replaces the
+// running binary. The exit hook is NOT called from Install — callers
+// (the /update command) invoke it after Install returns successfully
+// so the post-install message lands first.
+//
+// Returns an error if there's no pending update, the download fails,
+// or the binary swap fails. On any error, the original binary is left
+// intact.
+func (u *updater) Install(ctx context.Context) error {
+	u.mu.Lock()
+	p := u.pending
+	u.mu.Unlock()
+	if p == nil {
+		return fmt.Errorf("install: no pending update")
+	}
+
+	body, err := u.download(ctx, p.AssetURL)
+	if err != nil {
+		return fmt.Errorf("install: download: %w", err)
+	}
+	if len(body) == 0 {
+		return fmt.Errorf("install: empty asset")
+	}
+
+	exe, err := u.resolveExePath()
+	if err != nil {
+		return fmt.Errorf("install: resolve binary path: %w", err)
+	}
+
+	tmp := exe + ".new"
+	if err := os.WriteFile(tmp, body, 0755); err != nil {
+		return fmt.Errorf("install: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, exe); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("install: rename %s -> %s: %w", tmp, exe, err)
+	}
+
+	msg := fmt.Sprintf("Installed %s. Restarting…", p.Tag)
+	if sendErr := u.toot.Send(ctx, u.chatID, msg); sendErr != nil {
+		log.Printf("install: toot send confirm: %v", sendErr)
+	}
+	return nil
+}
+
+// download fetches a binary asset into memory. 5-minute timeout. The
+// 100MB cap is paranoia — Otto binaries are ~10MB.
+func (u *updater) download(ctx context.Context, url string) ([]byte, error) {
+	dlCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 100*1024*1024))
+}
+
+// resolveExePath returns the absolute, symlink-resolved path of the
+// current process's binary, or whatever the test hook returns.
+func (u *updater) resolveExePath() (string, error) {
+	if u.exePath != nil {
+		return u.exePath()
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(exe)
+}
+
+// Exit triggers a clean process shutdown via SIGTERM (or the test hook).
+// systemd's Restart=always brings Otto back on the new binary.
+func (u *updater) Exit() {
+	if u.exitFunc != nil {
+		u.exitFunc()
+		return
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
 }

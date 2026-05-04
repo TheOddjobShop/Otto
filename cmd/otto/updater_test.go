@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -292,5 +294,90 @@ func TestBuildAnnounceMessage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInstallSuccess(t *testing.T) {
+	// Asset server: returns a small binary blob.
+	binaryContents := []byte("#!/bin/sh\necho hello\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(binaryContents)
+	}))
+	defer server.Close()
+
+	// Stand-in for os.Executable() — point at a temp file we can inspect.
+	tmpDir := t.TempDir()
+	exePath := filepath.Join(tmpDir, "otto")
+	if err := os.WriteFile(exePath, []byte("OLD"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	bot := &fakeBot{}
+	u := &updater{
+		httpClient:     server.Client(),
+		toot:           newToot(bot),
+		chatID:         42,
+		currentVersion: "v1.0.0",
+		exePath:        func() (string, error) { return exePath, nil },
+		exitFunc:       func() {},
+	}
+	u.pending = &pendingUpdate{
+		Tag:       "v1.0.1",
+		AssetName: "otto-test",
+		AssetURL:  server.URL,
+	}
+
+	if err := u.Install(context.Background()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(binaryContents) {
+		t.Errorf("binary not swapped: got %q, want %q", got, binaryContents)
+	}
+
+	// Toot delivered one "Installed" confirmation.
+	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].text, "v1.0.1") {
+		t.Errorf("messages=%v", bot.sent)
+	}
+}
+
+func TestInstallNoPending(t *testing.T) {
+	u := &updater{}
+	err := u.Install(context.Background())
+	if err == nil {
+		t.Fatal("expected error when no pending update")
+	}
+}
+
+func TestInstallDownloadFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gone", http.StatusGone)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	exePath := filepath.Join(tmpDir, "otto")
+	os.WriteFile(exePath, []byte("OLD"), 0755)
+
+	u := &updater{
+		httpClient: server.Client(),
+		toot:       newToot(&fakeBot{}),
+		exePath:    func() (string, error) { return exePath, nil },
+		exitFunc:   func() {},
+	}
+	u.pending = &pendingUpdate{Tag: "v1.0.1", AssetURL: server.URL}
+
+	err := u.Install(context.Background())
+	if err == nil {
+		t.Fatal("expected download error")
+	}
+	// Original binary must be untouched.
+	got, _ := os.ReadFile(exePath)
+	if string(got) != "OLD" {
+		t.Errorf("original clobbered on failure: %q", got)
 	}
 }
