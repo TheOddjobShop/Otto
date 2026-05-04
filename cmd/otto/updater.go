@@ -138,6 +138,9 @@ func (u *updater) checkOnce(ctx context.Context) {
 	} else {
 		u.pending = nil
 	}
+	// Record lastAnnounced BEFORE Send: a flaky network shouldn't make us
+	// re-announce the same version every hour. Cost is one missed
+	// announcement (logged) until a newer tag ships.
 	u.lastAnnounced = rel.TagName
 	u.mu.Unlock()
 

@@ -206,3 +206,91 @@ func TestCheckOnceSkipsMissingPlatformAsset(t *testing.T) {
 		t.Error("Pending() should be nil when no asset matches platform")
 	}
 }
+
+func TestCheckOnceFetchError(t *testing.T) {
+	// Server returns 500 → fetchLatest errors → checkOnce logs and returns
+	// silently. No message, no Pending, no lastAnnounced state set (so a
+	// later successful tick still announces).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	bot := &fakeBot{}
+	u := &updater{
+		httpClient:     server.Client(),
+		releasesURL:    server.URL,
+		currentVersion: "v1.0.0",
+		toot:           newToot(bot),
+		chatID:         42,
+	}
+
+	u.checkOnce(context.Background())
+
+	if len(bot.sent) != 0 {
+		t.Errorf("got %d messages on fetch error, want 0", len(bot.sent))
+	}
+	if u.Pending() != nil {
+		t.Error("Pending() should be nil on fetch error")
+	}
+	if u.lastAnnounced != "" {
+		t.Errorf("lastAnnounced=%q on fetch error, want empty (so later success can announce)", u.lastAnnounced)
+	}
+}
+
+func TestBuildAnnounceMessage(t *testing.T) {
+	cases := []struct {
+		name             string
+		current, newTag  string
+		body             string
+		hasPlatformAsset bool
+		wantContains     []string
+		wantNotContains  []string
+	}{
+		{
+			name:    "with body and matching platform",
+			current: "v1.0.0", newTag: "v1.0.1",
+			body:             "What's Changed\n* Add /update",
+			hasPlatformAsset: true,
+			wantContains:     []string{"v1.0.0 → v1.0.1", "What's Changed", "* Add /update", "Reply /update to install."},
+		},
+		{
+			name:    "empty body collapses to no double-blank",
+			current: "v1.0.0", newTag: "v1.0.1",
+			body:             "",
+			hasPlatformAsset: true,
+			wantContains:     []string{"v1.0.0 → v1.0.1\n\nReply /update to install."},
+			wantNotContains:  []string{"\n\n\n"},
+		},
+		{
+			name:    "trailing whitespace in body is trimmed",
+			current: "v1.0.0", newTag: "v1.0.1",
+			body:             "Notes here\n\n   \t\n",
+			hasPlatformAsset: true,
+			wantContains:     []string{"Notes here\n\nReply /update to install."},
+			wantNotContains:  []string{"   \t\n\n\nReply"},
+		},
+		{
+			name:    "missing-platform footer mentions GOOS/GOARCH",
+			current: "v1.0.0", newTag: "v1.0.1",
+			body:             "",
+			hasPlatformAsset: false,
+			wantContains:     []string{runtime.GOOS, runtime.GOARCH, "Build manually"},
+			wantNotContains:  []string{"Reply /update"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := buildAnnounceMessage(c.current, c.newTag, c.body, c.hasPlatformAsset)
+			for _, want := range c.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q in:\n%s", want, got)
+				}
+			}
+			for _, unwant := range c.wantNotContains {
+				if strings.Contains(got, unwant) {
+					t.Errorf("unexpected %q in:\n%s", unwant, got)
+				}
+			}
+		})
+	}
+}
