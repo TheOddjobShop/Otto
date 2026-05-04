@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,12 @@ import (
 	"syscall"
 	"time"
 )
+
+// errInstallInProgress is returned by Install when another install is
+// already running on this updater. Callers (e.g. the /update command)
+// can use it to surface a "busy" message instead of double-swapping
+// the binary.
+var errInstallInProgress = errors.New("install: already in progress")
 
 const (
 	updateCheckInterval = 1 * time.Hour
@@ -66,6 +73,7 @@ type updater struct {
 	mu            sync.Mutex
 	pending       *pendingUpdate
 	lastAnnounced string
+	installing    bool
 
 	// Hooks for testing — production callers leave these at zero values
 	// (nil), which means use defaults: os.Executable + filepath.EvalSymlinks
@@ -249,11 +257,22 @@ func trimRight(s string) string {
 // intact.
 func (u *updater) Install(ctx context.Context) error {
 	u.mu.Lock()
+	if u.installing {
+		u.mu.Unlock()
+		return errInstallInProgress
+	}
 	p := u.pending
-	u.mu.Unlock()
 	if p == nil {
+		u.mu.Unlock()
 		return fmt.Errorf("install: no pending update")
 	}
+	u.installing = true
+	u.mu.Unlock()
+	defer func() {
+		u.mu.Lock()
+		u.installing = false
+		u.mu.Unlock()
+	}()
 
 	body, err := u.download(ctx, p.AssetURL)
 	if err != nil {
@@ -268,6 +287,8 @@ func (u *updater) Install(ctx context.Context) error {
 		return fmt.Errorf("install: resolve binary path: %w", err)
 	}
 
+	// tmp lives in the same directory as exe so os.Rename is atomic
+	// (same filesystem). Don't move this to /tmp without revisiting.
 	tmp := exe + ".new"
 	if err := os.WriteFile(tmp, body, 0755); err != nil {
 		return fmt.Errorf("install: write %s: %w", tmp, err)
@@ -276,6 +297,14 @@ func (u *updater) Install(ctx context.Context) error {
 		os.Remove(tmp)
 		return fmt.Errorf("install: rename %s -> %s: %w", tmp, exe, err)
 	}
+
+	// Clear pending so a stuck Exit (or a deferred restart) can't
+	// re-install the same version. Note: the running process keeps
+	// executing the OLD code from memory until Exit triggers shutdown
+	// and systemd brings up the new binary.
+	u.mu.Lock()
+	u.pending = nil
+	u.mu.Unlock()
 
 	msg := fmt.Sprintf("Installed %s. Restarting…", p.Tag)
 	if sendErr := u.toot.Send(ctx, u.chatID, msg); sendErr != nil {

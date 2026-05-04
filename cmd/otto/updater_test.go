@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAssetForPlatform(t *testing.T) {
@@ -379,5 +381,67 @@ func TestInstallDownloadFailure(t *testing.T) {
 	got, _ := os.ReadFile(exePath)
 	if string(got) != "OLD" {
 		t.Errorf("original clobbered on failure: %q", got)
+	}
+}
+
+func TestInstallConcurrentReturnsBusy(t *testing.T) {
+	// First install holds the installing flag while a second one tries.
+	// The second must return errInstallInProgress and leave the binary alone.
+	gate := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-gate // block until the test releases
+		w.Write([]byte("NEW"))
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	exePath := filepath.Join(tmpDir, "otto")
+	if err := os.WriteFile(exePath, []byte("OLD"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	bot := &fakeBot{}
+	u := &updater{
+		httpClient: server.Client(),
+		toot:       newToot(bot),
+		chatID:     42,
+		exePath:    func() (string, error) { return exePath, nil },
+		exitFunc:   func() {},
+	}
+	u.pending = &pendingUpdate{Tag: "v1.0.1", AssetURL: server.URL}
+
+	// First install runs in background, blocked on the gate.
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- u.Install(context.Background()) }()
+
+	// Wait until the first install has the installing flag set.
+	deadline := time.Now().Add(time.Second)
+	for {
+		u.mu.Lock()
+		busy := u.installing
+		u.mu.Unlock()
+		if busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first install did not flip installing flag in time")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Second install must short-circuit with errInstallInProgress.
+	if err := u.Install(context.Background()); !errors.Is(err, errInstallInProgress) {
+		t.Errorf("second install: err=%v, want errInstallInProgress", err)
+	}
+
+	// Release the gate so the first install can finish.
+	close(gate)
+	if err := <-firstDone; err != nil {
+		t.Errorf("first install: %v", err)
+	}
+
+	// Pending should be cleared by the successful first install.
+	if u.Pending() != nil {
+		t.Error("Pending() should be nil after successful install")
 	}
 }
