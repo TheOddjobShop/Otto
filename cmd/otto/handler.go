@@ -17,8 +17,6 @@ import (
 	"otto/internal/telegram"
 )
 
-const callbackPrefixPerm = "perm:"
-
 const (
 	pollErrorBaseBackoff = time.Second
 	pollErrorMaxBackoff  = time.Minute
@@ -223,10 +221,6 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 		log.Printf("dropping message from non-allowlisted user %d", u.UserID)
 		return
 	}
-	if u.IsCallback() {
-		h.handleCallback(ctx, u)
-		return
-	}
 	if strings.TrimSpace(u.Text) == "" && len(u.PhotoIDs) == 0 {
 		return
 	}
@@ -263,67 +257,6 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-// handleCallback processes an inline-keyboard button tap. Currently only
-// "perm:<id>:<once|always|deny>" callbacks (from the permission-denial flow)
-// are recognized; anything else just dismisses the loading spinner.
-//
-// Replays acquire the Otto slot via blocking acquire — taps that arrive
-// while Otto is mid-call queue behind it (preserving the pre-Toto
-// serialization semantics for permission button taps specifically).
-func (h *handler) handleCallback(ctx context.Context, u telegram.Update) {
-	if !strings.HasPrefix(u.CallbackData, callbackPrefixPerm) {
-		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "")
-		return
-	}
-	rest := strings.TrimPrefix(u.CallbackData, callbackPrefixPerm)
-	parts := strings.SplitN(rest, ":", 2)
-	if len(parts) != 2 {
-		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "Bad callback")
-		return
-	}
-	id, action := parts[0], parts[1]
-	entry, ok := h.pending.Take(id)
-	if !ok {
-		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "Already handled or expired")
-		return
-	}
-	switch action {
-	case "once", "always":
-		if action == "always" {
-			if err := permissions.AllowTool(h.settingsPath, entry.Pattern); err != nil {
-				log.Printf("permissions: allow %q: %v", entry.Pattern, err)
-				_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "Failed to write settings")
-				_ = h.bot.SendMessage(ctx, u.ChatID, fmt.Sprintf("⚠️ Could not save permission: %v", err))
-				return
-			}
-		}
-		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "Replaying…")
-		if err := h.otto.acquire(ctx, entry.Prompt); err != nil {
-			log.Printf("callback acquire: %v", err)
-			return
-		}
-		defer h.otto.release()
-
-		callCtx, cancel := context.WithCancel(ctx)
-		h.otto.setCancel(cancel)
-		defer cancel()
-
-		done := make(chan struct{})
-		defer close(done)
-		go h.runWatchdog(ctx, entry.ChatID, done)
-
-		h.runAndReply(callCtx, ctx, entry.ChatID, claude.RunArgs{
-			Prompt:       entry.Prompt,
-			SessionID:    h.session.ID(),
-			AllowedTools: []string{entry.Pattern},
-		})
-	case "deny":
-		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "Skipped")
-	default:
-		_ = h.bot.AnswerCallbackQuery(ctx, u.CallbackQueryID, "Unknown action")
-	}
 }
 
 // surfaceDenials sends one plain-text message per unique denied-tool pattern
