@@ -22,6 +22,11 @@ import (
 	"otto/internal/telegram"
 )
 
+// version is the build-time version string. Overridden via
+// -ldflags "-X main.version=v1.2.3" in CI release builds; "dev" for
+// local builds. The updater skips polling entirely when version == "dev".
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", defaultConfigPath(), "path to config.toml")
 	ttyMode := flag.Bool("tty", false, "test mode: read messages from stdin, write replies to stdout (no Telegram)")

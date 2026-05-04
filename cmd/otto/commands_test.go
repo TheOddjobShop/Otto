@@ -6,6 +6,8 @@
 package main
 
 import (
+	"context"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -67,5 +69,19 @@ func TestCommandStatus(t *testing.T) {
 	}
 	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].text, "uptime") {
 		t.Errorf("sent = %+v", bot.sent)
+	}
+}
+
+func TestVersionCommand(t *testing.T) {
+	h := &handler{}
+	got := h.tryCommand(context.Background(), telegram.Update{Text: "/version"})
+	if !got.handled {
+		t.Fatal("expected /version to be handled")
+	}
+	if !strings.Contains(got.reply, "version=") {
+		t.Errorf("reply missing version=: %q", got.reply)
+	}
+	if !strings.Contains(got.reply, runtime.GOOS) {
+		t.Errorf("reply missing GOOS=%s: %q", runtime.GOOS, got.reply)
 	}
 }

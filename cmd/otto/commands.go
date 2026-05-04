@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -60,6 +61,11 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		}
 		return commandResult{
 			reply:   fmt.Sprintf("🛑 Interrupted Otto. He was on: %q\nSession is preserved — re-send if you want him to resume.", preview),
+			handled: true,
+		}
+	case "/version":
+		return commandResult{
+			reply:   fmt.Sprintf("version=%s os=%s/%s", version, runtime.GOOS, runtime.GOARCH),
 			handled: true,
 		}
 	case "/status":
