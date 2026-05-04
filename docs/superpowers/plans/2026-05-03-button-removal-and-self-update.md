@@ -6,7 +6,7 @@
 
 **Architecture:**
 - **Part A (removal):** Strip out the `internal/permissions/` package, the callback dispatch path, the inline-button surface from the telegram package, and the corresponding fields/imports throughout `cmd/otto/`. Replace permission-denial UX with a plain-text instructional message.
-- **Part B (self-update):** Add a `version` constant set at build time via `-ldflags`. New `cmd/otto/updater.go` runs a goroutine that polls `https://api.github.com/repos/TheOddjobShop/Otto/releases/latest` hourly, notifies the allowlisted user on a new tag, and tracks pending install state. `/update` slash command downloads the platform-matched binary, atomically swaps `os.Executable()`, and SIGTERMs self so systemd restarts on the new binary.
+- **Part B (self-update):** Add a `version` constant set at build time via `-ldflags`. New `cmd/otto/updater.go` runs a goroutine that polls `https://api.github.com/repos/TheOddjobShop/Otto/releases/latest` hourly. Update notifications are delivered by **Toot**, a new owl character (`cmd/otto/toot.go`) — analogous to Toto but with no LLM, just static one-way messages with random owl ASCII art prepended via `<pre>` + `SendMessageHTML`. Toot owns the periodic "v1.x available" announcement (with auto-generated patch notes from the GitHub release body) and the "Installed v1.x, restarting…" confirmation. The conversational lane (the synchronous `/update` reply, failure messages) stays on the regular bot. `/update` slash command downloads the platform-matched binary, atomically swaps `os.Executable()`, and SIGTERMs self so systemd restarts on the new binary.
 
 **Tech Stack:** Go 1.26, `BurntSushi/toml`, `go-telegram-bot-api/v5`, GitHub Actions for cross-compilation. No new dependencies.
 
@@ -29,12 +29,15 @@
 - `setup.sh` — stop writing `claude_settings_path` line in generated `config.toml`
 
 **Part B — files created or modified:**
-- `cmd/otto/main.go` — add `var version = "dev"`, construct + start updater goroutine
+- `cmd/otto/main.go` — add `var version = "dev"`, construct Toot + updater, start updater goroutine
 - `cmd/otto/commands.go` — add `/update` and `/version` cases
 - `cmd/otto/commands_test.go` — tests for `/update` and `/version`
 - `cmd/otto/handler.go` — add `updater *updater` field
-- `cmd/otto/updater.go` — NEW: poller, state, install logic
+- `cmd/otto/updater.go` — NEW: poller, state, install logic; routes notifications through Toot
 - `cmd/otto/updater_test.go` — NEW: tests for asset matching, fetch, dedup, install
+- `cmd/otto/toot.go` — NEW: Toot owl character (one-way notification courier)
+- `cmd/otto/toot_test.go` — NEW: tests for owl-art rendering and HTML escaping
+- `toot.txt` — already authored at repo root; embedded into the binary via `//go:embed`
 - `Makefile` — add `VERSION ?= dev` and pass via `-ldflags`
 - `.github/workflows/release.yml` — NEW: cross-compile + release on `v*` tag
 
@@ -740,6 +743,169 @@ git commit -m "add releaseAsset type and assetForPlatform matcher"
 
 ---
 
+### Task B2.5: Create Toot character (owl notification courier)
+
+**Files:**
+- Create: `cmd/otto/toot.go`
+- Create: `cmd/otto/toot_test.go`
+- Move + commit: `toot.txt` (currently untracked at repo root) — the `//go:embed toot.txt` directive in `cmd/otto/toot.go` resolves relative to the source file, so the file must live at `cmd/otto/toot.txt`. Move it during this task.
+
+**Why this task exists:** Tasks B4-B7 thread a `*Toot` reference through the updater (it owns release announcements and install confirmations). Building Toot first lets later tasks inject it cleanly. Toot is a stripped-down sibling of Toto — same ASCII-art-prepended `<pre>` rendering pattern, but no LLM, no session, no persona. Just a one-way owl that delivers updates.
+
+- [ ] **Step 1: Move toot.txt next to the source file**
+
+```bash
+git mv toot.txt cmd/otto/toot.txt 2>/dev/null || mv toot.txt cmd/otto/toot.txt
+ls cmd/otto/toot.txt
+```
+
+(The `git mv` form fails silently if the file isn't tracked yet; the fallback `mv` handles that case. Either way `cmd/otto/toot.txt` should exist after this step.)
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `cmd/otto/toot_test.go`:
+
+```go
+//go:build unix
+
+package main
+
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+func TestTootSendIncludesArtAndBody(t *testing.T) {
+	bot := &fakeBot{}
+	toot := newToot(bot)
+	if err := toot.Send(context.Background(), 42, "v1.0.1 is out"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(bot.sent) != 1 {
+		t.Fatalf("got %d messages, want 1", len(bot.sent))
+	}
+	msg := bot.sent[0].text
+	if !strings.Contains(msg, "<pre>") {
+		t.Errorf("missing <pre> wrapper: %q", msg)
+	}
+	if !strings.Contains(msg, "v1.0.1 is out") {
+		t.Errorf("missing body: %q", msg)
+	}
+	// All three owl arts include "(o,o)" — verify one was selected.
+	if !strings.Contains(msg, "(o,o)") {
+		t.Errorf("missing owl signature: %q", msg)
+	}
+}
+
+func TestTootSendEscapesHTMLInBody(t *testing.T) {
+	bot := &fakeBot{}
+	toot := newToot(bot)
+	if err := toot.Send(context.Background(), 42, "<script>alert(1)</script>"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(bot.sent[0].text, "&lt;script&gt;") {
+		t.Errorf("expected HTML-escaped body, got %q", bot.sent[0].text)
+	}
+}
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+```bash
+go test ./cmd/otto/ -run TestToot -v
+```
+
+Expected: FAIL with "undefined: newToot" / "undefined: Toot".
+
+- [ ] **Step 4: Create `cmd/otto/toot.go`**
+
+```go
+//go:build unix
+
+package main
+
+import (
+	"context"
+	_ "embed"
+	"html"
+
+	"otto/internal/telegram"
+)
+
+// tootArtFile is the bundled owl ASCII-art file. Three blocks separated
+// by blank lines; same format the existing parseAsciiArts (in toto.go)
+// already handles for Toto's cats.
+//
+//go:embed toot.txt
+var tootArtFile string
+
+// tootCycler hands out the embedded owl arts in shuffled round-robin
+// order, so consecutive Toot messages don't repeat the same art.
+var tootCycler = newAsciiCycler(parseAsciiArts(tootArtFile))
+
+// pickTootArt returns the next owl art via the shuffled round-robin
+// cycler, or "" if no arts were loaded.
+func pickTootArt() string { return tootCycler.Next() }
+
+// Toot is the owl character that delivers update notifications. Unlike
+// Toto, Toot has no LLM and no session — it's a one-way courier. The
+// updater calls Send() with a fully-composed body (release announcement
+// or install confirmation); Toot prepends a random owl art via <pre>
+// tags in HTML mode and ships it.
+//
+// Conversational messages (command replies, error messages) stay on the
+// regular bot — Toot exists specifically to mark "this is an update
+// event" visually so the user knows what kind of message they're
+// reading.
+type Toot struct {
+	bot telegram.BotClient
+}
+
+func newToot(bot telegram.BotClient) *Toot {
+	return &Toot{bot: bot}
+}
+
+// Send delivers body with a random owl art prepended. The body is
+// HTML-escaped so any literal <, >, & survive Telegram's HTML parser.
+func (t *Toot) Send(ctx context.Context, chatID int64, body string) error {
+	art := pickTootArt()
+	escapedBody := html.EscapeString(body)
+	var msg string
+	if art != "" {
+		msg = "<pre>" + html.EscapeString(art) + "</pre>\n\n" + escapedBody
+	} else {
+		msg = escapedBody
+	}
+	return t.bot.SendMessageHTML(ctx, chatID, msg)
+}
+```
+
+- [ ] **Step 5: Run tests**
+
+```bash
+go test ./cmd/otto/ -run TestToot -v
+```
+
+Expected: both PASS.
+
+- [ ] **Step 6: Verify the embed picked up the file**
+
+```bash
+go build ./cmd/otto/ && echo "build OK"
+```
+
+Expected: `build OK`. If the embed fails (`pattern toot.txt: no matching files found`), confirm `cmd/otto/toot.txt` exists and re-run.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add cmd/otto/toot.go cmd/otto/toot_test.go cmd/otto/toot.txt
+git commit -m "add toot owl character for update notifications"
+```
+
+---
+
 ### Task B3: Implement `fetchLatest` against a `httptest` server
 
 **Files:**
@@ -764,6 +930,7 @@ func TestFetchLatest(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{
 			"tag_name": "v1.2.3",
+			"body": "What's Changed\n* Add /update (#1)\n* Fix denial UX (#2)",
 			"assets": [
 				{"name": "otto-linux-amd64", "browser_download_url": "https://x/otto-linux-amd64"},
 				{"name": "otto-darwin-arm64", "browser_download_url": "https://x/otto-darwin-arm64"}
@@ -782,6 +949,9 @@ func TestFetchLatest(t *testing.T) {
 	}
 	if rel.TagName != "v1.2.3" {
 		t.Errorf("TagName=%q, want v1.2.3", rel.TagName)
+	}
+	if !strings.Contains(rel.Body, "What's Changed") {
+		t.Errorf("Body missing patch notes: %q", rel.Body)
 	}
 	if len(rel.Assets) != 2 {
 		t.Fatalf("got %d assets, want 2", len(rel.Assets))
@@ -835,9 +1005,13 @@ const (
 	downloadTimeout     = 5 * time.Minute
 )
 
-// release is the slice of GitHub's release JSON we care about.
+// release is the slice of GitHub's release JSON we care about. Body
+// is the auto-generated changelog (when our workflow sets
+// generate_release_notes: true) and Toot includes it in the announcement
+// as patch notes for the user.
 type release struct {
 	TagName string         `json:"tag_name"`
+	Body    string         `json:"body"`
 	Assets  []releaseAsset `json:"assets"`
 }
 
@@ -850,18 +1024,17 @@ type pendingUpdate struct {
 }
 
 // updater polls GitHub Releases for new versions of Otto, notifies the
-// allowlisted user when one is detected, and applies it on /update.
+// allowlisted user via Toot when one is detected, and applies it on
+// /update.
 //
-// httpClient and releasesURL are exported (lowercase but settable from
-// the same package) so tests can substitute httptest servers.
+// httpClient and releasesURL are settable from the same package so
+// tests can substitute httptest servers.
 type updater struct {
 	httpClient     *http.Client
 	releasesURL    string
 	currentVersion string
-	bot            interface { // narrow interface for testability
-		SendMessage(ctx context.Context, chatID int64, text string) error
-	}
-	chatID int64
+	toot           *Toot
+	chatID         int64
 
 	mu            sync.Mutex
 	pending       *pendingUpdate
@@ -928,26 +1101,21 @@ Append to `cmd/otto/updater_test.go`:
 ```go
 import "runtime"
 
-type fakeUpdaterBot struct {
-	sent []string
-}
-
-func (f *fakeUpdaterBot) SendMessage(ctx context.Context, chatID int64, text string) error {
-	f.sent = append(f.sent, text)
-	return nil
-}
-
-func newTestUpdater(t *testing.T, releasesJSON string) (*updater, *fakeUpdaterBot, func()) {
+// newTestUpdater returns an updater whose Toot is wired to a fakeBot.
+// Callers read fakeBot.sent to inspect what Toot delivered. (Toot's
+// SendMessageHTML appends to the same .sent slice as plain SendMessage,
+// so test assertions just look at .sent[i].text.)
+func newTestUpdater(t *testing.T, releasesJSON string) (*updater, *fakeBot, func()) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, releasesJSON)
 	}))
-	bot := &fakeUpdaterBot{}
+	bot := &fakeBot{}
 	u := &updater{
 		httpClient:     server.Client(),
 		releasesURL:    server.URL,
 		currentVersion: "v1.0.0",
-		bot:            bot,
+		toot:           newToot(bot),
 		chatID:         42,
 	}
 	return u, bot, server.Close
@@ -956,6 +1124,7 @@ func newTestUpdater(t *testing.T, releasesJSON string) (*updater, *fakeUpdaterBo
 func TestCheckOnceAnnouncesNewRelease(t *testing.T) {
 	json := fmt.Sprintf(`{
 		"tag_name": "v1.0.1",
+		"body": "What's Changed\n* Add Toot (#3)",
 		"assets": [{"name": "otto-%s-%s", "browser_download_url": "https://x/asset"}]
 	}`, runtime.GOOS, runtime.GOARCH)
 	u, bot, cleanup := newTestUpdater(t, json)
@@ -966,11 +1135,21 @@ func TestCheckOnceAnnouncesNewRelease(t *testing.T) {
 	if len(bot.sent) != 1 {
 		t.Fatalf("got %d messages, want 1", len(bot.sent))
 	}
-	if !strings.Contains(bot.sent[0], "v1.0.1") {
-		t.Errorf("missing tag in message: %q", bot.sent[0])
+	msg := bot.sent[0].text
+	if !strings.Contains(msg, "v1.0.1") {
+		t.Errorf("missing tag in message: %q", msg)
 	}
-	if !strings.Contains(bot.sent[0], "/update") {
-		t.Errorf("missing /update hint: %q", bot.sent[0])
+	if !strings.Contains(msg, "/update") {
+		t.Errorf("missing /update hint: %q", msg)
+	}
+	if !strings.Contains(msg, "What&#39;s Changed") && !strings.Contains(msg, "Add Toot") {
+		// Body is HTML-escaped by Toot.Send. We accept either the escaped
+		// apostrophe or the unescaped tail as evidence that body was
+		// included.
+		t.Errorf("missing patch notes in message: %q", msg)
+	}
+	if !strings.Contains(msg, "<pre>") {
+		t.Errorf("missing owl <pre> wrapper (Toot didn't deliver?): %q", msg)
 	}
 
 	p := u.Pending()
@@ -1038,7 +1217,7 @@ func TestCheckOnceSkipsMissingPlatformAsset(t *testing.T) {
 }
 ```
 
-Add `"strings"` to the imports of `updater_test.go` if not already present.
+Add `"strings"` to the imports of `updater_test.go` if not already present. The `fakeBot` type is defined in `handler_test.go` (same package).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1060,7 +1239,7 @@ import (
 
 // checkOnce hits releases/latest and, if the latest tag differs from
 // both the current version and the previously-announced tag, sends a
-// notification message and records the pending install.
+// Toot announcement and records the pending install.
 //
 // If the release exists but has no asset for the current platform, we
 // still announce (so the user knows an update is out) but record no
@@ -1092,19 +1271,42 @@ func (u *updater) checkOnce(ctx context.Context) {
 	u.lastAnnounced = rel.TagName
 	u.mu.Unlock()
 
-	msg := fmt.Sprintf(
-		"Update available: %s → %s. Reply /update to install.",
-		u.currentVersion, rel.TagName,
-	)
-	if !ok {
-		msg = fmt.Sprintf(
-			"Update available: %s → %s, but no binary for %s/%s. Build manually or wait for the next release.",
-			u.currentVersion, rel.TagName, runtime.GOOS, runtime.GOARCH,
+	msg := buildAnnounceMessage(u.currentVersion, rel.TagName, rel.Body, ok)
+	if err := u.toot.Send(ctx, u.chatID, msg); err != nil {
+		log.Printf("updater: toot send: %v", err)
+	}
+}
+
+// buildAnnounceMessage composes Toot's announcement body. Patch notes
+// from the release are included verbatim when present; trailing
+// whitespace is trimmed so we don't leave a dangling blank line before
+// the "Reply /update" hint.
+func buildAnnounceMessage(currentVersion, newTag, body string, hasPlatformAsset bool) string {
+	header := fmt.Sprintf("%s → %s", currentVersion, newTag)
+	footer := "Reply /update to install."
+	if !hasPlatformAsset {
+		footer = fmt.Sprintf(
+			"No binary for %s/%s in this release. Build manually or wait for the next one.",
+			runtime.GOOS, runtime.GOARCH,
 		)
 	}
-	if err := u.bot.SendMessage(ctx, u.chatID, msg); err != nil {
-		log.Printf("updater: send: %v", err)
+	if body = trimRight(body); body == "" {
+		return header + "\n\n" + footer
 	}
+	return header + "\n\n" + body + "\n\n" + footer
+}
+
+// trimRight strips trailing whitespace including blank lines.
+func trimRight(s string) string {
+	for len(s) > 0 {
+		c := s[len(s)-1]
+		if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	return s
 }
 
 // Pending returns the current pending install, or nil if none.
@@ -1150,14 +1352,12 @@ Append to `cmd/otto/updater.go`:
 // newUpdater constructs an updater that polls the default GitHub URL.
 // Pass version="dev" for local builds — Run will short-circuit and not
 // poll at all.
-func newUpdater(bot interface {
-	SendMessage(ctx context.Context, chatID int64, text string) error
-}, chatID int64, currentVersion string) *updater {
+func newUpdater(toot *Toot, chatID int64, currentVersion string) *updater {
 	return &updater{
 		httpClient:     &http.Client{Timeout: 30 * time.Second},
 		releasesURL:    releasesURLDefault,
 		currentVersion: currentVersion,
-		bot:            bot,
+		toot:           toot,
 		chatID:         chatID,
 	}
 }
@@ -1205,11 +1405,12 @@ updater *updater
 In `cmd/otto/main.go`, after the `&handler{...}` literal is constructed and assigned to `h`, add:
 
 ```go
-h.updater = newUpdater(bot, cfg.TelegramAllowedUserID, version)
+toot := newToot(bot)
+h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
 go h.updater.Run(ctx)
 ```
 
-This goes between the handler construction and the signal-handler setup.
+This goes between the handler construction and the signal-handler setup. Toot is constructed locally — it doesn't need to be stored on the handler since only the updater calls it.
 
 - [ ] **Step 4: Build and run the existing test suite**
 
@@ -1259,10 +1460,10 @@ func TestInstallSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bot := &fakeUpdaterBot{}
+	bot := &fakeBot{}
 	u := &updater{
 		httpClient:     server.Client(),
-		bot:            bot,
+		toot:           newToot(bot),
 		chatID:         42,
 		currentVersion: "v1.0.0",
 		exePath:        func() (string, error) { return exePath, nil },
@@ -1286,8 +1487,8 @@ func TestInstallSuccess(t *testing.T) {
 		t.Errorf("binary not swapped: got %q, want %q", got, binaryContents)
 	}
 
-	// One "Installed" confirmation message should have been sent.
-	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0], "v1.0.1") {
+	// Toot delivered one "Installed" confirmation.
+	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].text, "v1.0.1") {
 		t.Errorf("messages=%v", bot.sent)
 	}
 }
@@ -1312,7 +1513,7 @@ func TestInstallDownloadFailure(t *testing.T) {
 
 	u := &updater{
 		httpClient: server.Client(),
-		bot:        &fakeUpdaterBot{},
+		toot:       newToot(&fakeBot{}),
 		exePath:    func() (string, error) { return exePath, nil },
 		exitFunc:   func() {},
 	}
@@ -1400,8 +1601,8 @@ func (u *updater) Install(ctx context.Context) error {
 	}
 
 	msg := fmt.Sprintf("Installed %s. Restarting…", p.Tag)
-	if sendErr := u.bot.SendMessage(ctx, u.chatID, msg); sendErr != nil {
-		log.Printf("install: send confirm: %v", sendErr)
+	if sendErr := u.toot.Send(ctx, u.chatID, msg); sendErr != nil {
+		log.Printf("install: toot send confirm: %v", sendErr)
 	}
 	return nil
 }
@@ -1502,16 +1703,16 @@ func TestUpdateCommandNoPending(t *testing.T) {
 
 // newPendingHandler is a shared helper for tests that exercise the
 // /update path with a real pending update. It wires both h.bot and
-// u.bot to the same fakeBot so the async goroutine spawned by /update
-// has a place to send its failure message (the AssetURL is bogus, so
-// the install will fail-fast on DNS, post one error message, and exit
-// without panicking).
+// u.toot (via newToot(bot)) to the same fakeBot so the async goroutine
+// spawned by /update has a place to send its failure message (the
+// AssetURL is bogus, so the install will fail-fast on DNS, post one
+// error message via h.bot, and exit without panicking).
 func newPendingHandler(t *testing.T) (*handler, *fakeBot) {
 	t.Helper()
 	bot := &fakeBot{}
 	u := &updater{
 		currentVersion: "v1.0.0",
-		bot:            bot,
+		toot:           newToot(bot),
 		chatID:         42,
 		exitFunc:       func() {}, // never actually exit during tests
 		exePath:        func() (string, error) { return "/tmp/otto-test-dummy", nil },
@@ -1813,7 +2014,8 @@ Coverage checked against spec:
 - **Migration** — Task A4 updates setup.sh and notes the silent TOML decode behavior
 - **Build/release pipeline** — Task B8 implements the workflow exactly as specified
 - **Version constant** — Task B1 adds `var version = "dev"` and Makefile ldflags
-- **Update poller** — Tasks B2-B5 build it incrementally with the constants from the spec
+- **Toot character** — Task B2.5 implements the owl notification courier; Tasks B4 and B6 route announcements + install confirmations through it
+- **Update poller** — Tasks B2-B5 build it incrementally with the constants from the spec; the announcement includes patch notes from the GitHub release body
 - **`/update` command** — Task B7 implements all four reply branches (no pending, no asset, idle, busy)
 - **`/version` command** — Task B1
 - **Platform support** — assetForPlatform tested in Task B2; the macOS no-relaunch case is documented in the spec, no code change needed
