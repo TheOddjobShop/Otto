@@ -14,7 +14,6 @@ import (
 
 	"otto/internal/auth"
 	"otto/internal/claude"
-	"otto/internal/permissions"
 	"otto/internal/telegram"
 )
 
@@ -132,7 +131,6 @@ func newTestHandler(t *testing.T, bot telegram.BotClient, runner claude.Runner) 
 		allow:        auth.New(99),
 		session:      sess,
 		runner:       runner,
-		pending:      permissions.New(8),
 		settingsPath: filepath.Join(dir, "settings.json"),
 		startedAt:    time.Now(),
 		otto:         newOttoState(),

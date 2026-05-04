@@ -19,7 +19,6 @@ import (
 	"otto/internal/auth"
 	"otto/internal/claude"
 	"otto/internal/config"
-	"otto/internal/permissions"
 	"otto/internal/telegram"
 )
 
@@ -97,7 +96,6 @@ func main() {
 		allow:        allow,
 		session:      session,
 		runner:       runner,
-		pending:      permissions.New(64),
 		settingsPath: settingsPath,
 		startedAt:    time.Now(),
 		otto:         newOttoState(),
@@ -142,7 +140,6 @@ func readTotoPersona(path string) (string, error) {
 	}
 	return strings.TrimRight(string(body), "\n"), nil
 }
-
 
 func defaultConfigPath() string {
 	home, err := os.UserHomeDir()

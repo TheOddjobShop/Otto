@@ -13,7 +13,6 @@ import (
 
 	"otto/internal/auth"
 	"otto/internal/claude"
-	"otto/internal/permissions"
 	"otto/internal/telegram"
 )
 
@@ -27,7 +26,6 @@ type handler struct {
 	allow        *auth.Allowlist
 	session      *claude.Session
 	runner       claude.Runner
-	pending      *permissions.Pending
 	settingsPath string
 	startedAt    time.Time
 
