@@ -86,19 +86,13 @@ func main() {
 		log.Fatalf("toto session: %v", err)
 	}
 
-	settingsPath := cfg.ClaudeSettingsPath
-	if settingsPath == "" {
-		settingsPath = home + "/.claude/settings.json"
-	}
-
 	h := &handler{
-		bot:          bot,
-		allow:        allow,
-		session:      session,
-		runner:       runner,
-		settingsPath: settingsPath,
-		startedAt:    time.Now(),
-		otto:         newOttoState(),
+		bot:       bot,
+		allow:     allow,
+		session:   session,
+		runner:    runner,
+		startedAt: time.Now(),
+		otto:      newOttoState(),
 		toto: &Toto{
 			bot:     bot,
 			runner:  totoRunner,

@@ -22,12 +22,11 @@ const (
 )
 
 type handler struct {
-	bot          telegram.BotClient
-	allow        *auth.Allowlist
-	session      *claude.Session
-	runner       claude.Runner
-	settingsPath string
-	startedAt    time.Time
+	bot       telegram.BotClient
+	allow     *auth.Allowlist
+	session   *claude.Session
+	runner    claude.Runner
+	startedAt time.Time
 
 	otto *ottoState
 	toto *Toto
@@ -49,10 +48,10 @@ func (h *handler) WaitDispatches() { h.dispatchWG.Wait() }
 // hangs and by Toto to give context-aware replies while Otto is busy).
 //
 // "Busy" is a single boolean under mu, not a sync.Mutex, because we need
-// non-blocking checks (so a fresh Telegram message can route to Toto
-// without waiting) and blocking waits (so a permission-button replay
-// queues behind any in-flight call). A waiter list signaled on release
-// supports the blocking case.
+// non-blocking checks (so a fresh Telegram message can route to Toto via
+// the dispatch busy-detect handoff, without waiting). A blocking acquire
+// with a waiter list is also supported but currently has no production
+// callers — kept for the slot-acquisition pattern.
 type ottoState struct {
 	mu            sync.Mutex
 	busy          bool
@@ -93,9 +92,10 @@ func (s *ottoState) tryAcquire(prompt string) bool {
 	return true
 }
 
-// acquire blocks until Otto is free or ctx is cancelled. Used by the
-// permission-button replay path so that taps queue behind an in-flight
-// Otto call (preserving the original h.mu serialization semantics).
+// acquire blocks until Otto is free or ctx is cancelled. No production
+// callers as of A3 (the permission-button replay path that used it has
+// been removed); kept for the slot-acquisition pattern.
+// TODO(A6): consider removing if still unused after Part A.
 func (s *ottoState) acquire(ctx context.Context, prompt string) error {
 	for {
 		s.mu.Lock()
@@ -333,11 +333,10 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 	})
 }
 
-// runAndReply runs claude with args, drains the event stream, captures the
-// session ID, sends replies, and surfaces any permission denials as inline-
-// keyboard buttons. Shared between handleMessage and the permission-button
-// replay path so both paths handle errors, ResultEvent failures, and follow-
-// up denials identically.
+// runAndReply drives a Claude subprocess: it streams args.Events, parses
+// assistant text / session ID / result events, sends the assistant reply
+// over Telegram, and surfaces any permission denials as plain-text
+// instructions for editing settings.json.
 //
 // Side effect: every event consumed bumps h.otto.lastEvent, which the
 // watchdog uses to detect hangs. If callCtx was cancelled by the watchdog,

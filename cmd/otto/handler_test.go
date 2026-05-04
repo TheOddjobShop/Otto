@@ -127,13 +127,12 @@ func newTestHandler(t *testing.T, bot telegram.BotClient, runner claude.Runner) 
 		t.Fatal(err)
 	}
 	return &handler{
-		bot:          bot,
-		allow:        auth.New(99),
-		session:      sess,
-		runner:       runner,
-		settingsPath: filepath.Join(dir, "settings.json"),
-		startedAt:    time.Now(),
-		otto:         newOttoState(),
+		bot:       bot,
+		allow:     auth.New(99),
+		session:   sess,
+		runner:    runner,
+		startedAt: time.Now(),
+		otto:      newOttoState(),
 		toto: &Toto{
 			bot:     bot,
 			runner:  runner,

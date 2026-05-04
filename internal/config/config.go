@@ -19,10 +19,6 @@ type Config struct {
 	// Claude Code's built-in system prompt via --append-system-prompt.
 	// Empty means no append (Claude Code's defaults stand alone).
 	SystemPromptPath string `toml:"system_prompt_path"`
-	// ClaudeSettingsPath is where Otto writes "allow always" rules from
-	// the inline-keyboard permission flow. Defaults to ~/.claude/settings.json
-	// when empty.
-	ClaudeSettingsPath string `toml:"claude_settings_path"`
 	// TotoSessionIDPath is where the secondary "Toto" persona persists its
 	// own conversation session ID. Toto is the lightweight cat-themed
 	// stand-in that replies while Otto is busy on a long-running task.
