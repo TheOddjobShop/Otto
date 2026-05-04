@@ -10,10 +10,10 @@ import (
 
 // rawMessage matches the subset of stream-json events we use.
 type rawMessage struct {
-	Type              string             `json:"type"`
-	Subtype           string             `json:"subtype"`
-	SessionID         string             `json:"session_id"`
-	Error             string             `json:"error"`
+	Type              string              `json:"type"`
+	Subtype           string              `json:"subtype"`
+	SessionID         string              `json:"session_id"`
+	Error             string              `json:"error"`
 	PermissionDenials []rawPermissionDeny `json:"permission_denials"`
 	Message           struct {
 		Content []struct {

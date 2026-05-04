@@ -28,7 +28,7 @@ func TestStripMarkdownItalic(t *testing.T) {
 		{"_italic_", "italic"},
 		{"do_not_strip", "do_not_strip"}, // identifier survives
 		{"2 * 3", "2 * 3"},               // math, not emphasis
-		{"*", "*"},                        // bare asterisk
+		{"*", "*"},                       // bare asterisk
 	}
 	for _, tc := range cases {
 		got := stripMarkdown(tc.in)

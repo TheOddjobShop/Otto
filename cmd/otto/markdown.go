@@ -10,10 +10,10 @@ import "regexp"
 // punctuation appears literally to the user. These regexes kill the
 // marker characters while leaving the surrounding prose intact.
 var (
-	mdBoldStarRe   = regexp.MustCompile(`\*\*([^*\n]+?)\*\*`)
+	mdBoldStarRe = regexp.MustCompile(`\*\*([^*\n]+?)\*\*`)
 	// __bold__ allows single underscores inside (e.g. __under_bold__) since
 	// `__` is the explicit bold delimiter; non-greedy, no newlines.
-	mdBoldUnderRe = regexp.MustCompile(`__(.+?)__`)
+	mdBoldUnderRe  = regexp.MustCompile(`__(.+?)__`)
 	mdItalStarRe   = regexp.MustCompile(`\*([A-Za-z0-9][^*\n]*?[A-Za-z0-9])\*`)
 	mdItalUnderRe  = regexp.MustCompile(`\b_([A-Za-z0-9][^_\n]*?[A-Za-z0-9])_\b`)
 	mdCodeRe       = regexp.MustCompile("`+([^`\n]+?)`+")

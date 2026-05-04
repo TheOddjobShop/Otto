@@ -231,4 +231,3 @@ func (t *Toto) send(ctx context.Context, chatID int64, body string) {
 		}
 	}
 }
-
