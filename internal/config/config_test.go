@@ -22,7 +22,6 @@ func TestLoadValid(t *testing.T) {
 	contents := fmt.Sprintf(`
 telegram_bot_token = "tg-token"
 telegram_allowed_user_id = 12345
-notion_api_key = "secret_test"
 claude_binary_path = %q
 mcp_config_path = %q
 session_id_path = "/tmp/otto-test-session"
@@ -49,7 +48,6 @@ func TestLoadMissingRequired(t *testing.T) {
 	// Missing telegram_bot_token.
 	contents := `
 telegram_allowed_user_id = 12345
-notion_api_key = "secret_test"
 claude_binary_path = "/usr/bin/claude"
 mcp_config_path = "/tmp/mcp.json"
 session_id_path = "/tmp/sid"
@@ -84,7 +82,6 @@ func TestLoadMissingClaudeBinary(t *testing.T) {
 	contents := fmt.Sprintf(`
 telegram_bot_token = "tg-token"
 telegram_allowed_user_id = 12345
-notion_api_key = "secret_test"
 claude_binary_path = %q
 mcp_config_path = %q
 session_id_path = "/tmp/otto-test-session"
@@ -113,7 +110,6 @@ func TestLoadMissingMCPConfig(t *testing.T) {
 	contents := fmt.Sprintf(`
 telegram_bot_token = "tg-token"
 telegram_allowed_user_id = 12345
-notion_api_key = "secret_test"
 claude_binary_path = %q
 mcp_config_path = %q
 session_id_path = "/tmp/otto-test-session"

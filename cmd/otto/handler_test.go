@@ -289,7 +289,7 @@ func TestSurfaceDenialsAsPlainText(t *testing.T) {
 		{ToolName: "mcp__gmail-personal__search_emails", ToolUseID: "tu_2"},
 		{ToolName: "Bash", ToolUseID: "tu_3"},
 	}
-	h.surfaceDenials(context.Background(), 999, "send a test email", denials)
+	h.surfaceDenials(context.Background(), 999, denials)
 
 	// Both gmail tools share the wildcard pattern, so we expect one message
 	// for the family + one for Bash = 2 messages total.

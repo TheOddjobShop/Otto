@@ -64,7 +64,7 @@ func (h *handler) runWatchdog(ctx context.Context, chatID int64, done <-chan str
 				if cancel != nil {
 					cancel()
 				}
-				h.toto.send(ctx, chatID,
+				h.toto.SystemMessage(ctx, chatID,
 					"otto wedged. i rebooted him. try sending your original message again whenever — he'll pick up where he left off.")
 				return
 			}
@@ -72,7 +72,7 @@ func (h *handler) runWatchdog(ctx context.Context, chatID int64, done <-chan str
 			if !warned && silence >= watchdogWarnAfter {
 				warned = true
 				log.Printf("watchdog: otto silent for %s — sending warning via toto", silence.Round(time.Second))
-				h.toto.send(ctx, chatID,
+				h.toto.SystemMessage(ctx, chatID,
 					"otto's been zoning out for five minutes. i'm watching him. if he doesn't move in another five i'll boot him and you can try again.")
 			}
 		}

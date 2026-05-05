@@ -82,14 +82,24 @@ func (t *ttyBot) SendMessage(ctx context.Context, chatID int64, text string) err
 	return nil
 }
 
-// SendMessageHTML prints Toto's reply. Strips the only tag Toto emits
-// (<pre>) and unescapes HTML entities so the ASCII art renders cleanly
-// in a monospace terminal.
+// SendMessageHTML prints Toto's or Toot's reply. Strips the tags both
+// pets emit (<pre>, <blockquote>, <b>) and unescapes HTML entities so
+// the ASCII art renders cleanly in a monospace terminal. The label is
+// derived from the banner the pet emits ("TOOT" → toot, anything else
+// → toto) so the two characters are distinguishable in -tty mode.
 func (t *ttyBot) SendMessageHTML(ctx context.Context, chatID int64, text string) error {
-	plain := strings.ReplaceAll(text, "<pre>", "")
-	plain = strings.ReplaceAll(plain, "</pre>", "")
+	label := "toto"
+	color := "\033[1;33m" // yellow
+	if strings.Contains(text, "<b>TOOT</b>") {
+		label = "toot"
+		color = "\033[1;35m" // magenta
+	}
+	plain := text
+	for _, tag := range []string{"<pre>", "</pre>", "<blockquote>", "</blockquote>", "<b>", "</b>"} {
+		plain = strings.ReplaceAll(plain, tag, "")
+	}
 	plain = html.UnescapeString(plain)
-	fmt.Printf("\n\033[1;33mtoto:\033[0m\n%s\n\n", plain)
+	fmt.Printf("\n%s%s:\033[0m\n%s\n\n", color, label, plain)
 	return nil
 }
 

@@ -261,10 +261,19 @@ func (u *updater) Install(ctx context.Context) error {
 		return fmt.Errorf("install: resolve binary path: %w", err)
 	}
 
+	// Match the existing binary's permission bits so the swap doesn't
+	// silently widen access (e.g. from 0700 to 0755). Fall back to
+	// 0700 — user-only execute — if the stat fails, which still
+	// lets the binary run while keeping permissions tight.
+	mode := os.FileMode(0700)
+	if info, err := os.Stat(exe); err == nil {
+		mode = info.Mode().Perm() | 0100 // ensure user-execute survives
+	}
+
 	// tmp lives in the same directory as exe so os.Rename is atomic
 	// (same filesystem). Don't move this to /tmp without revisiting.
 	tmp := exe + ".new"
-	if err := os.WriteFile(tmp, body, 0755); err != nil {
+	if err := os.WriteFile(tmp, body, mode); err != nil {
 		return fmt.Errorf("install: write %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, exe); err != nil {

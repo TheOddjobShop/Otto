@@ -203,8 +203,8 @@ func TestRunnerStreamsAssistantText(t *testing.T) {
 	}
 	var text strings.Builder
 	for ev := range events {
-		if t, ok := ev.(AssistantTextEvent); ok {
-			text.WriteString(t.Text)
+		if at, ok := ev.(AssistantTextEvent); ok {
+			text.WriteString(at.Text)
 		}
 	}
 	if text.String() != "hello world" {

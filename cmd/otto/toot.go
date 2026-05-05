@@ -182,7 +182,9 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 
 	if err != nil {
 		log.Printf("toot reply error: %v (falling back to static)", err)
-		_ = t.deliver(ctx, chatID, "Apologies, sir. Briefly indisposed. Try me again in a moment.")
+		if dErr := t.deliver(ctx, chatID, "Apologies, sir. Briefly indisposed. Try me again in a moment."); dErr != nil {
+			log.Printf("toot reply fallback deliver error: %v", dErr)
+		}
 		return
 	}
 
@@ -192,7 +194,9 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 		out = "Noted."
 	}
 	out = stripMarkdown(out)
-	_ = t.deliver(ctx, chatID, out)
+	if dErr := t.deliver(ctx, chatID, out); dErr != nil {
+		log.Printf("toot reply deliver error: %v", dErr)
+	}
 
 	// Fire the install AFTER the deliver so the user sees Toot's
 	// "initiating install" message before the binary swap kicks off.

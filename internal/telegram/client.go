@@ -12,6 +12,11 @@ import (
 
 var downloadHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
+// maxPhotoBytes caps the in-memory photo download. Telegram's bot API
+// caps photos at 10 MiB; the extra headroom protects against malformed
+// responses or content-type spoofing that could otherwise exhaust memory.
+const maxPhotoBytes = 25 * 1024 * 1024
+
 // Update is the slice of a Telegram update Otto cares about. It carries a
 // regular message (Text and/or PhotoIDs).
 type Update struct {
@@ -63,12 +68,35 @@ func (c *realClient) GetUpdates(ctx context.Context, offset int) ([]Update, erro
 	// not), delaying systemd/launchctl restart by the same window. 5s
 	// keeps shutdown responsive without flooding the Telegram API.
 	cfg.Timeout = 5
-	updates, err := c.api.GetUpdates(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("telegram: get updates: %w", err)
+	// Filter to message updates only — Otto's handler ignores inline
+	// queries, callback queries, channel posts, etc., so there's no
+	// reason to pull them across the wire.
+	cfg.AllowedUpdates = []string{"message"}
+
+	// Run the blocking call in a goroutine so ctx cancellation can
+	// unblock the polling loop's shutdown path even though tgbotapi
+	// itself can't be cancelled. The orphaned goroutine drains and
+	// discards its result when ctx is already done.
+	type result struct {
+		updates []tgbotapi.Update
+		err     error
 	}
-	out := make([]Update, 0, len(updates))
-	for _, u := range updates {
+	done := make(chan result, 1)
+	go func() {
+		updates, err := c.api.GetUpdates(cfg)
+		done <- result{updates: updates, err: err}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("telegram: get updates: %w", r.err)
+	}
+	out := make([]Update, 0, len(r.updates))
+	for _, u := range r.updates {
 		out = append(out, fromTGUpdate(u))
 	}
 	return out, nil
@@ -133,7 +161,7 @@ func downloadURL(ctx context.Context, url string) ([]byte, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("telegram: download status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes))
 	if err != nil {
 		return nil, "", err
 	}

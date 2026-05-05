@@ -112,7 +112,8 @@ func (r *petRegistry) matchAddress(text string) (Pet, string, bool) {
 
 // peelHey returns the body of `text` with a leading "hey " (or "hey,"
 // etc.) removed. ok=false when text doesn't start with the exact word
-// "hey" followed by a non-word character.
+// "hey" followed by a non-word character. A bare "hey" with no trailing
+// content is also rejected (length < 4) — there's no pet name to address.
 func peelHey(text string) (string, bool) {
 	if len(text) < 4 {
 		return "", false

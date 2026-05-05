@@ -11,7 +11,6 @@ import (
 type Config struct {
 	TelegramBotToken      string `toml:"telegram_bot_token"`
 	TelegramAllowedUserID int64  `toml:"telegram_allowed_user_id"`
-	NotionAPIKey          string `toml:"notion_api_key"`
 	ClaudeBinaryPath      string `toml:"claude_binary_path"`
 	MCPConfigPath         string `toml:"mcp_config_path"`
 	SessionIDPath         string `toml:"session_id_path"`

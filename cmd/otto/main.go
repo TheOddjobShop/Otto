@@ -138,13 +138,17 @@ func main() {
 	// doing?" honestly when addressed directly.
 	toto.ottoStatus = h.otto.Snapshot
 
+	// Construct the updater BEFORE binding Toot's hooks: Go method values
+	// capture the receiver at evaluation time, so `h.updater.Pending`
+	// would otherwise bind to a nil *updater and panic on first call.
+	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
+
 	// Toot can see whether an update is pending and trigger the
 	// install when the user authorizes it in chat. The trigger
 	// callback is the same goroutine /update spawns.
 	toot.pendingUpdate = h.updater.Pending
 	toot.triggerUpdate = h.runUpdate
 
-	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
 	go h.updater.Run(ctx)
 
 	sigs := make(chan os.Signal, 1)

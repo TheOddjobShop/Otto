@@ -128,9 +128,9 @@ func TestTootDeliverEscapesHTMLInBody(t *testing.T) {
 
 func TestStripUpdateMarker(t *testing.T) {
 	cases := []struct {
-		in       string
-		wantOut  string
-		wantHit  bool
+		in      string
+		wantOut string
+		wantHit bool
 	}{
 		{"Hello world", "Hello world", false},
 		{"Initiating install. [TRIGGER_UPDATE]", "Initiating install.", true},
@@ -223,8 +223,8 @@ func TestTootReplyPromptsPendingUpdateWhenAvailable(t *testing.T) {
 		"install_update",
 		"v0.2.0",
 		tootUpdateMarker,
-		"any reasonable form",  // loosened judgment language
-		"can you update",       // example of polite phrasing accepted
+		"any reasonable form", // loosened judgment language
+		"can you update",      // example of polite phrasing accepted
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)

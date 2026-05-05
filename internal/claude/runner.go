@@ -136,6 +136,14 @@ func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model, effort 
 		// Verify exact CLI syntax against the installed Claude Code version
 		// during integration testing; this @path form is the documented
 		// reference syntax at the time of writing.
+		//
+		// The @path syntax is whitespace-delimited, so any space inside
+		// the path would be parsed by claude as a separate token. Skip
+		// such paths defensively — os.MkdirTemp paths shouldn't contain
+		// whitespace, but a misconfigured TMPDIR could surprise us.
+		if strings.ContainsAny(p, " \t\n") {
+			continue
+		}
 		prompt += " @" + p
 	}
 	cmdArgs := []string{
@@ -226,7 +234,6 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-waitDone
 		wg.Wait()
-		_ = drain(stdout)
 		return ctx.Err()
 	case waitErr := <-waitDone:
 		wg.Wait()
@@ -246,11 +253,6 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 		}
 		return nil
 	}
-}
-
-func drain(r io.Reader) error {
-	_, err := io.Copy(io.Discard, r)
-	return err
 }
 
 // buildErrorInfo composes the human-readable suffix appended to the claude

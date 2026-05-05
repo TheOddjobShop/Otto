@@ -97,6 +97,33 @@ func (s *ottoState) tryAcquire(prompt string) bool {
 	return true
 }
 
+// tryAcquireOrSnapshot is the dispatch-path atomic version of tryAcquire:
+// either claim Otto, or return a consistent snapshot of his in-flight
+// state for Toto to use as fallback context. Combining acquire and
+// snapshot under a single critical section eliminates the window where
+// Otto could finish between the failed tryAcquire and a follow-up read,
+// which would have surfaced empty/zero context to Toto.
+func (s *ottoState) tryAcquireOrSnapshot(prompt string) (acquired bool, snap ottoSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.busy {
+		s.busy = true
+		s.currentPrompt = prompt
+		s.lastEvent = time.Now()
+		s.suppressError = false
+		return true, ottoSnapshot{}
+	}
+	snap = ottoSnapshot{
+		Busy:          true,
+		CurrentPrompt: s.currentPrompt,
+		Snippet:       s.lastSnippet,
+	}
+	if !s.lastEvent.IsZero() {
+		snap.Silence = time.Since(s.lastEvent)
+	}
+	return false, snap
+}
+
 func (s *ottoState) release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -255,23 +282,19 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 		}
 	}
 	// Try to claim Otto. If he's free, run him; if he's busy, hand off to
-	// Toto so the user gets a reply instead of silence.
-	if h.otto.tryAcquire(u.Text) {
+	// Toto so the user gets a reply instead of silence. The snapshot is
+	// captured atomically with the busy check so Toto's prompt reflects
+	// Otto's in-flight state at the moment we lost the race for the slot.
+	acquired, snap := h.otto.tryAcquireOrSnapshot(u.Text)
+	if acquired {
 		defer h.otto.release()
 		h.handleMessage(ctx, u)
 		return
 	}
-	// Toto path: capture Otto's in-flight prompt and the tail of his
-	// streamed reply so Toto can refer to both.
-	h.otto.mu.Lock()
-	ottoPrompt := h.otto.currentPrompt
-	ottoSnippet := h.otto.lastSnippet
-	silence := time.Since(h.otto.lastEvent)
-	h.otto.mu.Unlock()
 	previewIn := truncate(u.Text, 60)
-	previewOut := truncate(ottoPrompt, 60)
-	log.Printf("otto busy → toto (silence=%s) msg=%q inflight=%q", silence.Round(time.Second), previewIn, previewOut)
-	h.toto.BusyReply(ctx, u.ChatID, u.Text, ottoPrompt, ottoSnippet)
+	previewOut := truncate(snap.CurrentPrompt, 60)
+	log.Printf("otto busy → toto (silence=%s) msg=%q inflight=%q", snap.Silence.Round(time.Second), previewIn, previewOut)
+	h.toto.BusyReply(ctx, u.ChatID, u.Text, snap.CurrentPrompt, snap.Snippet)
 }
 
 func truncate(s string, n int) string {
@@ -286,7 +309,7 @@ func truncate(s string, n int) string {
 // Called after each Claude turn — denials are typically empty (the
 // skip-permissions flag works), but when something slips through we want
 // the user to know what to add and where.
-func (h *handler) surfaceDenials(ctx context.Context, chatID int64, _ string, denials []claude.PermissionDenial) {
+func (h *handler) surfaceDenials(ctx context.Context, chatID int64, denials []claude.PermissionDenial) {
 	seen := map[string]struct{}{}
 	for _, d := range denials {
 		pattern := patternForTool(d.ToolName)
@@ -433,6 +456,6 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 		log.Printf("send error: %v", err)
 	}
 	if len(lastResult.PermissionDenials) > 0 {
-		h.surfaceDenials(sendCtx, chatID, args.Prompt, lastResult.PermissionDenials)
+		h.surfaceDenials(sendCtx, chatID, lastResult.PermissionDenials)
 	}
 }

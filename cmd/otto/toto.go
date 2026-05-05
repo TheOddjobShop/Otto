@@ -28,14 +28,11 @@ const totoModel = "claude-haiku-4-5"
 //go:embed toto.txt
 var totoArtFile string
 
-// totoArts is populated at init() from totoArtFile.
-var totoArts = parseAsciiArts(totoArtFile)
-
 // asciiCycler hands out arts in a shuffled round-robin: every art appears
 // exactly once before any repeats, then we reshuffle. Removes the chance
 // that a few rolls of rand.Intn happen to all hit the same index, which
 // makes the bot feel "stuck" on one cat from the user's perspective.
-var asciiCycler = newAsciiCycler(totoArts)
+var asciiCycler = newAsciiCycler(parseAsciiArts(totoArtFile))
 
 type asciiRoundRobin struct {
 	mu     sync.Mutex
@@ -264,6 +261,18 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 	}
 	out = stripMarkdown(out)
 	t.send(ctx, chatID, out)
+}
+
+// SystemMessage delivers an out-of-band Toto reply (e.g. the watchdog's
+// "I rebooted Otto" notification). Acquires t.mu so the message is
+// serialized against any in-flight Reply/BusyReply call — without this,
+// the user could see the system message interleave with a Toto reply
+// that's already mid-flight, and the second message could refer to
+// state the first has invalidated.
+func (t *Toto) SystemMessage(ctx context.Context, chatID int64, body string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.send(ctx, chatID, body)
 }
 
 // send prepends a randomly-chosen ASCII art and sends the result via
