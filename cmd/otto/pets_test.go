@@ -57,13 +57,13 @@ func TestPetRegistryMatch(t *testing.T) {
 		{"", "", ""},
 		{"   ", "", ""},
 		{"hello", "", ""},
-		{"I asked toto about it", "", ""},   // first word is "I"
-		{"hey toto", "", ""},                 // first word is "hey"
-		{"totoman", "", ""},                  // first word is "totoman"
-		{"toto2", "", ""},                    // first word is "toto2", not "toto"
-		{"ototo", "", ""},                    // first word is "ototo"
-		{"otto, ping toto for me", "", ""},   // addressed to otto, who isn't a pet
-		{"123 toto", "", ""},                 // first word is "123"
+		{"I asked toto about it", "", ""},  // first word is "I"
+		{"hey toto", "", ""},               // first word is "hey"
+		{"totoman", "", ""},                // first word is "totoman"
+		{"toto2", "", ""},                  // first word is "toto2", not "toto"
+		{"ototo", "", ""},                  // first word is "ototo"
+		{"otto, ping toto for me", "", ""}, // addressed to otto, who isn't a pet
+		{"123 toto", "", ""},               // first word is "123"
 	}
 
 	for _, c := range cases {

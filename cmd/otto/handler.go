@@ -213,7 +213,7 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 	previewIn := truncate(u.Text, 60)
 	previewOut := truncate(ottoPrompt, 60)
 	log.Printf("otto busy → toto (silence=%s) msg=%q inflight=%q", silence.Round(time.Second), previewIn, previewOut)
-	h.toto.Reply(ctx, u.ChatID, u.Text, ottoPrompt, ottoSnippet)
+	h.toto.BusyReply(ctx, u.ChatID, u.Text, ottoPrompt, ottoSnippet)
 }
 
 func truncate(s string, n int) string {

@@ -61,6 +61,77 @@ type Toot struct {
 	mu sync.Mutex // serializes Toot's own --resume against the toot session
 }
 
+// Name returns "toot" — used by the petRegistry to route messages
+// addressed to him directly.
+func (t *Toot) Name() string { return "toot" }
+
+// Reply runs a chat turn — the user addressed Toot directly. Stays in
+// his nerdy/dutiful voice but engages conversationally rather than
+// reciting changelog. Tools remain disallowed; Toot can talk, that's it.
+func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	systemPrompt := t.persona
+	systemPrompt += "\n\n───────────────────────────────────────────────\n"
+	systemPrompt += "THE USER ADDRESSED YOU DIRECTLY (CHAT MODE).\n"
+	systemPrompt += "───────────────────────────────────────────────\n\n"
+	systemPrompt += "This is not a release announcement. They want to talk to YOU. Stay in your voice — dutiful, formal-ish, dryly nerdy — but engage. You may discuss Otto, Toto, releases, your job, whatever they bring up. Decline tool requests politely (you only talk). Keep replies brief; phone-screen friendly."
+
+	prompt := userMessage
+	if prompt == "" {
+		prompt = "(the user pinged you with no content — likely a greeting or attention check)"
+	}
+
+	events := make(chan claude.Event, 32)
+	doneParsing := make(chan struct{})
+	var assistantText strings.Builder
+	var capturedSessionID string
+
+	go func() {
+		defer close(doneParsing)
+		for ev := range events {
+			switch e := ev.(type) {
+			case claude.AssistantTextEvent:
+				assistantText.WriteString(e.Text)
+			case claude.SessionEvent:
+				capturedSessionID = e.ID
+			}
+		}
+	}()
+
+	err := t.runner.Run(ctx, claude.RunArgs{
+		Prompt:             prompt,
+		SessionID:          t.session.ID(),
+		Model:              tootModel,
+		Effort:             tootEffort,
+		DisallowedTools:    []string{"*"},
+		AppendSystemPrompt: systemPrompt,
+		Events:             events,
+	})
+	close(events)
+	<-doneParsing
+
+	if capturedSessionID != "" && capturedSessionID != t.session.ID() {
+		if setErr := t.session.Set(capturedSessionID); setErr != nil {
+			log.Printf("toot session save: %v", setErr)
+		}
+	}
+
+	if err != nil {
+		log.Printf("toot reply error: %v (falling back to static)", err)
+		_ = t.deliver(ctx, chatID, "Apologies, sir. Briefly indisposed. Try me again in a moment.")
+		return
+	}
+
+	out := strings.TrimSpace(assistantText.String())
+	if out == "" {
+		out = "Noted."
+	}
+	out = stripMarkdown(out)
+	_ = t.deliver(ctx, chatID, out)
+}
+
 // Announce composes a release notification in Toot's voice and sends
 // it. body is the GitHub release notes (auto-generated changelog when
 // generate_release_notes: true). Toot reads them, explains the items,
