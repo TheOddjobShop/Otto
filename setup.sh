@@ -51,6 +51,7 @@ CLIENT_SECRET_FILE="$OTTO_CONFIG_DIR/client_secret.json"
 MCP_FILE="$OTTO_CONFIG_DIR/mcp.json"
 SYSTEM_PROMPT_FILE="$OTTO_CONFIG_DIR/system_prompt.md"
 TOTO_PERSONA_FILE="$OTTO_CONFIG_DIR/toto_persona.md"
+TOOT_PERSONA_FILE="$OTTO_CONFIG_DIR/toot_persona.md"
 
 # Reuse AbdurRazzaq's credential paths if they're already authed — saves
 # re-doing the OAuth dance you already did once.
@@ -517,6 +518,17 @@ if [ -f "$DIR/TOTO.md" ]; then
 fi
 [ -f "$TOTO_PERSONA_FILE" ] && write_toml_field toto_persona_path "$TOTO_PERSONA_FILE" "$CONFIG_FILE"
 write_toml_field toto_session_id_path "$OTTO_STATE_DIR/toto_session_id" "$CONFIG_FILE"
+
+# Toot persona: TOOT.md is the source of truth for the owl-themed
+# release-notes courier. Same overwrite-on-every-run pattern as
+# SYSTEM.md / TOTO.md.
+if [ -f "$DIR/TOOT.md" ]; then
+  cp "$DIR/TOOT.md" "$TOOT_PERSONA_FILE"
+  chmod 600 "$TOOT_PERSONA_FILE"
+  echo "  [ok] Synced toot persona: $DIR/TOOT.md → $TOOT_PERSONA_FILE"
+fi
+[ -f "$TOOT_PERSONA_FILE" ] && write_toml_field toot_persona_path "$TOOT_PERSONA_FILE" "$CONFIG_FILE"
+write_toml_field toot_session_id_path "$OTTO_STATE_DIR/toot_session_id" "$CONFIG_FILE"
 
 # ── Write mcp.json ──────────────────────────────────────────────────────────
 # If notion_api_key was set in a previous run, read it back so we can write
