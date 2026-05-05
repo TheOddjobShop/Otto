@@ -245,25 +245,33 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		}
 	}
 
+	// On runner error or empty output, we deliberately do NOT fake a
+	// reply in Toto's voice. Instead we send a plain system message via
+	// the bot so the user knows Toto wasn't reached — every line that
+	// goes through Toto's banner is real LLM output in his voice.
 	if err != nil {
-		// Toto failing falls back to a hardcoded message so the user
-		// still gets *something*. Voice changes slightly depending on
-		// the path.
-		fallback := "mrow. (toto's having a moment, otto's still busy)"
-		if ottoPrompt == "" && ottoSnippet == "" {
-			fallback = "mrow. (sorry, brain not working. try me again later.)"
-		}
-		t.send(ctx, chatID, fallback)
 		log.Printf("toto run error: %v", err)
+		systemErr(ctx, t.bot, chatID, "⚠️ Toto couldn't reply right now (claude error). Try again in a moment.")
 		return
 	}
-
 	out := strings.TrimSpace(assistantText.String())
 	if out == "" {
-		out = "mrrp."
+		log.Printf("toto: empty output")
+		systemErr(ctx, t.bot, chatID, "⚠️ Toto returned an empty reply. Try again.")
+		return
 	}
 	out = stripMarkdown(out)
 	t.send(ctx, chatID, out)
+}
+
+// systemErr sends a plain (no-banner) system message — used when a pet
+// can't reply authentically and we need to tell the user without
+// pretending the pet spoke. Failure of this send is logged but not
+// surfaced; we're already on an error path.
+func systemErr(ctx context.Context, bot telegram.BotClient, chatID int64, msg string) {
+	if err := telegram.SendChunked(ctx, bot, chatID, msg); err != nil {
+		log.Printf("system error msg send: %v", err)
+	}
 }
 
 // send prepends a randomly-chosen ASCII art and sends the result via

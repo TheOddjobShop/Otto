@@ -72,23 +72,58 @@ func TestTootAnnounce(t *testing.T) {
 
 func TestTootConfirm(t *testing.T) {
 	bot := &fakeBot{}
-	toot, runner := newTestToot(t, bot, "")
+	toot, runner := newTestToot(t, bot, "Installation complete in Toot's voice.")
 
 	if err := toot.Confirm(context.Background(), 42, "v1.0.1"); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(runner.called) != 0 {
-		t.Errorf("runner.called=%d, want 0 (Confirm is templated, no Claude call)", len(runner.called))
+	// Confirm now goes through Claude — every line in Toot's banner
+	// is real LLM output, no hardcoded confirmation text.
+	if len(runner.called) != 1 {
+		t.Fatalf("runner.called=%d, want 1 (Confirm now invokes Claude)", len(runner.called))
 	}
+	args := runner.called[0]
+	if !strings.Contains(args.AppendSystemPrompt, "v1.0.1") {
+		t.Errorf("system prompt missing version: %q", args.AppendSystemPrompt)
+	}
+	if args.Model != tootModel {
+		t.Errorf("Model=%q, want %q", args.Model, tootModel)
+	}
+
 	if len(bot.sent) != 1 {
 		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
 	}
 	msg := bot.sent[0].text
-	for _, want := range []string{"v1.0.1", "TOOT", "Restarting"} {
+	for _, want := range []string{"TOOT", "Installation complete in Toot&#39;s voice."} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("confirm missing %q: %q", want, msg)
 		}
+	}
+}
+
+func TestTootConfirmFallbackOnRunnerError(t *testing.T) {
+	bot := &fakeBot{}
+	dir := t.TempDir()
+	sess, _ := claude.LoadSession(filepath.Join(dir, "toot-sid"))
+	toot := &Toot{
+		bot:     bot,
+		runner:  &fakeRunner{failErr: errors.New("claude oops")},
+		session: sess,
+	}
+
+	if err := toot.Confirm(context.Background(), 42, "v1.0.1"); err != nil {
+		t.Fatalf("Confirm should fall back, not error: %v", err)
+	}
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1 (system fallback)", len(bot.sent))
+	}
+	msg := bot.sent[0].text
+	if strings.Contains(msg, "TOOT") {
+		t.Errorf("system fallback should NOT use TOOT banner: %q", msg)
+	}
+	if !strings.Contains(msg, "v1.0.1") {
+		t.Errorf("system fallback missing version: %q", msg)
 	}
 }
 
@@ -106,10 +141,16 @@ func TestTootAnnounceFallbackOnRunnerError(t *testing.T) {
 		t.Fatalf("Announce should fall back on runner error, got: %v", err)
 	}
 	if len(bot.sent) != 1 {
-		t.Fatalf("bot.sent=%d, want 1 (static fallback)", len(bot.sent))
+		t.Fatalf("bot.sent=%d, want 1 (system fallback)", len(bot.sent))
 	}
-	if !strings.Contains(bot.sent[0].text, "v1.0.1") {
-		t.Errorf("fallback missing tag: %q", bot.sent[0].text)
+	msg := bot.sent[0].text
+	// Fallback is a system message — must NOT use TOOT banner (no
+	// fake voice attribution).
+	if strings.Contains(msg, "TOOT") {
+		t.Errorf("system fallback should NOT use TOOT banner: %q", msg)
+	}
+	if !strings.Contains(msg, "v1.0.1") {
+		t.Errorf("fallback missing tag: %q", msg)
 	}
 }
 

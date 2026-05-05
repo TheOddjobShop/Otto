@@ -252,7 +252,7 @@ func TestInstallSuccess(t *testing.T) {
 	}
 
 	bot := &fakeBot{}
-	toot, _ := newTestToot(t, bot, "TEST")
+	toot, tootRunner := newTestToot(t, bot, "Installation complete in voice.")
 	u := &updater{
 		httpClient:     server.Client(),
 		toot:           toot,
@@ -279,9 +279,20 @@ func TestInstallSuccess(t *testing.T) {
 		t.Errorf("binary not swapped: got %q, want %q", got, binaryContents)
 	}
 
-	// Toot delivered one "Installed" confirmation.
-	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].text, "v1.0.1") {
-		t.Errorf("messages=%v", bot.sent)
+	// Confirm goes through Claude — verify the LLM was invoked with the
+	// version in its system prompt, and the bot received the LLM's
+	// composed message inside Toot's banner.
+	if len(tootRunner.called) != 1 {
+		t.Fatalf("toot runner called %d times, want 1 (Confirm should invoke Claude)", len(tootRunner.called))
+	}
+	if !strings.Contains(tootRunner.called[0].AppendSystemPrompt, "v1.0.1") {
+		t.Errorf("Confirm system prompt missing version: %q", tootRunner.called[0].AppendSystemPrompt)
+	}
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
+	}
+	if !strings.Contains(bot.sent[0].text, "TOOT") || !strings.Contains(bot.sent[0].text, "Installation complete") {
+		t.Errorf("install confirmation missing TOOT banner or LLM body: %q", bot.sent[0].text)
 	}
 }
 
