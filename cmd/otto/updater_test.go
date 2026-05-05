@@ -96,21 +96,22 @@ func TestFetchLatestNon200(t *testing.T) {
 	}
 }
 
-// newTestUpdater returns an updater whose Toot is wired to a fakeBot.
-// Callers read fakeBot.sent to inspect what Toot delivered. (Toot's
-// SendMessageHTML appends to the same .sent slice as plain SendMessage,
-// so test assertions just look at .sent[i].text.)
+// newTestUpdater returns an updater wired to a Toot backed by a
+// fakeBot + fakeRunner. The fakeRunner emits the canned response
+// "TEST_ANNOUNCEMENT_BODY" so tests can assert on what landed in the
+// outbound message.
 func newTestUpdater(t *testing.T, releasesJSON string) (*updater, *fakeBot, func()) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, releasesJSON)
 	}))
 	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "TEST_ANNOUNCEMENT_BODY")
 	u := &updater{
 		httpClient:     server.Client(),
 		releasesURL:    server.URL,
 		currentVersion: "v1.0.0",
-		toot:           newToot(bot),
+		toot:           toot,
 		chatID:         42,
 	}
 	return u, bot, server.Close
@@ -127,24 +128,16 @@ func TestCheckOnceAnnouncesNewRelease(t *testing.T) {
 
 	u.checkOnce(context.Background())
 
+	// Toot's Announce was invoked: bot received one message containing
+	// the LLM canned response and the owl banner.
 	if len(bot.sent) != 1 {
 		t.Fatalf("got %d messages, want 1", len(bot.sent))
 	}
 	msg := bot.sent[0].text
-	if !strings.Contains(msg, "v1.0.1") {
-		t.Errorf("missing tag in message: %q", msg)
-	}
-	if !strings.Contains(msg, "/update") {
-		t.Errorf("missing /update hint: %q", msg)
-	}
-	if !strings.Contains(msg, "What&#39;s Changed") && !strings.Contains(msg, "Add Toot") {
-		// Body is HTML-escaped by Toot.Send. We accept either the escaped
-		// apostrophe or the unescaped tail as evidence that body was
-		// included.
-		t.Errorf("missing patch notes in message: %q", msg)
-	}
-	if !strings.Contains(msg, "<pre>") {
-		t.Errorf("missing owl <pre> wrapper (Toot didn't deliver?): %q", msg)
+	for _, want := range []string{"TEST_ANNOUNCEMENT_BODY", "TOOT", "<blockquote>"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message missing %q: %q", want, msg)
+		}
 	}
 
 	p := u.Pending()
@@ -191,7 +184,10 @@ func TestCheckOnceDedupesAnnouncement(t *testing.T) {
 }
 
 func TestCheckOnceSkipsMissingPlatformAsset(t *testing.T) {
-	// Release exists but has no asset for the running platform.
+	// Release exists but has no asset for the running platform. Toot
+	// only narrates installable releases — when the platform doesn't
+	// match, we silently skip the announcement so the user isn't
+	// pestered about a release they can't apply.
 	json := `{
 		"tag_name": "v1.0.1",
 		"assets": [{"name": "otto-plan9-amd64", "browser_download_url": "https://x/plan9"}]
@@ -201,10 +197,8 @@ func TestCheckOnceSkipsMissingPlatformAsset(t *testing.T) {
 
 	u.checkOnce(context.Background())
 
-	// We still announce so the user knows an update exists, but Pending
-	// is nil so /update will explain the platform mismatch.
-	if len(bot.sent) != 1 {
-		t.Errorf("got %d messages, want 1", len(bot.sent))
+	if len(bot.sent) != 0 {
+		t.Errorf("got %d messages, want 0 (Toot stays silent on platform mismatch)", len(bot.sent))
 	}
 	if u.Pending() != nil {
 		t.Error("Pending() should be nil when no asset matches platform")
@@ -220,11 +214,12 @@ func TestCheckOnceFetchError(t *testing.T) {
 	}))
 	defer server.Close()
 	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "TEST")
 	u := &updater{
 		httpClient:     server.Client(),
 		releasesURL:    server.URL,
 		currentVersion: "v1.0.0",
-		toot:           newToot(bot),
+		toot:           toot,
 		chatID:         42,
 	}
 
@@ -238,64 +233,6 @@ func TestCheckOnceFetchError(t *testing.T) {
 	}
 	if u.lastAnnounced != "" {
 		t.Errorf("lastAnnounced=%q on fetch error, want empty (so later success can announce)", u.lastAnnounced)
-	}
-}
-
-func TestBuildAnnounceMessage(t *testing.T) {
-	cases := []struct {
-		name             string
-		current, newTag  string
-		body             string
-		hasPlatformAsset bool
-		wantContains     []string
-		wantNotContains  []string
-	}{
-		{
-			name:    "with body and matching platform",
-			current: "v1.0.0", newTag: "v1.0.1",
-			body:             "What's Changed\n* Add /update",
-			hasPlatformAsset: true,
-			wantContains:     []string{"v1.0.0 → v1.0.1", "What's Changed", "* Add /update", "Reply /update to install."},
-		},
-		{
-			name:    "empty body collapses to no double-blank",
-			current: "v1.0.0", newTag: "v1.0.1",
-			body:             "",
-			hasPlatformAsset: true,
-			wantContains:     []string{"v1.0.0 → v1.0.1\n\nReply /update to install."},
-			wantNotContains:  []string{"\n\n\n"},
-		},
-		{
-			name:    "trailing whitespace in body is trimmed",
-			current: "v1.0.0", newTag: "v1.0.1",
-			body:             "Notes here\n\n   \t\n",
-			hasPlatformAsset: true,
-			wantContains:     []string{"Notes here\n\nReply /update to install."},
-			wantNotContains:  []string{"   \t\n\n\nReply"},
-		},
-		{
-			name:    "missing-platform footer mentions GOOS/GOARCH",
-			current: "v1.0.0", newTag: "v1.0.1",
-			body:             "",
-			hasPlatformAsset: false,
-			wantContains:     []string{runtime.GOOS, runtime.GOARCH, "Build manually"},
-			wantNotContains:  []string{"Reply /update"},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := buildAnnounceMessage(c.current, c.newTag, c.body, c.hasPlatformAsset)
-			for _, want := range c.wantContains {
-				if !strings.Contains(got, want) {
-					t.Errorf("missing %q in:\n%s", want, got)
-				}
-			}
-			for _, unwant := range c.wantNotContains {
-				if strings.Contains(got, unwant) {
-					t.Errorf("unexpected %q in:\n%s", unwant, got)
-				}
-			}
-		})
 	}
 }
 
@@ -315,9 +252,10 @@ func TestInstallSuccess(t *testing.T) {
 	}
 
 	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "TEST")
 	u := &updater{
 		httpClient:     server.Client(),
-		toot:           newToot(bot),
+		toot:           toot,
 		chatID:         42,
 		currentVersion: "v1.0.0",
 		exePath:        func() (string, error) { return exePath, nil },
@@ -365,9 +303,10 @@ func TestInstallDownloadFailure(t *testing.T) {
 	exePath := filepath.Join(tmpDir, "otto")
 	os.WriteFile(exePath, []byte("OLD"), 0755)
 
+	toot, _ := newTestToot(t, &fakeBot{}, "TEST")
 	u := &updater{
 		httpClient: server.Client(),
-		toot:       newToot(&fakeBot{}),
+		toot:       toot,
 		exePath:    func() (string, error) { return exePath, nil },
 		exitFunc:   func() {},
 	}
@@ -401,9 +340,10 @@ func TestInstallConcurrentReturnsBusy(t *testing.T) {
 	}
 
 	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "TEST")
 	u := &updater{
 		httpClient: server.Client(),
-		toot:       newToot(bot),
+		toot:       toot,
 		chatID:     42,
 		exePath:    func() (string, error) { return exePath, nil },
 		exitFunc:   func() {},

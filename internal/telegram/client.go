@@ -57,7 +57,12 @@ func NewBotClient(token, apiURLTemplate string) (BotClient, error) {
 
 func (c *realClient) GetUpdates(ctx context.Context, offset int) ([]Update, error) {
 	cfg := tgbotapi.NewUpdate(offset)
-	cfg.Timeout = 30
+	// Short long-poll so SIGTERM shutdown completes promptly. tgbotapi's
+	// GetUpdates does not honor context.Context, so a longer timeout
+	// blocks the polling goroutine until the server replies (empty or
+	// not), delaying systemd/launchctl restart by the same window. 5s
+	// keeps shutdown responsive without flooding the Telegram API.
+	cfg.Timeout = 5
 	updates, err := c.api.GetUpdates(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("telegram: get updates: %w", err)

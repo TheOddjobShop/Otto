@@ -81,11 +81,11 @@ func TestBuildCmdArgsAlwaysSkipsPermissions(t *testing.T) {
 		name string
 		got  []string
 	}{
-		{"empty", buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", nil, nil, nil)},
-		{"with-session", buildCmdArgs("hi", "abc", "/tmp/mcp.json", "", "", nil, nil, nil)},
-		{"with-sysprompt", buildCmdArgs("hi", "", "/tmp/mcp.json", "be kind", "", nil, nil, nil)},
-		{"with-images", buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", []string{"/tmp/a.png"}, nil, nil)},
-		{"with-allowed", buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", nil, []string{"mcp__gmail__*"}, nil)},
+		{"empty", buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, nil, nil)},
+		{"with-session", buildCmdArgs("hi", "abc", "/tmp/mcp.json", "", "", "", nil, nil, nil)},
+		{"with-sysprompt", buildCmdArgs("hi", "", "/tmp/mcp.json", "be kind", "", "", nil, nil, nil)},
+		{"with-images", buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", []string{"/tmp/a.png"}, nil, nil)},
+		{"with-allowed", buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, []string{"mcp__gmail__*"}, nil)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,14 +97,14 @@ func TestBuildCmdArgsAlwaysSkipsPermissions(t *testing.T) {
 }
 
 func TestBuildCmdArgsOmitsResumeWhenSessionEmpty(t *testing.T) {
-	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", nil, nil, nil)
+	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, nil, nil)
 	if slices.Contains(got, "--resume") {
 		t.Errorf("--resume should not appear with empty session: %v", got)
 	}
 }
 
 func TestBuildCmdArgsIncludesResumeWhenSessionSet(t *testing.T) {
-	got := buildCmdArgs("hi", "sess-abc", "/tmp/mcp.json", "", "", nil, nil, nil)
+	got := buildCmdArgs("hi", "sess-abc", "/tmp/mcp.json", "", "", "", nil, nil, nil)
 	idx := slices.Index(got, "--resume")
 	if idx < 0 {
 		t.Fatalf("--resume missing: %v", got)
@@ -115,7 +115,7 @@ func TestBuildCmdArgsIncludesResumeWhenSessionSet(t *testing.T) {
 }
 
 func TestBuildCmdArgsAppendsImagePathsToPrompt(t *testing.T) {
-	got := buildCmdArgs("describe", "", "/tmp/mcp.json", "", "", []string{"/tmp/a.png", "/tmp/b.jpg"}, nil, nil)
+	got := buildCmdArgs("describe", "", "/tmp/mcp.json", "", "", "", []string{"/tmp/a.png", "/tmp/b.jpg"}, nil, nil)
 	idx := slices.Index(got, "-p")
 	if idx < 0 {
 		t.Fatalf("-p missing: %v", got)
@@ -127,14 +127,14 @@ func TestBuildCmdArgsAppendsImagePathsToPrompt(t *testing.T) {
 }
 
 func TestBuildCmdArgsOmitsSystemPromptWhenEmpty(t *testing.T) {
-	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", nil, nil, nil)
+	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, nil, nil)
 	if slices.Contains(got, "--append-system-prompt") {
 		t.Errorf("--append-system-prompt should not appear when prompt empty: %v", got)
 	}
 }
 
 func TestBuildCmdArgsIncludesSystemPromptWhenSet(t *testing.T) {
-	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "be kind", "", nil, nil, nil)
+	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "be kind", "", "", nil, nil, nil)
 	idx := slices.Index(got, "--append-system-prompt")
 	if idx < 0 {
 		t.Fatalf("--append-system-prompt missing: %v", got)
@@ -145,20 +145,38 @@ func TestBuildCmdArgsIncludesSystemPromptWhenSet(t *testing.T) {
 }
 
 func TestBuildCmdArgsOmitsAllowedToolsWhenEmpty(t *testing.T) {
-	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", nil, nil, nil)
+	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, nil, nil)
 	if slices.Contains(got, "--allowed-tools") {
 		t.Errorf("--allowed-tools should not appear when empty: %v", got)
 	}
 }
 
 func TestBuildCmdArgsIncludesAllowedToolsAsCSV(t *testing.T) {
-	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", nil, []string{"mcp__gmail__*", "Bash"}, nil)
+	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, []string{"mcp__gmail__*", "Bash"}, nil)
 	idx := slices.Index(got, "--allowed-tools")
 	if idx < 0 {
 		t.Fatalf("--allowed-tools missing: %v", got)
 	}
 	if idx+1 >= len(got) || got[idx+1] != "mcp__gmail__*,Bash" {
 		t.Errorf("--allowed-tools value = %q, want comma-separated", got[idx+1])
+	}
+}
+
+func TestBuildCmdArgsIncludesEffortWhenSet(t *testing.T) {
+	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "medium", nil, nil, nil)
+	idx := slices.Index(got, "--effort")
+	if idx < 0 {
+		t.Fatalf("--effort missing: %v", got)
+	}
+	if idx+1 >= len(got) || got[idx+1] != "medium" {
+		t.Errorf("--effort value = %q, want %q", got[idx+1], "medium")
+	}
+}
+
+func TestBuildCmdArgsOmitsEffortWhenEmpty(t *testing.T) {
+	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, nil, nil)
+	if slices.Contains(got, "--effort") {
+		t.Errorf("--effort should not appear when empty: %v", got)
 	}
 }
 

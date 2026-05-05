@@ -218,15 +218,18 @@ func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt,
 func (t *Toto) send(ctx context.Context, chatID int64, body string) {
 	art := pickAsciiArt()
 	escapedBody := html.EscapeString(body)
-	var msg string
+	var sb strings.Builder
+	sb.WriteString("<blockquote><b>TOTO</b></blockquote>\n")
 	if art != "" {
-		msg = "<pre>" + html.EscapeString(art) + "</pre>\n\n" + escapedBody
-	} else {
-		msg = escapedBody
+		sb.WriteString("<pre>")
+		sb.WriteString(html.EscapeString(art))
+		sb.WriteString("</pre>\n\n")
 	}
-	if err := t.bot.SendMessageHTML(ctx, chatID, msg); err != nil {
+	sb.WriteString(escapedBody)
+	if err := t.bot.SendMessageHTML(ctx, chatID, sb.String()); err != nil {
 		log.Printf("toto html send error: %v (falling back to plain)", err)
-		if err2 := telegram.SendChunked(ctx, t.bot, chatID, body); err2 != nil {
+		plain := "TOTO\n\n" + body
+		if err2 := telegram.SendChunked(ctx, t.bot, chatID, plain); err2 != nil {
 			log.Printf("toto plain send error: %v", err2)
 		}
 	}

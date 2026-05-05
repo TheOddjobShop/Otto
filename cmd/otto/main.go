@@ -91,6 +91,23 @@ func main() {
 		log.Fatalf("toto session: %v", err)
 	}
 
+	// Toot mirrors Toto's wiring: own runner with no MCP, own session,
+	// own persona file. Per-call --model and --effort and
+	// --disallowedTools are set inside Toot.Announce.
+	tootPersona, err := readTootPersona(cfg.TootPersonaPath)
+	if err != nil {
+		log.Fatalf("toot persona: %v", err)
+	}
+	tootRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, "", "", home)
+	tootSessionPath := cfg.TootSessionIDPath
+	if tootSessionPath == "" {
+		tootSessionPath = cfg.SessionIDPath + "_toot"
+	}
+	tootSession, err := claude.LoadSession(tootSessionPath)
+	if err != nil {
+		log.Fatalf("toot session: %v", err)
+	}
+
 	h := &handler{
 		bot:       bot,
 		allow:     allow,
@@ -106,7 +123,12 @@ func main() {
 		},
 	}
 
-	toot := newToot(bot)
+	toot := &Toot{
+		bot:     bot,
+		runner:  tootRunner,
+		session: tootSession,
+		persona: tootPersona,
+	}
 	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
 	go h.updater.Run(ctx)
 
@@ -118,8 +140,8 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("otto: starting; session=%s toto_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB",
-		session.ID(), totoSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona))
+	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB",
+		session.ID(), totoSession.ID(), tootSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona), len(tootPersona))
 	if err := h.runPollingLoop(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("polling loop: %v", err)
 	}
@@ -140,6 +162,20 @@ func readTotoPersona(path string) (string, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read toto persona %s: %w", path, err)
+	}
+	return strings.TrimRight(string(body), "\n"), nil
+}
+
+// readTootPersona is the Toot equivalent of readTotoPersona. Empty path
+// means run without an appended persona; missing-but-configured is a
+// hard error.
+func readTootPersona(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read toot persona %s: %w", path, err)
 	}
 	return strings.TrimRight(string(body), "\n"), nil
 }

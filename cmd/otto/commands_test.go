@@ -107,16 +107,17 @@ func TestUpdateCommandNoPending(t *testing.T) {
 
 // newPendingHandler is a shared helper for tests that exercise the
 // /update path with a real pending update. It wires both h.bot and
-// u.toot (via newToot(bot)) to the same fakeBot so the async goroutine
+// u.toot (via newTestToot) to the same fakeBot so the async goroutine
 // spawned by /update has a place to send its failure message (the
 // AssetURL is bogus, so the install will fail-fast on DNS, post one
 // error message via h.bot, and exit without panicking).
 func newPendingHandler(t *testing.T) (*handler, *fakeBot) {
 	t.Helper()
 	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "TEST")
 	u := &updater{
 		currentVersion: "v1.0.0",
-		toot:           newToot(bot),
+		toot:           toot,
 		chatID:         42,
 		exitFunc:       func() {}, // never actually exit during tests
 		exePath:        func() (string, error) { return "/tmp/otto-test-dummy", nil },
