@@ -134,6 +134,10 @@ func main() {
 		pets: newPetRegistry(toto, toot),
 	}
 
+	// Toto can see what Otto's up to so he can answer "what's otto
+	// doing?" honestly when addressed directly.
+	toto.ottoStatus = h.otto.Snapshot
+
 	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
 	go h.updater.Run(ctx)
 

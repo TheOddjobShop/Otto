@@ -141,6 +141,32 @@ func (s *ottoState) shouldSuppressError() bool {
 	return s.suppressError
 }
 
+// ottoSnapshot is the immutable view of Otto's state that Toto
+// receives so he can talk truthfully about what Otto's up to.
+type ottoSnapshot struct {
+	Busy          bool
+	CurrentPrompt string        // Otto's in-flight prompt (only when Busy)
+	Snippet       string        // tail of Otto's in-progress reply (only when Busy)
+	Silence       time.Duration // how long since Otto's last stream event (zero if Otto has never run)
+}
+
+// Snapshot returns the current Otto state under lock. Safe to call
+// from any goroutine — used by Toto when answering "what's otto up to?"
+// type questions.
+func (s *ottoState) Snapshot() ottoSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap := ottoSnapshot{
+		Busy:          s.busy,
+		CurrentPrompt: s.currentPrompt,
+		Snippet:       s.lastSnippet,
+	}
+	if !s.lastEvent.IsZero() {
+		snap.Silence = time.Since(s.lastEvent)
+	}
+	return snap
+}
+
 func (h *handler) runPollingLoop(ctx context.Context) error {
 	offset := 0
 	backoff := pollErrorBaseBackoff

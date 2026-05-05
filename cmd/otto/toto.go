@@ -5,11 +5,13 @@ package main
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"html"
 	"log"
 	"math/rand"
 	"strings"
 	"sync"
+	"time"
 
 	"otto/internal/claude"
 	"otto/internal/telegram"
@@ -117,6 +119,12 @@ type Toto struct {
 	session *claude.Session
 	persona string // base system prompt for Toto (TOTO.md content)
 
+	// ottoStatus, when non-nil, returns a snapshot of Otto's current
+	// state. Toto includes this in his per-call system prompt so he can
+	// answer "what's otto up to?" honestly. Production callers wire it
+	// to handler.otto.Snapshot; tests leave it nil.
+	ottoStatus func() ottoSnapshot
+
 	mu sync.Mutex // serializes Toto's own --resume against the toto session
 }
 
@@ -125,49 +133,75 @@ type Toto struct {
 func (t *Toto) Name() string { return "toto" }
 
 // Reply runs a Toto turn for a direct-address message — the user
-// said "toto, ..." (or similar) and we routed it here. No Otto-busy
-// context is injected; Toto just chats in his voice.
+// said "toto, ..." (or similar) and we routed it here. The
+// per-call prompt includes Otto's current status (if available) so
+// Toto can answer "what's otto doing?" truthfully.
 func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage string) {
-	t.replyWithContext(ctx, chatID, userMessage, "", "")
+	t.replyWithContext(ctx, chatID, userMessage, false, "", "")
 }
 
 // BusyReply runs a Toto turn for the busy-fallback path — Otto is
 // mid-task and the user sent another message. ottoPrompt and
 // ottoSnippet ground Toto's reply in what Otto's actually working on.
 func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
-	t.replyWithContext(ctx, chatID, userMessage, ottoPrompt, ottoSnippet)
+	t.replyWithContext(ctx, chatID, userMessage, true, ottoPrompt, ottoSnippet)
 }
 
 // replyWithContext is the shared implementation for both paths.
-// ottoPrompt and ottoSnippet are empty for direct-address replies and
-// non-empty for busy-fallback replies; the system prompt assembly
-// adds the Otto-context sections only when present.
+// busyFallback distinguishes the two modes: in busy-fallback the user's
+// message wasn't addressed to Toto and Otto's the one they meant; in
+// direct-address Toto is who they asked for. The Otto-status snippet
+// (busy/idle/working-on-X) is injected in BOTH modes so Toto always
+// knows what's going on.
 //
 // Toto is invoked with no MCP config and --disallowedTools "*", so
 // even if the model tried to call a tool, Claude Code would refuse.
-func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
+func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage string, busyFallback bool, ottoPrompt, ottoSnippet string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	systemPrompt := t.persona
-	if ottoPrompt == "" && ottoSnippet == "" {
-		systemPrompt += "\n\n───────────────────────────────────────────────\n"
-		systemPrompt += "THE USER ADDRESSED YOU DIRECTLY.\n"
-		systemPrompt += "───────────────────────────────────────────────\n\n"
-		systemPrompt += "They want to talk to YOU, not Otto. Otto isn't busy on this one — they specifically said your name. Greet them like a cat. Chat in your voice."
-	}
-	if ottoPrompt != "" {
+	if busyFallback {
+		// User's message was meant for Otto, but Otto is busy. ottoPrompt
+		// and ottoSnippet were captured by dispatch under lock and reflect
+		// the same data the snapshot would yield.
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
 		systemPrompt += "OTTO IS CURRENTLY WORKING ON THIS FOR THE USER:\n"
 		systemPrompt += "───────────────────────────────────────────────\n\n"
 		systemPrompt += ottoPrompt
-	}
-	if ottoSnippet != "" {
+		if ottoSnippet != "" {
+			systemPrompt += "\n\n───────────────────────────────────────────────\n"
+			systemPrompt += "WHAT OTTO HAS PARTIALLY SAID SO FAR (in-progress, the tail of his streamed reply — NOT a finished answer):\n"
+			systemPrompt += "───────────────────────────────────────────────\n\n"
+			systemPrompt += ottoSnippet
+			systemPrompt += "\n\nUse this only to ground your reply in reality — e.g. 'he's typing about your gmail right now' if the snippet is about gmail. Do NOT relay Otto's words to the user verbatim or pretend his answer is yours."
+		}
+	} else {
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
-		systemPrompt += "WHAT OTTO HAS PARTIALLY SAID SO FAR (in-progress, the tail of his streamed reply — NOT a finished answer):\n"
+		systemPrompt += "THE USER ADDRESSED YOU DIRECTLY.\n"
 		systemPrompt += "───────────────────────────────────────────────\n\n"
-		systemPrompt += ottoSnippet
-		systemPrompt += "\n\nUse this only to ground your reply in reality — e.g. 'he's typing about your gmail right now' if the snippet is about gmail. Do NOT relay Otto's words to the user verbatim or pretend his answer is yours."
+		systemPrompt += "They want to talk to YOU, not Otto. They specifically said your name. Greet them like a cat. Chat in your voice."
+
+		// Status snippet so Toto can answer "what's otto up to?" with truth.
+		if t.ottoStatus != nil {
+			snap := t.ottoStatus()
+			systemPrompt += "\n\n───────────────────────────────────────────────\n"
+			systemPrompt += "OTTO STATUS (in case the user asks):\n"
+			systemPrompt += "───────────────────────────────────────────────\n\n"
+			if snap.Busy {
+				systemPrompt += "Otto is BUSY. He's currently working on:\n\n"
+				systemPrompt += "  " + snap.CurrentPrompt
+				if snap.Snippet != "" {
+					systemPrompt += "\n\nTail of his in-progress reply (don't quote verbatim — just for grounding):\n\n  " + snap.Snippet
+				}
+				if snap.Silence > 30*time.Second {
+					systemPrompt += fmt.Sprintf("\n\n(He's been silent for %s.)", snap.Silence.Round(time.Second))
+				}
+			} else {
+				systemPrompt += "Otto is IDLE. Nothing in progress."
+			}
+			systemPrompt += "\n\nMention this only if the user asks or if it's clearly relevant. Don't volunteer it unprompted."
+		}
 	}
 
 	events := make(chan claude.Event, 32)
