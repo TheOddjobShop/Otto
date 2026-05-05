@@ -119,15 +119,14 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	}
 
 	if err != nil {
-		log.Printf("toot reply error: %v", err)
-		systemErr(ctx, t.bot, chatID, "⚠️ Toot couldn't reply right now (claude error). Try again in a moment.")
+		log.Printf("toot reply error: %v (falling back to static)", err)
+		_ = t.deliver(ctx, chatID, "Apologies, sir. Briefly indisposed. Try me again in a moment.")
 		return
 	}
+
 	out := strings.TrimSpace(assistantText.String())
 	if out == "" {
-		log.Printf("toot reply: empty output")
-		systemErr(ctx, t.bot, chatID, "⚠️ Toot returned an empty reply. Try again.")
-		return
+		out = "Noted."
 	}
 	out = stripMarkdown(out)
 	_ = t.deliver(ctx, chatID, out)
@@ -195,95 +194,35 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 		}
 	}
 
-	// Runner failed or returned nothing. We don't fake an announcement
-	// in Toot's voice; instead we send a plain system message so the
-	// user still learns about the release without a fabricated quote.
 	if err != nil {
-		log.Printf("toot announce error: %v", err)
-		systemErr(ctx, t.bot, chatID, fmt.Sprintf(
-			"⚠️ Toot couldn't compose the release announcement (claude error). Update available: %s → %s. Reply /update to install.",
-			currentVersion, newTag,
-		))
-		return nil
+		// Fall back to a static announcement so the user still hears
+		// about the release if Claude is briefly unavailable.
+		log.Printf("toot announce error: %v (falling back to static)", err)
+		fallback := fmt.Sprintf(
+			"Release %s is available (current: %s). Reply /update to install.",
+			newTag, currentVersion,
+		)
+		return t.deliver(ctx, chatID, fallback)
 	}
+
 	out := strings.TrimSpace(assistantText.String())
 	if out == "" {
-		log.Printf("toot announce: empty output")
-		systemErr(ctx, t.bot, chatID, fmt.Sprintf(
-			"⚠️ Toot returned an empty announcement. Update available: %s → %s. Reply /update to install.",
-			currentVersion, newTag,
-		))
-		return nil
+		out = fmt.Sprintf("Release %s is available. Reply /update to install.", newTag)
 	}
 	out = stripMarkdown(out)
 	return t.deliver(ctx, chatID, out)
 }
 
 // Confirm sends the post-install "restarting" message in Toot's voice.
-// Goes through Claude — same authenticity rule as Announce/Reply: every
-// line attributed to Toot is real LLM output. The extra latency (~5s)
-// is acceptable since Confirm fires once per install (rare).
+// No LLM call — the message is short, predictable, and frequent
+// enough that an extra Claude invocation per install would be waste.
+// The voice is encoded in the templated string itself.
 func (t *Toot) Confirm(ctx context.Context, chatID int64, tag string) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	systemPrompt := t.persona
-	systemPrompt += "\n\n───────────────────────────────────────────────\n"
-	systemPrompt += "INSTALL CONFIRMATION\n"
-	systemPrompt += "───────────────────────────────────────────────\n\n"
-	systemPrompt += fmt.Sprintf("Otto just finished installing version %s. The process is about to restart so Otto can come back online running the new binary.\n\n", tag)
-	systemPrompt += "Compose a brief one-or-two-sentence installation-complete message in your voice — confirm the version is in place, note the upcoming restart. Terse. No bullets needed."
-
-	prompt := fmt.Sprintf("Confirm install of %s.", tag)
-
-	events := make(chan claude.Event, 32)
-	doneParsing := make(chan struct{})
-	var assistantText strings.Builder
-	var capturedSessionID string
-
-	go func() {
-		defer close(doneParsing)
-		for ev := range events {
-			switch e := ev.(type) {
-			case claude.AssistantTextEvent:
-				assistantText.WriteString(e.Text)
-			case claude.SessionEvent:
-				capturedSessionID = e.ID
-			}
-		}
-	}()
-
-	err := t.runner.Run(ctx, claude.RunArgs{
-		Prompt:             prompt,
-		SessionID:          t.session.ID(),
-		Model:              tootModel,
-		Effort:             tootEffort,
-		DisallowedTools:    []string{"*"},
-		AppendSystemPrompt: systemPrompt,
-		Events:             events,
-	})
-	close(events)
-	<-doneParsing
-
-	if capturedSessionID != "" && capturedSessionID != t.session.ID() {
-		if setErr := t.session.Set(capturedSessionID); setErr != nil {
-			log.Printf("toot session save: %v", setErr)
-		}
-	}
-
-	if err != nil {
-		log.Printf("toot confirm error: %v", err)
-		systemErr(ctx, t.bot, chatID, fmt.Sprintf("⚠️ Installed %s, restarting now.", tag))
-		return nil
-	}
-	out := strings.TrimSpace(assistantText.String())
-	if out == "" {
-		log.Printf("toot confirm: empty output")
-		systemErr(ctx, t.bot, chatID, fmt.Sprintf("⚠️ Installed %s, restarting now.", tag))
-		return nil
-	}
-	out = stripMarkdown(out)
-	return t.deliver(ctx, chatID, out)
+	body := fmt.Sprintf(
+		"Installation complete. %s is in place. Restarting the process — Otto will be back online shortly.",
+		tag,
+	)
+	return t.deliver(ctx, chatID, body)
 }
 
 // deliver wraps body with Toot's banner + a random owl art and sends
