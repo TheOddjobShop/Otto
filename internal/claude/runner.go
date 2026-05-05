@@ -61,6 +61,10 @@ type RunArgs struct {
 	// Model overrides Claude Code's default model selection (e.g.
 	// "claude-haiku-4-5" for the Toto fallback). Empty = inherit default.
 	Model string
+	// Effort sets Claude Code's reasoning/effort level — one of "low",
+	// "medium", "high", "xhigh", "max". Empty = inherit default. Used by
+	// Toot so the announcement composer thinks before writing.
+	Effort string
 	// AppendSystemPrompt, when non-empty, replaces the runner's configured
 	// systemPrompt for this single call. Used by Toto so a dynamic per-
 	// call prompt (cat persona + Otto's in-flight prompt as context) can
@@ -127,7 +131,7 @@ func (r *execRunner) WithEnv(extra map[string]string) Runner {
 //
 // mcpConfigPath empty = no --mcp-config flag (used by the Toto fallback,
 // which runs without any MCP servers).
-func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model string, imagePaths, allowedTools, disallowedTools []string) []string {
+func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model, effort string, imagePaths, allowedTools, disallowedTools []string) []string {
 	for _, p := range imagePaths {
 		// Verify exact CLI syntax against the installed Claude Code version
 		// during integration testing; this @path form is the documented
@@ -150,6 +154,9 @@ func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model string, 
 	}
 	if model != "" {
 		cmdArgs = append(cmdArgs, "--model", model)
+	}
+	if effort != "" {
+		cmdArgs = append(cmdArgs, "--effort", effort)
 	}
 	if systemPrompt != "" {
 		cmdArgs = append(cmdArgs, "--append-system-prompt", systemPrompt)
@@ -174,7 +181,7 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 	if args.AppendSystemPrompt != "" {
 		systemPrompt = args.AppendSystemPrompt
 	}
-	cmdArgs := buildCmdArgs(args.Prompt, args.SessionID, r.mcpConfigPath, systemPrompt, args.Model, args.ImagePaths, args.AllowedTools, args.DisallowedTools)
+	cmdArgs := buildCmdArgs(args.Prompt, args.SessionID, r.mcpConfigPath, systemPrompt, args.Model, args.Effort, args.ImagePaths, args.AllowedTools, args.DisallowedTools)
 	cmd := exec.CommandContext(ctx, r.binary, cmdArgs...)
 	if r.workDir != "" {
 		cmd.Dir = r.workDir
