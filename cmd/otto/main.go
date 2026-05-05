@@ -138,6 +138,12 @@ func main() {
 	// doing?" honestly when addressed directly.
 	toto.ottoStatus = h.otto.Snapshot
 
+	// Toot can see whether an update is pending and trigger the
+	// install when the user authorizes it in chat. The trigger
+	// callback is the same goroutine /update spawns.
+	toot.pendingUpdate = h.updater.Pending
+	toot.triggerUpdate = h.runUpdate
+
 	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
 	go h.updater.Run(ctx)
 

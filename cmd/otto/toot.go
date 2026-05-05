@@ -58,7 +58,35 @@ type Toot struct {
 	session *claude.Session
 	persona string // base system prompt for Toot (TOOT.md content)
 
+	// pendingUpdate, when non-nil, returns the current pending release
+	// (or nil if none). Surfaced into Toot's chat-mode prompt so he
+	// knows whether install requests are valid. Wired to the updater
+	// in main.go.
+	pendingUpdate func() *pendingUpdate
+
+	// triggerUpdate, when non-nil, asynchronously kicks off the
+	// install + restart flow (same as the /update command). Toot calls
+	// this when the user has clearly authorized the install during
+	// chat. Wired to handler.runUpdate in main.go.
+	triggerUpdate func()
+
 	mu sync.Mutex // serializes Toot's own --resume against the toot session
+}
+
+// tootUpdateMarker is the literal string Toot's LLM is instructed to
+// emit when the user has authorized an install during chat. The
+// dispatcher strips it from the visible reply and fires triggerUpdate.
+const tootUpdateMarker = "[TRIGGER_UPDATE]"
+
+// stripUpdateMarker removes the install-trigger marker from Toot's
+// reply. Returns the cleaned text and a bool indicating whether the
+// marker was present.
+func stripUpdateMarker(s string) (string, bool) {
+	if !strings.Contains(s, tootUpdateMarker) {
+		return s, false
+	}
+	cleaned := strings.ReplaceAll(s, tootUpdateMarker, "")
+	return strings.TrimSpace(cleaned), true
 }
 
 // Name returns "toot" — used by the petRegistry to route messages
@@ -77,6 +105,24 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	systemPrompt += "THE USER ADDRESSED YOU DIRECTLY (CHAT MODE).\n"
 	systemPrompt += "───────────────────────────────────────────────\n\n"
 	systemPrompt += "This is not a release announcement. They want to talk to YOU. Stay in your voice — dutiful, formal-ish, dryly nerdy — but engage. You may discuss Otto, Toto, releases, your job, whatever they bring up. Decline tool requests politely (you only talk). Keep replies brief; phone-screen friendly."
+
+	// Inject pending-update awareness so Toot can act on install
+	// requests in chat. The marker is the side-channel the dispatcher
+	// uses to fire the install — Toot must only emit it when the user
+	// is *clearly* requesting the install, not just chatting about it.
+	if t.pendingUpdate != nil {
+		systemPrompt += "\n\n───────────────────────────────────────────────\n"
+		systemPrompt += "PENDING UPDATE\n"
+		systemPrompt += "───────────────────────────────────────────────\n\n"
+		if p := t.pendingUpdate(); p != nil {
+			systemPrompt += fmt.Sprintf("There is a pending release ready to install: %s.\n\n", p.Tag)
+			systemPrompt += "If — and only if — the user has clearly asked you to install it RIGHT NOW in this very message (examples: \"do it\", \"update\", \"install\", \"go ahead\", \"yes do it\", \"toot update\"), end your reply with this exact marker on its own line:\n\n  "
+			systemPrompt += tootUpdateMarker
+			systemPrompt += "\n\nThe marker is invisible — the system strips it from the visible reply and starts the install. After install completes, the user will see your standard \"Installed v…, restarting\" confirmation.\n\nDo NOT emit the marker for casual mentions of updates, questions about the release, or anything ambiguous. \"What changed?\" → no marker. \"Is there an update?\" → no marker. \"What's it about?\" → no marker. Only affirmative install requests trigger.\n\nWhen you do trigger, phrase your reply in your voice as if you're personally seeing the install through (\"Initiating install of v…, sir. Stand by.\")."
+		} else {
+			systemPrompt += "There is no pending update right now. If the user asks you to install something, explain politely that there's nothing to install — Otto is on the latest version. Do NOT emit any install marker."
+		}
+	}
 
 	prompt := userMessage
 	if prompt == "" {
@@ -125,11 +171,20 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	}
 
 	out := strings.TrimSpace(assistantText.String())
+	out, shouldTrigger := stripUpdateMarker(out)
 	if out == "" {
 		out = "Noted."
 	}
 	out = stripMarkdown(out)
 	_ = t.deliver(ctx, chatID, out)
+
+	// Fire the install AFTER the deliver so the user sees Toot's
+	// "initiating install" message before the binary swap kicks off.
+	// runUpdate handles the rest (download → swap → Confirm → Exit).
+	if shouldTrigger && t.triggerUpdate != nil {
+		log.Printf("toot: user-authorized install via chat marker")
+		go t.triggerUpdate()
+	}
 }
 
 // Announce composes a release notification in Toot's voice and sends

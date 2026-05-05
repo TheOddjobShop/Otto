@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"otto/internal/claude"
 )
@@ -122,5 +123,120 @@ func TestTootDeliverEscapesHTMLInBody(t *testing.T) {
 	}
 	if !strings.Contains(bot.sent[0].text, "&lt;script&gt;") {
 		t.Errorf("expected HTML-escaped body: %q", bot.sent[0].text)
+	}
+}
+
+func TestStripUpdateMarker(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantOut  string
+		wantHit  bool
+	}{
+		{"Hello world", "Hello world", false},
+		{"Initiating install. [TRIGGER_UPDATE]", "Initiating install.", true},
+		{"[TRIGGER_UPDATE]", "", true},
+		{"Right.\n\n[TRIGGER_UPDATE]", "Right.", true},
+		{"two markers [TRIGGER_UPDATE] both [TRIGGER_UPDATE]", "two markers  both", true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			out, hit := stripUpdateMarker(c.in)
+			if hit != c.wantHit {
+				t.Errorf("hit=%v, want %v", hit, c.wantHit)
+			}
+			if out != c.wantOut {
+				t.Errorf("out=%q, want %q", out, c.wantOut)
+			}
+		})
+	}
+}
+
+func TestTootReplyTriggersUpdateOnMarker(t *testing.T) {
+	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "Initiating install of v0.2.0, sir. Stand by. [TRIGGER_UPDATE]")
+
+	triggered := make(chan struct{}, 1)
+	toot.pendingUpdate = func() *pendingUpdate {
+		return &pendingUpdate{Tag: "v0.2.0", AssetURL: "https://x/asset"}
+	}
+	toot.triggerUpdate = func() { triggered <- struct{}{} }
+
+	toot.Reply(context.Background(), 42, "toot, do it")
+
+	// Visible message has marker stripped.
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
+	}
+	if strings.Contains(bot.sent[0].text, "TRIGGER_UPDATE") {
+		t.Errorf("marker leaked to user: %q", bot.sent[0].text)
+	}
+	if !strings.Contains(bot.sent[0].text, "Initiating install") {
+		t.Errorf("missing install-cue body: %q", bot.sent[0].text)
+	}
+
+	// triggerUpdate was called (the goroutine fires after deliver).
+	select {
+	case <-triggered:
+	case <-time.After(time.Second):
+		t.Fatal("triggerUpdate was not called")
+	}
+}
+
+func TestTootReplyDoesNotTriggerWithoutMarker(t *testing.T) {
+	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "Noted, sir. The release covers minor housekeeping.")
+
+	triggered := make(chan struct{}, 1)
+	toot.pendingUpdate = func() *pendingUpdate {
+		return &pendingUpdate{Tag: "v0.2.0", AssetURL: "https://x/asset"}
+	}
+	toot.triggerUpdate = func() { triggered <- struct{}{} }
+
+	toot.Reply(context.Background(), 42, "toot, what changed?")
+
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
+	}
+	select {
+	case <-triggered:
+		t.Fatal("triggerUpdate fired when marker was absent")
+	case <-time.After(50 * time.Millisecond):
+		// expected: no trigger
+	}
+}
+
+func TestTootReplyPromptsPendingUpdateWhenAvailable(t *testing.T) {
+	bot := &fakeBot{}
+	toot, runner := newTestToot(t, bot, "noted")
+	toot.pendingUpdate = func() *pendingUpdate {
+		return &pendingUpdate{Tag: "v0.2.0"}
+	}
+
+	toot.Reply(context.Background(), 42, "hey")
+
+	if len(runner.called) != 1 {
+		t.Fatalf("runner.called=%d, want 1", len(runner.called))
+	}
+	prompt := runner.called[0].AppendSystemPrompt
+	for _, want := range []string{"PENDING UPDATE", "v0.2.0", tootUpdateMarker} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}
+
+func TestTootReplyPromptsNoPendingWhenAbsent(t *testing.T) {
+	bot := &fakeBot{}
+	toot, runner := newTestToot(t, bot, "noted")
+	toot.pendingUpdate = func() *pendingUpdate { return nil }
+
+	toot.Reply(context.Background(), 42, "hey")
+
+	prompt := runner.called[0].AppendSystemPrompt
+	if !strings.Contains(prompt, "no pending update") {
+		t.Errorf("prompt should explicitly mention no pending update: %q", prompt)
+	}
+	if strings.Contains(prompt, tootUpdateMarker) {
+		t.Errorf("marker instructions should not appear when no update is pending")
 	}
 }
