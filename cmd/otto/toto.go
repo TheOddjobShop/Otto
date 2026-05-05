@@ -120,21 +120,42 @@ type Toto struct {
 	mu sync.Mutex // serializes Toto's own --resume against the toto session
 }
 
-// Reply runs a Toto turn and sends the result to chatID. ottoPrompt is the
-// in-flight Otto prompt (so Toto can refer to it). ottoSnippet is the tail
-// of what Otto has streamed so far this turn — partial assistant text Otto
-// is mid-way through emitting — so Toto can ground replies in real
-// progress instead of hand-waving. userMessage is what the user just sent
-// that arrived while Otto was busy.
+// Name returns "toto" — used by the petRegistry to route messages
+// addressed to him directly.
+func (t *Toto) Name() string { return "toto" }
+
+// Reply runs a Toto turn for a direct-address message — the user
+// said "toto, ..." (or similar) and we routed it here. No Otto-busy
+// context is injected; Toto just chats in his voice.
+func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage string) {
+	t.replyWithContext(ctx, chatID, userMessage, "", "")
+}
+
+// BusyReply runs a Toto turn for the busy-fallback path — Otto is
+// mid-task and the user sent another message. ottoPrompt and
+// ottoSnippet ground Toto's reply in what Otto's actually working on.
+func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
+	t.replyWithContext(ctx, chatID, userMessage, ottoPrompt, ottoSnippet)
+}
+
+// replyWithContext is the shared implementation for both paths.
+// ottoPrompt and ottoSnippet are empty for direct-address replies and
+// non-empty for busy-fallback replies; the system prompt assembly
+// adds the Otto-context sections only when present.
 //
-// Toto is invoked with no MCP config and --disallowedTools "*", so even if
-// the model tried to call a tool, Claude Code would refuse. Belt-and-
-// suspenders against any prompt-injected behaviour.
-func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
+// Toto is invoked with no MCP config and --disallowedTools "*", so
+// even if the model tried to call a tool, Claude Code would refuse.
+func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	systemPrompt := t.persona
+	if ottoPrompt == "" && ottoSnippet == "" {
+		systemPrompt += "\n\n───────────────────────────────────────────────\n"
+		systemPrompt += "THE USER ADDRESSED YOU DIRECTLY.\n"
+		systemPrompt += "───────────────────────────────────────────────\n\n"
+		systemPrompt += "They want to talk to YOU, not Otto. Otto isn't busy on this one — they specifically said your name. Greet them like a cat. Chat in your voice."
+	}
 	if ottoPrompt != "" {
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
 		systemPrompt += "OTTO IS CURRENTLY WORKING ON THIS FOR THE USER:\n"
@@ -166,12 +187,15 @@ func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt,
 		}
 	}()
 
-	// Toto's runner has empty configured systemPrompt and mcpConfigPath
-	// (set in main.go). We inject the per-call persona + Otto-context
-	// via AppendSystemPrompt so the system prompt can change between
-	// calls based on what Otto is currently working on.
+	// Direct-address pings can have an empty body ("toto"). Send a
+	// minimal user-side prompt so Claude has something to react to.
+	prompt := userMessage
+	if prompt == "" {
+		prompt = "(the user pinged you with no content — likely a greeting or attention check)"
+	}
+
 	err := t.runner.Run(ctx, claude.RunArgs{
-		Prompt:             userMessage,
+		Prompt:             prompt,
 		SessionID:          t.session.ID(),
 		Model:              totoModel,
 		DisallowedTools:    []string{"*"},
@@ -188,10 +212,14 @@ func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt,
 	}
 
 	if err != nil {
-		// Toto failing is annoying but not the end of the world — fall back
-		// to a hardcoded message so the user still gets *something* during
-		// Otto's busy window.
-		t.send(ctx, chatID, "mrow. (toto's having a moment, otto's still busy)")
+		// Toto failing falls back to a hardcoded message so the user
+		// still gets *something*. Voice changes slightly depending on
+		// the path.
+		fallback := "mrow. (toto's having a moment, otto's still busy)"
+		if ottoPrompt == "" && ottoSnippet == "" {
+			fallback = "mrow. (sorry, brain not working. try me again later.)"
+		}
+		t.send(ctx, chatID, fallback)
 		log.Printf("toto run error: %v", err)
 		return
 	}
@@ -202,10 +230,6 @@ func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage, ottoPrompt,
 	}
 	out = stripMarkdown(out)
 	t.send(ctx, chatID, out)
-	// Note: we deliberately ignore PermissionDenials for Toto — with
-	// --disallowedTools "*" any tool attempt is denied by design, and we
-	// don't want to surface inline-keyboard buttons asking the user to
-	// approve tools for the no-tools persona.
 }
 
 // send prepends a randomly-chosen ASCII art and sends the result via

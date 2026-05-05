@@ -31,6 +31,7 @@ type handler struct {
 	otto    *ottoState
 	toto    *Toto
 	updater *updater
+	pets    *petRegistry // routes name-addressed messages to Toto/Toot/etc.
 
 	// dispatchWG tracks in-flight dispatch goroutines so the polling
 	// loop's caller (main.go on shutdown, or tests after their window)
@@ -196,6 +197,16 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 		}
 		return
 	}
+	// Pet routing: if the message is text-only (no photo) and addressed
+	// to a known pet by name, route directly to the pet instead of Otto.
+	// Photos always go to Otto — pets are pure-text in v1.
+	if len(u.PhotoIDs) == 0 && h.pets != nil {
+		if pet, body, ok := h.pets.Match(u.Text); ok {
+			log.Printf("pet routing: %s ← %q", pet.Name(), truncate(u.Text, 60))
+			pet.Reply(ctx, u.ChatID, body)
+			return
+		}
+	}
 	// Try to claim Otto. If he's free, run him; if he's busy, hand off to
 	// Toto so the user gets a reply instead of silence.
 	if h.otto.tryAcquire(u.Text) {
@@ -213,7 +224,7 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 	previewIn := truncate(u.Text, 60)
 	previewOut := truncate(ottoPrompt, 60)
 	log.Printf("otto busy → toto (silence=%s) msg=%q inflight=%q", silence.Round(time.Second), previewIn, previewOut)
-	h.toto.Reply(ctx, u.ChatID, u.Text, ottoPrompt, ottoSnippet)
+	h.toto.BusyReply(ctx, u.ChatID, u.Text, ottoPrompt, ottoSnippet)
 }
 
 func truncate(s string, n int) string {
