@@ -106,21 +106,37 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	systemPrompt += "───────────────────────────────────────────────\n\n"
 	systemPrompt += "This is not a release announcement. They want to talk to YOU. Stay in your voice — dutiful, formal-ish, dryly nerdy — but engage. You may discuss Otto, Toto, releases, your job, whatever they bring up. Decline tool requests politely (you only talk). Keep replies brief; phone-screen friendly."
 
-	// Inject pending-update awareness so Toot can act on install
-	// requests in chat. The marker is the side-channel the dispatcher
-	// uses to fire the install — Toot must only emit it when the user
-	// is *clearly* requesting the install, not just chatting about it.
+	// Inject the install_update tool when a release is pending. Framing
+	// it as a "tool you can call" (rather than a strict marker rule)
+	// nudges Toot toward using judgment on natural phrasings ("can you
+	// update", "would you mind installing", etc.) rather than only
+	// matching the literal example wordings.
 	if t.pendingUpdate != nil {
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
-		systemPrompt += "PENDING UPDATE\n"
+		systemPrompt += "TOOLS AVAILABLE TO YOU\n"
 		systemPrompt += "───────────────────────────────────────────────\n\n"
 		if p := t.pendingUpdate(); p != nil {
-			systemPrompt += fmt.Sprintf("There is a pending release ready to install: %s.\n\n", p.Tag)
-			systemPrompt += "If — and only if — the user has clearly asked you to install it RIGHT NOW in this very message (examples: \"do it\", \"update\", \"install\", \"go ahead\", \"yes do it\", \"toot update\"), end your reply with this exact marker on its own line:\n\n  "
+			systemPrompt += fmt.Sprintf("install_update — installs the pending release (%s).\n\n", p.Tag)
+			systemPrompt += "To call this tool, end your reply with the literal marker on its own line:\n\n  "
 			systemPrompt += tootUpdateMarker
-			systemPrompt += "\n\nThe marker is invisible — the system strips it from the visible reply and starts the install. After install completes, the user will see your standard \"Installed v…, restarting\" confirmation.\n\nDo NOT emit the marker for casual mentions of updates, questions about the release, or anything ambiguous. \"What changed?\" → no marker. \"Is there an update?\" → no marker. \"What's it about?\" → no marker. Only affirmative install requests trigger.\n\nWhen you do trigger, phrase your reply in your voice as if you're personally seeing the install through (\"Initiating install of v…, sir. Stand by.\")."
+			systemPrompt += "\n\nThe marker is invisible to the user — the system strips it and starts the install. After install completes, the standard \"Installed v…, restarting\" confirmation appears.\n\n"
+			systemPrompt += "WHEN TO CALL install_update\n\n"
+			systemPrompt += "Use your judgment. If the user's message is *any reasonable form* of asking you to install — direct, polite, colloquial, terse — call the tool. Don't be overly literal:\n\n"
+			systemPrompt += "  - \"do it\" / \"update\" / \"install\" / \"go ahead\"\n"
+			systemPrompt += "  - \"can you update?\" / \"could you install?\" / \"would you mind?\"\n"
+			systemPrompt += "  - \"hey toot can you update\" / \"toot please install\"\n"
+			systemPrompt += "  - \"yeah do it\" / \"fire it up\" / \"ship it\" / \"send it\"\n"
+			systemPrompt += "  - \"yes\" or \"sure\" when you've already brought up the install\n\n"
+			systemPrompt += "Trust your read of the conversation. If it sounds like a yes, it's a yes.\n\n"
+			systemPrompt += "DO NOT call install_update for:\n\n"
+			systemPrompt += "  - questions about what changed (\"what's in this release?\")\n"
+			systemPrompt += "  - status checks (\"is there an update?\", \"do we need one?\")\n"
+			systemPrompt += "  - speculation (\"should I update?\", \"is it worth it?\")\n"
+			systemPrompt += "  - hesitation (\"maybe later\", \"idk\")\n\n"
+			systemPrompt += "If you're genuinely uncertain whether they're asking, reply with one short clarifying question (\"Confirm: install " + p.Tag + " now, sir?\") and DON'T call the tool. The user will need to address you again with their answer.\n\n"
+			systemPrompt += "When you DO call the tool, phrase your reply as though you're personally seeing the install through (\"Initiating install of " + p.Tag + ", sir. Stand by.\"). Stay in your voice."
 		} else {
-			systemPrompt += "There is no pending update right now. If the user asks you to install something, explain politely that there's nothing to install — Otto is on the latest version. Do NOT emit any install marker."
+			systemPrompt += "(no tools available right now — there's no pending update.)\n\nIf the user asks you to install something, explain politely that there's nothing to install — Otto is on the latest version."
 		}
 	}
 

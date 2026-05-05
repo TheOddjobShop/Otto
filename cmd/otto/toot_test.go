@@ -218,7 +218,14 @@ func TestTootReplyPromptsPendingUpdateWhenAvailable(t *testing.T) {
 		t.Fatalf("runner.called=%d, want 1", len(runner.called))
 	}
 	prompt := runner.called[0].AppendSystemPrompt
-	for _, want := range []string{"PENDING UPDATE", "v0.2.0", tootUpdateMarker} {
+	// Tool framing + tag + marker + the loosened-judgment guidance.
+	for _, want := range []string{
+		"install_update",
+		"v0.2.0",
+		tootUpdateMarker,
+		"any reasonable form",  // loosened judgment language
+		"can you update",       // example of polite phrasing accepted
+	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
