@@ -54,23 +54,40 @@ func newPetRegistry(pets ...Pet) *petRegistry {
 //	<name>! body      (or "?" or ".")
 //	<name> body       (whitespace delimiter)
 //	@<name> body
+//	hey <name> ...    — vocative prefix; everything above also works
+//	                     with a leading "hey " (e.g. "hey @toto", "hey toot, hi")
 //
-// The pet name MUST be the first word. "I asked toto about it" does
-// NOT route to Toto. "totoman" does NOT route. This is intentional:
-// strict matching avoids false positives on casual references.
+// The pet name MUST be the first word (or the second after "hey").
+// "I asked toto about it" does NOT route to Toto. "totoman" does NOT
+// route. This is intentional: strict matching avoids false positives.
 func (r *petRegistry) Match(text string) (Pet, string, bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, "", false
 	}
 
-	// Allow optional @ prefix.
+	// First attempt: pet name as the first word (with optional @).
+	if pet, body, ok := r.matchAddress(text); ok {
+		return pet, body, true
+	}
+
+	// Second attempt: peel a leading "hey" and retry once. "hey toto"
+	// is the most common vocative form that doesn't fit the strict
+	// first-word rule, so we accept it here. "heyy" / "heyman" do
+	// NOT peel — only the exact word "hey" followed by a non-word
+	// character.
+	if rest, ok := peelHey(text); ok {
+		return r.matchAddress(rest)
+	}
+	return nil, "", false
+}
+
+// matchAddress is the strict first-word matcher (with optional @).
+func (r *petRegistry) matchAddress(text string) (Pet, string, bool) {
 	head := text
 	if strings.HasPrefix(head, "@") {
 		head = head[1:]
 	}
-
-	// Find end of first word (anything not [A-Za-z0-9]).
 	end := 0
 	for end < len(head) && isWordChar(head[end]) {
 		end++
@@ -78,7 +95,6 @@ func (r *petRegistry) Match(text string) (Pet, string, bool) {
 	if end == 0 {
 		return nil, "", false
 	}
-
 	name := strings.ToLower(head[:end])
 	var matched Pet
 	for _, p := range r.pets {
@@ -90,11 +106,24 @@ func (r *petRegistry) Match(text string) (Pet, string, bool) {
 	if matched == nil {
 		return nil, "", false
 	}
-
-	// Strip the address: skip the name, then any trailing punctuation
-	// or whitespace, leaving the user's actual content.
 	rest := strings.TrimLeft(head[end:], " \t,:!?.-")
 	return matched, strings.TrimSpace(rest), true
+}
+
+// peelHey returns the body of `text` with a leading "hey " (or "hey,"
+// etc.) removed. ok=false when text doesn't start with the exact word
+// "hey" followed by a non-word character.
+func peelHey(text string) (string, bool) {
+	if len(text) < 4 {
+		return "", false
+	}
+	if !strings.EqualFold(text[:3], "hey") {
+		return "", false
+	}
+	if isWordChar(text[3]) {
+		return "", false // "heyman", "heyy", etc.
+	}
+	return strings.TrimLeft(text[3:], " \t,:!?.-"), true
 }
 
 func isWordChar(b byte) bool {

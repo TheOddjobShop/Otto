@@ -53,17 +53,29 @@ func TestPetRegistryMatch(t *testing.T) {
 		{"@toto, hi", "toto", "hi"},
 		{"@toot tell me about the release", "toot", "tell me about the release"},
 
+		// "hey <pet>" vocative form.
+		{"hey toto", "toto", ""},
+		{"hey toot", "toot", ""},
+		{"Hey TOTO", "toto", ""}, // case-insensitive
+		{"hey toto, what's up", "toto", "what's up"},
+		{"hey toto how are you", "toto", "how are you"},
+		{"hey @toto whatever", "toto", "whatever"}, // hey + @ form
+		{"hey, toto", "toto", ""},                  // "hey," then "toto"
+
 		// Non-matches.
 		{"", "", ""},
 		{"   ", "", ""},
 		{"hello", "", ""},
 		{"I asked toto about it", "", ""},  // first word is "I"
-		{"hey toto", "", ""},               // first word is "hey"
 		{"totoman", "", ""},                // first word is "totoman"
 		{"toto2", "", ""},                  // first word is "toto2", not "toto"
 		{"ototo", "", ""},                  // first word is "ototo"
 		{"otto, ping toto for me", "", ""}, // addressed to otto, who isn't a pet
 		{"123 toto", "", ""},               // first word is "123"
+		{"heyy toto", "", ""},              // "heyy" not "hey"
+		{"heyman toto", "", ""},            // "hey" must be followed by a break
+		{"hey", "", ""},                    // bare "hey" with no pet
+		{"hey there", "", ""},              // "there" isn't a pet
 	}
 
 	for _, c := range cases {
