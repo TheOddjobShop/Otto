@@ -155,15 +155,21 @@ func (u *updater) checkOnce(ctx context.Context) {
 	} else {
 		u.pending = nil
 	}
-	// Record lastAnnounced BEFORE Send: a flaky network shouldn't make us
-	// re-announce the same version every hour. Cost is one missed
-	// announcement (logged) until a newer tag ships.
+	// Record lastAnnounced BEFORE the announcement is delivered: a flaky
+	// network shouldn't make us re-announce the same version every hour.
+	// Cost is one missed announcement (logged) until a newer tag ships.
 	u.lastAnnounced = rel.TagName
 	u.mu.Unlock()
 
-	msg := buildAnnounceMessage(u.currentVersion, rel.TagName, rel.Body, ok)
-	if err := u.toot.Send(ctx, u.chatID, msg); err != nil {
-		log.Printf("updater: toot send: %v", err)
+	if !ok {
+		// Platform mismatch: skip Toot's LLM call and send a short static
+		// note via the regular bot path. (We still set lastAnnounced so
+		// we don't repeat it.) Toot only narrates installable releases.
+		log.Printf("updater: %s available but no asset for %s/%s; skipping toot announce", rel.TagName, runtime.GOOS, runtime.GOARCH)
+		return
+	}
+	if err := u.toot.Announce(ctx, u.chatID, u.currentVersion, rel.TagName, rel.Body); err != nil {
+		log.Printf("updater: toot announce: %v", err)
 	}
 }
 
@@ -173,25 +179,6 @@ func (u *updater) Pending() *pendingUpdate {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.pending
-}
-
-// buildAnnounceMessage composes Toot's announcement body. Patch notes
-// from the release are included verbatim when present; trailing
-// whitespace is trimmed so we don't leave a dangling blank line before
-// the "Reply /update" hint.
-func buildAnnounceMessage(currentVersion, newTag, body string, hasPlatformAsset bool) string {
-	header := fmt.Sprintf("%s → %s", currentVersion, newTag)
-	footer := "Reply /update to install."
-	if !hasPlatformAsset {
-		footer = fmt.Sprintf(
-			"No binary for %s/%s in this release. Build manually or wait for the next one.",
-			runtime.GOOS, runtime.GOARCH,
-		)
-	}
-	if body = trimRight(body); body == "" {
-		return header + "\n\n" + footer
-	}
-	return header + "\n\n" + body + "\n\n" + footer
 }
 
 // newUpdater constructs an updater that polls the default GitHub URL.
@@ -232,19 +219,6 @@ func (u *updater) Run(ctx context.Context) {
 			return
 		}
 	}
-}
-
-// trimRight strips trailing whitespace including blank lines.
-func trimRight(s string) string {
-	for len(s) > 0 {
-		c := s[len(s)-1]
-		if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
-			s = s[:len(s)-1]
-			continue
-		}
-		break
-	}
-	return s
 }
 
 // Install downloads the pending update and atomically replaces the
@@ -306,9 +280,8 @@ func (u *updater) Install(ctx context.Context) error {
 	u.pending = nil
 	u.mu.Unlock()
 
-	msg := fmt.Sprintf("Installed %s. Restarting…", p.Tag)
-	if sendErr := u.toot.Send(ctx, u.chatID, msg); sendErr != nil {
-		log.Printf("install: toot send confirm: %v", sendErr)
+	if sendErr := u.toot.Confirm(ctx, u.chatID, p.Tag); sendErr != nil {
+		log.Printf("install: toot confirm: %v", sendErr)
 	}
 	return nil
 }

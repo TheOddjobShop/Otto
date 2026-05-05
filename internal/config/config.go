@@ -29,6 +29,15 @@ type Config struct {
 	// Toto's built-in system prompt via --append-system-prompt. Mirrors
 	// SystemPromptPath but for the Toto persona.
 	TotoPersonaPath string `toml:"toto_persona_path"`
+	// TootSessionIDPath is where the "Toot" owl persona persists its
+	// own conversation session ID. Toot is the release-notes courier
+	// that announces new versions when the updater detects them.
+	// Defaults to <session_id_path>_toot when empty.
+	TootSessionIDPath string `toml:"toot_session_id_path"`
+	// TootPersonaPath optionally points to a Markdown file appended to
+	// Toot's built-in system prompt via --append-system-prompt. Mirrors
+	// TotoPersonaPath but for the Toot owl persona.
+	TootPersonaPath string `toml:"toot_persona_path"`
 }
 
 func Load(path string) (*Config, error) {

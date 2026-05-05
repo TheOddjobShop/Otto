@@ -5,10 +5,24 @@ package main
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"html"
+	"log"
+	"strings"
+	"sync"
 
+	"otto/internal/claude"
 	"otto/internal/telegram"
 )
+
+// tootModel pins Toot to Sonnet — he's smarter than Toto (haiku) on
+// purpose. He thinks before composing changelog summaries.
+const tootModel = "claude-sonnet-4-6"
+
+// tootEffort is the reasoning budget passed to Claude Code as --effort.
+// Medium gives Toot a few moments to organize the changelog without
+// burning a huge token budget on every release.
+const tootEffort = "medium"
 
 // tootArtFile is the bundled owl ASCII-art file. Three blocks separated
 // by blank lines; same format the existing parseAsciiArts (in toto.go)
@@ -25,34 +39,142 @@ var tootCycler = newAsciiCycler(parseAsciiArts(tootArtFile))
 // cycler, or "" if no arts were loaded.
 func pickTootArt() string { return tootCycler.Next() }
 
-// Toot is the owl character that delivers update notifications. Unlike
-// Toto, Toot has no LLM and no session — it's a one-way courier. The
-// updater calls Send() with a fully-composed body (release announcement
-// or install confirmation); Toot prepends a random owl art via <pre>
-// tags in HTML mode and ships it.
+// Toot is the owl character that delivers update notifications. He
+// reads patch notes and explains them in his own voice (nerdy,
+// systematic, dutiful). Mirrors Toto's architecture — own runner,
+// session, persona — but uses a smarter model and a different prompt.
 //
-// Conversational messages (command replies, error messages) stay on the
-// regular bot — Toot exists specifically to mark "this is an update
-// event" visually so the user knows what kind of message they're
-// reading.
+// Toot's tools are all denied (--disallowedTools "*") so even though
+// he runs through Claude Code, he can't touch the filesystem, MCPs,
+// or anything else. He talks. That's it.
+//
+// Conversational messages (command replies, error messages) stay on
+// the regular bot — Toot exists specifically to mark "this is an
+// update event" visually so the user knows what kind of message
+// they're reading.
 type Toot struct {
-	bot telegram.BotClient
+	bot     telegram.BotClient
+	runner  claude.Runner
+	session *claude.Session
+	persona string // base system prompt for Toot (TOOT.md content)
+
+	mu sync.Mutex // serializes Toot's own --resume against the toot session
 }
 
-func newToot(bot telegram.BotClient) *Toot {
-	return &Toot{bot: bot}
+// Announce composes a release notification in Toot's voice and sends
+// it. body is the GitHub release notes (auto-generated changelog when
+// generate_release_notes: true). Toot reads them, explains the items,
+// and signs off in character.
+func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTag, body string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	systemPrompt := t.persona
+	if systemPrompt != "" {
+		systemPrompt += "\n\n"
+	}
+	systemPrompt += "───────────────────────────────────────────────\n"
+	systemPrompt += "RELEASE TO ANNOUNCE\n"
+	systemPrompt += "───────────────────────────────────────────────\n\n"
+	systemPrompt += fmt.Sprintf("Current version installed: %s\n", currentVersion)
+	systemPrompt += fmt.Sprintf("New version available:     %s\n\n", newTag)
+	if body != "" {
+		systemPrompt += "Patch notes from the release:\n\n"
+		systemPrompt += body + "\n\n"
+	} else {
+		systemPrompt += "No patch notes were attached to this release.\n\n"
+	}
+	systemPrompt += "Compose your announcement now. End by reminding the user to reply /update to install. Keep it concise — phone-screen friendly."
+
+	prompt := fmt.Sprintf("Announce release %s.", newTag)
+
+	events := make(chan claude.Event, 32)
+	doneParsing := make(chan struct{})
+	var assistantText strings.Builder
+	var capturedSessionID string
+
+	go func() {
+		defer close(doneParsing)
+		for ev := range events {
+			switch e := ev.(type) {
+			case claude.AssistantTextEvent:
+				assistantText.WriteString(e.Text)
+			case claude.SessionEvent:
+				capturedSessionID = e.ID
+			}
+		}
+	}()
+
+	err := t.runner.Run(ctx, claude.RunArgs{
+		Prompt:             prompt,
+		SessionID:          t.session.ID(),
+		Model:              tootModel,
+		Effort:             tootEffort,
+		DisallowedTools:    []string{"*"},
+		AppendSystemPrompt: systemPrompt,
+		Events:             events,
+	})
+	close(events)
+	<-doneParsing
+
+	if capturedSessionID != "" && capturedSessionID != t.session.ID() {
+		if setErr := t.session.Set(capturedSessionID); setErr != nil {
+			log.Printf("toot session save: %v", setErr)
+		}
+	}
+
+	if err != nil {
+		// Fall back to a static announcement so the user still hears
+		// about the release if Claude is briefly unavailable.
+		log.Printf("toot announce error: %v (falling back to static)", err)
+		fallback := fmt.Sprintf(
+			"Release %s is available (current: %s). Reply /update to install.",
+			newTag, currentVersion,
+		)
+		return t.deliver(ctx, chatID, fallback)
+	}
+
+	out := strings.TrimSpace(assistantText.String())
+	if out == "" {
+		out = fmt.Sprintf("Release %s is available. Reply /update to install.", newTag)
+	}
+	out = stripMarkdown(out)
+	return t.deliver(ctx, chatID, out)
 }
 
-// Send delivers body with a random owl art prepended. The body is
-// HTML-escaped so any literal <, >, & survive Telegram's HTML parser.
-func (t *Toot) Send(ctx context.Context, chatID int64, body string) error {
+// Confirm sends the post-install "restarting" message in Toot's voice.
+// No LLM call — the message is short, predictable, and frequent
+// enough that an extra Claude invocation per install would be waste.
+// The voice is encoded in the templated string itself.
+func (t *Toot) Confirm(ctx context.Context, chatID int64, tag string) error {
+	body := fmt.Sprintf(
+		"Installation complete. %s is in place. Restarting the process — Otto will be back online shortly.",
+		tag,
+	)
+	return t.deliver(ctx, chatID, body)
+}
+
+// deliver wraps body with Toot's banner + a random owl art and sends
+// via HTML mode. Banner format (blockquote + bold all-caps + emoji)
+// mirrors Toto's send method so the two characters render with the
+// same visual structure but different colors / emoji.
+func (t *Toot) deliver(ctx context.Context, chatID int64, body string) error {
 	art := pickTootArt()
 	escapedBody := html.EscapeString(body)
-	var msg string
+	var sb strings.Builder
+	sb.WriteString("<blockquote>🦉 <b>TOOT</b></blockquote>\n")
 	if art != "" {
-		msg = "<pre>" + html.EscapeString(art) + "</pre>\n\n" + escapedBody
-	} else {
-		msg = escapedBody
+		sb.WriteString("<pre>")
+		sb.WriteString(html.EscapeString(art))
+		sb.WriteString("</pre>\n\n")
 	}
-	return t.bot.SendMessageHTML(ctx, chatID, msg)
+	sb.WriteString(escapedBody)
+	if err := t.bot.SendMessageHTML(ctx, chatID, sb.String()); err != nil {
+		// HTML send failure (rare) falls back to plain text so the
+		// content still reaches the user, banner and all.
+		log.Printf("toot html send error: %v (falling back to plain)", err)
+		plain := "🦉 TOOT\n\n" + body
+		return telegram.SendChunked(ctx, t.bot, chatID, plain)
+	}
+	return nil
 }
