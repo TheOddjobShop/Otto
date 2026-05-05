@@ -108,6 +108,19 @@ func main() {
 		log.Fatalf("toot session: %v", err)
 	}
 
+	toto := &Toto{
+		bot:     bot,
+		runner:  totoRunner,
+		session: totoSession,
+		persona: totoPersona,
+	}
+	toot := &Toot{
+		bot:     bot,
+		runner:  tootRunner,
+		session: tootSession,
+		persona: tootPersona,
+	}
+
 	h := &handler{
 		bot:       bot,
 		allow:     allow,
@@ -115,20 +128,12 @@ func main() {
 		runner:    runner,
 		startedAt: time.Now(),
 		otto:      newOttoState(),
-		toto: &Toto{
-			bot:     bot,
-			runner:  totoRunner,
-			session: totoSession,
-			persona: totoPersona,
-		},
+		toto:      toto,
+		// Pet registry — addressed messages route here before Otto.
+		// Adding a new pet later: implement Pet, append to this list.
+		pets: newPetRegistry(toto, toot),
 	}
 
-	toot := &Toot{
-		bot:     bot,
-		runner:  tootRunner,
-		session: tootSession,
-		persona: tootPersona,
-	}
 	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
 	go h.updater.Run(ctx)
 
