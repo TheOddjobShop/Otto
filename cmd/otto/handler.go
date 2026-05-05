@@ -19,6 +19,12 @@ import (
 const (
 	pollErrorBaseBackoff = time.Second
 	pollErrorMaxBackoff  = time.Minute
+	// dispatchBatchSpacing is how long the polling loop pauses between
+	// consecutive updates inside the same batch. Eliminates the race
+	// where two parallel goroutines arrive at Otto's tryAcquire and
+	// Toto's snapshot in opposite order, making Toto report "idle"
+	// while Otto is just about to start working on a sibling message.
+	dispatchBatchSpacing = 150 * time.Millisecond
 )
 
 type handler struct {
@@ -192,9 +198,24 @@ func (h *handler) runPollingLoop(ctx context.Context) error {
 			continue
 		}
 		backoff = pollErrorBaseBackoff
-		for _, u := range updates {
+		for i, u := range updates {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
+			}
+			// When a batch contains multiple updates (user sent messages
+			// close enough together to land in the same long-poll), pause
+			// briefly between dispatches so each message's routing
+			// decision lands in order. Without this, parallel goroutines
+			// race on Otto's busy state — Toto could snapshot "idle"
+			// while Otto's about to start working on a sibling message.
+			// 150ms is plenty for tryAcquire to win its mutex; single-
+			// message batches (the common case) are unaffected.
+			if i > 0 {
+				select {
+				case <-time.After(dispatchBatchSpacing):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 			// Async dispatch so Otto's long-running call doesn't block
 			// the polling loop or Toto's fallback replies.
