@@ -162,7 +162,7 @@ func (t *Toot) deliver(ctx context.Context, chatID int64, body string) error {
 	art := pickTootArt()
 	escapedBody := html.EscapeString(body)
 	var sb strings.Builder
-	sb.WriteString("<blockquote>🦉 <b>TOOT</b></blockquote>\n")
+	sb.WriteString("<blockquote><b>TOOT</b></blockquote>\n")
 	if art != "" {
 		sb.WriteString("<pre>")
 		sb.WriteString(html.EscapeString(art))
@@ -173,7 +173,7 @@ func (t *Toot) deliver(ctx context.Context, chatID int64, body string) error {
 		// HTML send failure (rare) falls back to plain text so the
 		// content still reaches the user, banner and all.
 		log.Printf("toot html send error: %v (falling back to plain)", err)
-		plain := "🦉 TOOT\n\n" + body
+		plain := "TOOT\n\n" + body
 		return telegram.SendChunked(ctx, t.bot, chatID, plain)
 	}
 	return nil

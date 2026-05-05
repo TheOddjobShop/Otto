@@ -219,7 +219,7 @@ func (t *Toto) send(ctx context.Context, chatID int64, body string) {
 	art := pickAsciiArt()
 	escapedBody := html.EscapeString(body)
 	var sb strings.Builder
-	sb.WriteString("<blockquote>🐱 <b>TOTO</b></blockquote>\n")
+	sb.WriteString("<blockquote><b>TOTO</b></blockquote>\n")
 	if art != "" {
 		sb.WriteString("<pre>")
 		sb.WriteString(html.EscapeString(art))
@@ -228,7 +228,7 @@ func (t *Toto) send(ctx context.Context, chatID int64, body string) {
 	sb.WriteString(escapedBody)
 	if err := t.bot.SendMessageHTML(ctx, chatID, sb.String()); err != nil {
 		log.Printf("toto html send error: %v (falling back to plain)", err)
-		plain := "🐱 TOTO\n\n" + body
+		plain := "TOTO\n\n" + body
 		if err2 := telegram.SendChunked(ctx, t.bot, chatID, plain); err2 != nil {
 			log.Printf("toto plain send error: %v", err2)
 		}
