@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Target selects which core file an operation applies to.
@@ -18,6 +19,7 @@ const (
 // Core manages the two curated-memory files in dir. Caps are measured in
 // characters (a stable proxy for the token budget) and enforced on writes.
 type Core struct {
+	mu      sync.RWMutex
 	dir     string
 	memCap  int // char cap for MEMORY.md
 	userCap int // char cap for USER.md
@@ -55,8 +57,9 @@ func (c *Core) read(t Target) (string, error) {
 	return strings.TrimRight(string(body), "\n"), nil
 }
 
-// Load returns (user, memory) file contents, "" for whichever is missing.
-func (c *Core) Load() (user, memory string, err error) {
+// loadLocked reads both files without acquiring c.mu. Callers must already
+// hold the lock (read or write).
+func (c *Core) loadLocked() (user, memory string, err error) {
 	if user, err = c.read(TargetUser); err != nil {
 		return "", "", err
 	}
@@ -66,10 +69,19 @@ func (c *Core) Load() (user, memory string, err error) {
 	return user, memory, nil
 }
 
+// Load returns (user, memory) file contents, "" for whichever is missing.
+func (c *Core) Load() (user, memory string, err error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.loadLocked()
+}
+
 // Inject formats the core into a single block suitable for
 // --append-system-prompt. Returns "" when both files are empty.
 func (c *Core) Inject() (string, error) {
-	user, memory, err := c.Load()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	user, memory, err := c.loadLocked()
 	if err != nil {
 		return "", err
 	}
@@ -98,6 +110,8 @@ func (c *Core) Inject() (string, error) {
 // push the file past 80% of its cap — the over-capacity error includes the
 // current contents so the caller (the model) can consolidate via Replace.
 func (c *Core) Add(t Target, content string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	content = strings.TrimSpace(content)
 	if err := scanContent(content); err != nil {
 		return err
@@ -124,18 +138,30 @@ func (c *Core) Add(t Target, content string) error {
 }
 
 // write persists body to the target file with 0600 perms, creating the
-// directory if needed. Uses tmp+rename for atomicity.
+// directory if needed. Uses a uniquely-named temp file + rename for an atomic,
+// collision-free swap.
 func (c *Core) write(t Target, body string) error {
 	if err := os.MkdirAll(c.dir, 0700); err != nil {
 		return fmt.Errorf("memory: ensure dir: %w", err)
 	}
 	path := c.path(t)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strings.TrimRight(body, "\n")+"\n"), 0600); err != nil {
-		return fmt.Errorf("memory: write %s: %w", tmp, err)
+	tmp, err := os.CreateTemp(c.dir, ".memwrite-*.tmp")
+	if err != nil {
+		return fmt.Errorf("memory: create temp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.WriteString(strings.TrimRight(body, "\n") + "\n"); err != nil {
+		tmp.Close()
+		return fmt.Errorf("memory: write %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("memory: close %s: %w", tmpName, err)
+	}
+	if err := os.Chmod(tmpName, 0600); err != nil {
+		return fmt.Errorf("memory: chmod %s: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("memory: rename %s: %w", path, err)
 	}
 	return nil
@@ -156,7 +182,10 @@ func entryExists(body, content string) bool {
 // content for unsafe material. Capacity is not re-checked because a replace
 // that shrinks or holds size steady is always safe; a growing replace that
 // breaches the cap is caught on the next Add.
+// Matching is raw substring over the whole file; pass a distinctive snippet.
 func (c *Core) Replace(t Target, oldText, content string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	content = strings.TrimSpace(content)
 	if err := scanContent(content); err != nil {
 		return err
@@ -177,7 +206,10 @@ func (c *Core) Replace(t Target, oldText, content string) error {
 
 // Remove deletes the unique occurrence of oldText. Errors if absent or
 // ambiguous. Leftover blank lines from the removed entry are collapsed.
+// Matching is raw substring over the whole file; pass a distinctive snippet.
 func (c *Core) Remove(t Target, oldText string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	body, err := c.read(t)
 	if err != nil {
 		return err

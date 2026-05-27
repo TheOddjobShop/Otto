@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -170,5 +172,32 @@ func TestRemoveMissingErrors(t *testing.T) {
 	c := newTestCore(t)
 	if err := c.Remove(TargetMemory, "not there"); err == nil {
 		t.Fatal("Remove of missing text should error")
+	}
+}
+
+func TestAddConcurrentNoLostUpdates(t *testing.T) {
+	c := NewCore(t.TempDir(), 1_000_000, 1_000_000) // huge caps so no capacity errors
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := c.Add(TargetMemory, fmt.Sprintf("fact number %d", i)); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent Add: %v", err)
+	}
+	_, mem, _ := c.Load()
+	for i := 0; i < n; i++ {
+		if !strings.Contains(mem, fmt.Sprintf("fact number %d", i)) {
+			t.Errorf("lost update: %q missing from store", fmt.Sprintf("fact number %d", i))
+		}
 	}
 }
