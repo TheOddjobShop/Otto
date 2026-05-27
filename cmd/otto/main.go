@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -19,6 +20,8 @@ import (
 	"otto/internal/auth"
 	"otto/internal/claude"
 	"otto/internal/config"
+	"otto/internal/memory"
+	"otto/internal/store"
 	"otto/internal/telegram"
 )
 
@@ -70,6 +73,21 @@ func main() {
 
 	runner := claude.NewExecRunner(cfg.ClaudeBinaryPath, cfg.MCPConfigPath, systemPrompt, home)
 
+	// Open the conversation turn-log store. store.Open creates the DB file but
+	// not its parent directory, so ensure the directory exists first.
+	if err := os.MkdirAll(filepath.Dir(cfg.StateDBPath), 0700); err != nil {
+		log.Fatalf("state db dir: %v", err)
+	}
+	memStore, err := store.Open(cfg.StateDBPath)
+	if err != nil {
+		log.Fatalf("open state db: %v", err)
+	}
+	defer memStore.Close()
+
+	// Curated memory core, injected into every persona's prompt and written
+	// via the otto-memory MCP server.
+	memCore := memory.NewCore(cfg.MemoryDir, memCapChars, userCapChars)
+
 	// Toto: separate runner with no MCP config (the empty mcpConfigPath
 	// makes NewExecRunner skip the --mcp-config flag entirely), separate
 	// session ID file, and a separate persona file. Toto's --model and
@@ -113,22 +131,29 @@ func main() {
 		runner:  totoRunner,
 		session: totoSession,
 		persona: totoPersona,
+		mem:     memCore,
+		store:   memStore,
 	}
 	toot := &Toot{
 		bot:     bot,
 		runner:  tootRunner,
 		session: tootSession,
 		persona: tootPersona,
+		mem:     memCore,
+		store:   memStore,
 	}
 
 	h := &handler{
-		bot:       bot,
-		allow:     allow,
-		session:   session,
-		runner:    runner,
-		startedAt: time.Now(),
-		otto:      newOttoState(),
-		toto:      toto,
+		bot:              bot,
+		allow:            allow,
+		session:          session,
+		runner:           runner,
+		startedAt:        time.Now(),
+		otto:             newOttoState(),
+		toto:             toto,
+		mem:              memCore,
+		store:            memStore,
+		baseSystemPrompt: systemPrompt,
 		// Pet registry — addressed messages route here before Otto.
 		// Adding a new pet later: implement Pet, append to this list.
 		pets: newPetRegistry(toto, toot),
@@ -159,8 +184,8 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB",
-		session.ID(), totoSession.ID(), tootSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona), len(tootPersona))
+	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB memory_dir=%s state_db=%s",
+		session.ID(), totoSession.ID(), tootSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona), len(tootPersona), cfg.MemoryDir, cfg.StateDBPath)
 	if err := h.runPollingLoop(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("polling loop: %v", err)
 	}
