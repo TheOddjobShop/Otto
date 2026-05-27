@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/BurntSushi/toml"
 )
@@ -37,6 +38,12 @@ type Config struct {
 	// Toot's built-in system prompt via --append-system-prompt. Mirrors
 	// TotoPersonaPath but for the Toot owl persona.
 	TootPersonaPath string `toml:"toot_persona_path"`
+	// MemoryDir holds the curated-memory files USER.md and MEMORY.md that are
+	// injected into every prompt. Defaults to <dir of session_id_path>/memory.
+	MemoryDir string `toml:"memory_dir"`
+	// StateDBPath is the SQLite database holding the conversation turn log
+	// (for session_search). Defaults to <dir of session_id_path>/state.db.
+	StateDBPath string `toml:"state_db_path"`
 }
 
 func Load(path string) (*Config, error) {
@@ -46,6 +53,13 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
+	}
+	base := filepath.Dir(cfg.SessionIDPath)
+	if cfg.MemoryDir == "" {
+		cfg.MemoryDir = filepath.Join(base, "memory")
+	}
+	if cfg.StateDBPath == "" {
+		cfg.StateDBPath = filepath.Join(base, "state.db")
 	}
 	return &cfg, nil
 }
