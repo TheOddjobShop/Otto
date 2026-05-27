@@ -462,6 +462,9 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	if err := telegram.SendChunked(sendCtx, h.bot, chatID, out); err != nil {
 		log.Printf("send error: %v", err)
 	}
+	// Log turns only on the success path (reached after the error/non-success
+	// early returns above), so session_search surfaces real conversation
+	// content rather than "⚠️ Claude error" noise. Keep these here, not earlier.
 	logTurn(sendCtx, h.store, "otto", "user", args.Prompt)
 	logTurn(sendCtx, h.store, "otto", "assistant", out)
 	if len(lastResult.PermissionDenials) > 0 {
