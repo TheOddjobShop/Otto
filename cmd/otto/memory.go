@@ -62,6 +62,12 @@ func embedAndStore(st *store.Store, emb embed.Embedder, turnID int64, content st
 // asynchronously embeds it for semantic search. A nil store or blank content is
 // a no-op. Turn logging must never break a reply, so embedding runs in a
 // detached goroutine.
+//
+// The embed goroutine is intentionally NOT tracked for shutdown: blocking
+// SIGTERM on in-flight embeds (up to 30s each) would delay restarts. On
+// shutdown a goroutine may race memStore.Close() — the resulting "database is
+// closed" error is logged and harmless (WAL keeps the DB consistent; at worst
+// one turn's vector is lost and that turn is still keyword-searchable).
 func logTurn(ctx context.Context, st *store.Store, emb embed.Embedder, persona, role, content string) {
 	if st == nil || strings.TrimSpace(content) == "" {
 		return

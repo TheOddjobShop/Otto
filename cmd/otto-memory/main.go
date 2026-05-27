@@ -72,7 +72,7 @@ func run() error {
 	}, srv.handleRemove)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "session_search",
-		Description: "Keyword-search past conversation turns (\"what did we discuss about X\"). Returns the most relevant matching turns.",
+		Description: "Search past conversation turns by meaning AND keyword (semantic + keyword retrieval). Use for \"what did we discuss about X\" and fuzzy recall where you don't remember the exact words.",
 	}, srv.handleSearch)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

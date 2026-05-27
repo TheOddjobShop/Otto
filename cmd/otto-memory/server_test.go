@@ -256,6 +256,30 @@ func TestMergeTurnsRespectsLimit(t *testing.T) {
 	}
 }
 
+// failEmbedder always errors, simulating Ollama being down.
+type failEmbedder struct{}
+
+func (failEmbedder) Embed(ctx context.Context, text string) (embed.Result, error) {
+	return embed.Result{}, context.DeadlineExceeded
+}
+func (failEmbedder) Name() string { return "fail" }
+
+func TestHandleSearchFailingEmbedderFallsBackToKeyword(t *testing.T) {
+	s := newTestServer(t)
+	s.embedder = failEmbedder{}
+	ctx := context.Background()
+	if _, err := s.store.AppendTurn(ctx, "otto", "user", "keyword cherry"); err != nil {
+		t.Fatal(err)
+	}
+	res, _, err := s.handleSearch(ctx, nil, searchArgs{Query: "cherry"})
+	if err != nil || res.IsError {
+		t.Fatalf("failing embedder should degrade, not error: err=%v res=%q", err, resultText(res))
+	}
+	if !strings.Contains(resultText(res), "cherry") {
+		t.Errorf("keyword fallback failed: %q", resultText(res))
+	}
+}
+
 // resultText extracts the concatenated text of a tool result for assertions.
 func resultText(res *mcp.CallToolResult) string {
 	var b strings.Builder

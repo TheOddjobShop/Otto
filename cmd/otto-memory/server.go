@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -100,6 +101,11 @@ func (s *memoryServer) handleRemove(ctx context.Context, req *mcp.CallToolReques
 // caller does not specify a limit.
 const defaultSearchLimit = 8
 
+// queryEmbedTimeout caps how long session_search waits on the embedder before
+// falling back to keyword-only search. Short so a cold/missing Ollama model
+// can't stall the tool call the model is waiting on.
+const queryEmbedTimeout = 6 * time.Second
+
 // maxTurnContentChars bounds how much of each matched turn's content
 // session_search echoes back, so one very long stored turn can't blow up the
 // tool response (which is fed straight into the model's context).
@@ -128,7 +134,10 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 
 	var semantic []store.Turn
 	if s.embedder != nil {
-		if r, err := s.embedder.Embed(ctx, args.Query); err == nil {
+		ectx, ecancel := context.WithTimeout(ctx, queryEmbedTimeout)
+		r, err := s.embedder.Embed(ectx, args.Query)
+		ecancel()
+		if err == nil {
 			if sem, serr := s.store.SearchSemantic(ctx, r.Vector, limit); serr == nil {
 				semantic = sem
 			} else {
