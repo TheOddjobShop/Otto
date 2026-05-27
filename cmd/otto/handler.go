@@ -13,6 +13,7 @@ import (
 
 	"otto/internal/auth"
 	"otto/internal/claude"
+	"otto/internal/embed"
 	"otto/internal/memory"
 	"otto/internal/store"
 	"otto/internal/telegram"
@@ -41,9 +42,10 @@ type handler struct {
 	updater *updater
 	pets    *petRegistry // routes name-addressed messages to Toto/Toot/etc.
 
-	mem              *memory.Core // injected into every Otto prompt; nil disables
-	store            *store.Store // turn log for session_search; nil disables
-	baseSystemPrompt string       // Otto's persona+footer prompt, before memory
+	mem              *memory.Core   // injected into every Otto prompt; nil disables
+	store            *store.Store   // turn log for session_search; nil disables
+	embedder         embed.Embedder // embeds turns for semantic search; nil disables
+	baseSystemPrompt string         // Otto's persona+footer prompt, before memory
 
 	// dispatchWG tracks in-flight dispatch goroutines so the polling
 	// loop's caller (main.go on shutdown, or tests after their window)
@@ -465,8 +467,8 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	// Log turns only on the success path (reached after the error/non-success
 	// early returns above), so session_search surfaces real conversation
 	// content rather than "⚠️ Claude error" noise. Keep these here, not earlier.
-	logTurn(sendCtx, h.store, "otto", "user", args.Prompt)
-	logTurn(sendCtx, h.store, "otto", "assistant", out)
+	logTurn(sendCtx, h.store, h.embedder, "otto", "user", args.Prompt)
+	logTurn(sendCtx, h.store, h.embedder, "otto", "assistant", out)
 	if len(lastResult.PermissionDenials) > 0 {
 		h.surfaceDenials(sendCtx, chatID, lastResult.PermissionDenials)
 	}

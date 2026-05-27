@@ -44,6 +44,12 @@ type Config struct {
 	// StateDBPath is the SQLite database holding the conversation turn log
 	// (for session_search). Defaults to <dir of session_id_path>/state.db.
 	StateDBPath string `toml:"state_db_path"`
+	// EmbedOllamaURL is the base URL of the local Ollama server used for
+	// semantic-memory embeddings. Default http://localhost:11434.
+	EmbedOllamaURL string `toml:"embed_ollama_url"`
+	// EmbedModels is the ordered list of Ollama embedding models to try
+	// (first healthy wins). Default ["embeddinggemma", "nomic-embed-text"].
+	EmbedModels []string `toml:"embed_models"`
 }
 
 func Load(path string) (*Config, error) {
@@ -60,6 +66,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.StateDBPath == "" {
 		cfg.StateDBPath = filepath.Join(base, "state.db")
+	}
+	if cfg.EmbedOllamaURL == "" {
+		cfg.EmbedOllamaURL = "http://localhost:11434"
+	}
+	if len(cfg.EmbedModels) == 0 {
+		cfg.EmbedModels = []string{"embeddinggemma", "nomic-embed-text"}
 	}
 	return &cfg, nil
 }

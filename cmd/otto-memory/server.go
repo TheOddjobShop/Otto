@@ -7,18 +7,22 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"otto/internal/embed"
 	"otto/internal/memory"
 	"otto/internal/store"
 )
 
 // memoryServer holds the dependencies the MCP tool handlers operate on.
 type memoryServer struct {
-	core  *memory.Core
-	store *store.Store
+	core     *memory.Core
+	store    *store.Store
+	embedder embed.Embedder // optional; nil = keyword-only search
 }
 
 type addArgs struct {
@@ -97,6 +101,11 @@ func (s *memoryServer) handleRemove(ctx context.Context, req *mcp.CallToolReques
 // caller does not specify a limit.
 const defaultSearchLimit = 8
 
+// queryEmbedTimeout caps how long session_search waits on the embedder before
+// falling back to keyword-only search. Short so a cold/missing Ollama model
+// can't stall the tool call the model is waiting on.
+const queryEmbedTimeout = 6 * time.Second
+
 // maxTurnContentChars bounds how much of each matched turn's content
 // session_search echoes back, so one very long stored turn can't blow up the
 // tool response (which is fed straight into the model's context).
@@ -122,10 +131,29 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 	if limit <= 0 {
 		limit = defaultSearchLimit
 	}
-	turns, err := s.store.SearchFTS(ctx, args.Query, limit)
-	if err != nil {
-		return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
+
+	var semantic []store.Turn
+	if s.embedder != nil {
+		ectx, ecancel := context.WithTimeout(ctx, queryEmbedTimeout)
+		r, err := s.embedder.Embed(ectx, args.Query)
+		ecancel()
+		if err == nil {
+			if sem, serr := s.store.SearchSemantic(ctx, r.Vector, limit); serr == nil {
+				semantic = sem
+			} else {
+				log.Printf("session_search: semantic: %v", serr)
+			}
+		} else {
+			log.Printf("session_search: embed unavailable, keyword-only: %v", err)
+		}
 	}
+
+	fts, ferr := s.store.SearchFTS(ctx, args.Query, limit)
+	if ferr != nil && len(semantic) == 0 {
+		return errResult(fmt.Sprintf("search failed: %v", ferr)), nil, nil
+	}
+
+	turns := mergeTurns(semantic, fts, limit)
 	if len(turns) == 0 {
 		return textResult("No matching past conversation turns."), nil, nil
 	}
@@ -136,4 +164,25 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 			tr.Persona, tr.Role, tr.TS.Format("2006-01-02 15:04"), truncateContent(tr.Content)))
 	}
 	return textResult(b.String()), nil, nil
+}
+
+// mergeTurns combines semantic and keyword results, semantic first, deduped by
+// turn ID, capped at limit. Semantic hits rank by meaning; keyword hits fill
+// the remainder (catching exact tokens vectors miss).
+func mergeTurns(semantic, fts []store.Turn, limit int) []store.Turn {
+	seen := make(map[int64]bool)
+	out := make([]store.Turn, 0, limit)
+	for _, group := range [][]store.Turn{semantic, fts} {
+		for _, t := range group {
+			if len(out) >= limit {
+				return out
+			}
+			if seen[t.ID] {
+				continue
+			}
+			seen[t.ID] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }

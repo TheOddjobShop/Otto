@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"otto/internal/embed"
 	"otto/internal/memory"
 	"otto/internal/store"
 )
@@ -59,7 +60,7 @@ func TestLogTurnPersistsAndIsSearchable(t *testing.T) {
 	}
 	defer st.Close()
 	ctx := context.Background()
-	logTurn(ctx, st, "otto", "user", "remember the Tokyo trip")
+	logTurn(ctx, st, nil, "otto", "user", "remember the Tokyo trip")
 	turns, err := st.SearchFTS(ctx, "Tokyo", 5)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +71,7 @@ func TestLogTurnPersistsAndIsSearchable(t *testing.T) {
 }
 
 func TestLogTurnNilStoreIsNoop(t *testing.T) {
-	logTurn(context.Background(), nil, "otto", "user", "anything")
+	logTurn(context.Background(), nil, nil, "otto", "user", "anything")
 }
 
 func TestLogTurnSkipsBlankContent(t *testing.T) {
@@ -80,12 +81,55 @@ func TestLogTurnSkipsBlankContent(t *testing.T) {
 	}
 	defer st.Close()
 	ctx := context.Background()
-	logTurn(ctx, st, "otto", "user", "   ")
+	logTurn(ctx, st, nil, "otto", "user", "   ")
 	turns, err := st.SearchFTS(ctx, "anything", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(turns) != 0 {
 		t.Fatalf("blank content should not be logged, got %d turns", len(turns))
+	}
+}
+
+// fakeEmbedder returns a fixed vector for any text.
+type fakeEmbedder struct{ vec []float32 }
+
+func (f fakeEmbedder) Embed(ctx context.Context, text string) (embed.Result, error) {
+	return embed.Result{Vector: f.vec, Model: "fake"}, nil
+}
+func (f fakeEmbedder) Name() string { return "fake" }
+
+func TestEmbedAndStorePersistsVector(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	id, err := st.AppendTurn(ctx, "otto", "user", "the Tokyo trip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedAndStore(st, fakeEmbedder{vec: []float32{1, 0}}, id, "the Tokyo trip")
+
+	got, err := st.SearchSemantic(ctx, []float32{1, 0}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != id {
+		t.Fatalf("embedded turn not searchable: %+v", got)
+	}
+}
+
+func TestLogTurnWithEmbedderStillLogsTurn(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	logTurn(ctx, st, fakeEmbedder{vec: []float32{1, 0}}, "otto", "user", "hello tokyo")
+	if got, _ := st.SearchFTS(ctx, "tokyo", 5); len(got) == 0 {
+		t.Fatal("turn not logged")
 	}
 }

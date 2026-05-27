@@ -80,3 +80,21 @@ func TestChainName(t *testing.T) {
 		t.Error("chain name should be non-empty")
 	}
 }
+
+func TestNewOllamaChainBuildsBackendsInOrder(t *testing.T) {
+	c := NewOllamaChain("http://localhost:11434", []string{"embeddinggemma", "nomic-embed-text"})
+	name := c.Name()
+	if !strings.Contains(name, "ollama:embeddinggemma") || !strings.Contains(name, "ollama:nomic-embed-text") {
+		t.Fatalf("chain name missing backends: %q", name)
+	}
+	if strings.Index(name, "embeddinggemma") > strings.Index(name, "nomic-embed-text") {
+		t.Errorf("expected embeddinggemma before nomic: %q", name)
+	}
+}
+
+func TestNewOllamaChainSkipsBlankModels(t *testing.T) {
+	c := NewOllamaChain("http://x", []string{"", "embeddinggemma", "  "})
+	if strings.Count(c.Name(), "ollama:") != 1 {
+		t.Errorf("blank models should be skipped: %q", c.Name())
+	}
+}

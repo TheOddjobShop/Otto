@@ -188,3 +188,65 @@ func TestLoadHonorsExplicitMemoryPaths(t *testing.T) {
 		t.Errorf("explicit paths not honored: mem=%q db=%q", cfg.MemoryDir, cfg.StateDBPath)
 	}
 }
+
+func TestLoadDerivesEmbedDefaults(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{bin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "telegram_bot_token = \"t\"\n" +
+		"telegram_allowed_user_id = 5\n" +
+		"claude_binary_path = \"" + bin + "\"\n" +
+		"mcp_config_path = \"" + mcp + "\"\n" +
+		"session_id_path = \"" + dir + "/session_id\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EmbedOllamaURL != "http://localhost:11434" {
+		t.Errorf("EmbedOllamaURL default = %q", cfg.EmbedOllamaURL)
+	}
+	if len(cfg.EmbedModels) != 2 || cfg.EmbedModels[0] != "embeddinggemma" || cfg.EmbedModels[1] != "nomic-embed-text" {
+		t.Errorf("EmbedModels default = %v", cfg.EmbedModels)
+	}
+}
+
+func TestLoadHonorsExplicitEmbedConfig(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{bin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "telegram_bot_token = \"t\"\n" +
+		"telegram_allowed_user_id = 5\n" +
+		"claude_binary_path = \"" + bin + "\"\n" +
+		"mcp_config_path = \"" + mcp + "\"\n" +
+		"session_id_path = \"" + dir + "/session_id\"\n" +
+		"embed_ollama_url = \"http://ollama:9999\"\n" +
+		"embed_models = [\"only-model\"]\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EmbedOllamaURL != "http://ollama:9999" {
+		t.Errorf("explicit url not honored: %q", cfg.EmbedOllamaURL)
+	}
+	if len(cfg.EmbedModels) != 1 || cfg.EmbedModels[0] != "only-model" {
+		t.Errorf("explicit models not honored: %v", cfg.EmbedModels)
+	}
+}

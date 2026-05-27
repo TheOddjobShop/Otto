@@ -22,6 +22,21 @@ func NewChain(backends ...Embedder) *Chain {
 	return &Chain{backends: backends}
 }
 
+// NewOllamaChain builds a Chain of Ollama backends, one per model, all hitting
+// the same baseURL, tried in the given order. Blank/whitespace model names are
+// skipped. With no usable models the chain is empty and Embed will error
+// (caller falls back to keyword search).
+func NewOllamaChain(baseURL string, models []string) *Chain {
+	backends := make([]Embedder, 0, len(models))
+	for _, m := range models {
+		if strings.TrimSpace(m) == "" {
+			continue
+		}
+		backends = append(backends, NewOllama(baseURL, m))
+	}
+	return NewChain(backends...)
+}
+
 // Name lists the chained backends in order, e.g.
 // "chain[ollama:embeddinggemma,ollama:nomic-embed-text]".
 func (c *Chain) Name() string {
