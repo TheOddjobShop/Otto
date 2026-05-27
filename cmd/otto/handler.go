@@ -13,6 +13,8 @@ import (
 
 	"otto/internal/auth"
 	"otto/internal/claude"
+	"otto/internal/memory"
+	"otto/internal/store"
 	"otto/internal/telegram"
 )
 
@@ -38,6 +40,10 @@ type handler struct {
 	toto    *Toto
 	updater *updater
 	pets    *petRegistry // routes name-addressed messages to Toto/Toot/etc.
+
+	mem              *memory.Core // injected into every Otto prompt; nil disables
+	store            *store.Store // turn log for session_search; nil disables
+	baseSystemPrompt string       // Otto's persona+footer prompt, before memory
 
 	// dispatchWG tracks in-flight dispatch goroutines so the polling
 	// loop's caller (main.go on shutdown, or tests after their window)
@@ -374,9 +380,10 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 	}
 
 	h.runAndReply(callCtx, ctx, u.ChatID, claude.RunArgs{
-		Prompt:     u.Text,
-		SessionID:  h.session.ID(),
-		ImagePaths: imagePaths,
+		Prompt:             u.Text,
+		SessionID:          h.session.ID(),
+		ImagePaths:         imagePaths,
+		AppendSystemPrompt: composeMemoryPrompt(h.baseSystemPrompt, h.mem),
 	})
 }
 
@@ -455,6 +462,8 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	if err := telegram.SendChunked(sendCtx, h.bot, chatID, out); err != nil {
 		log.Printf("send error: %v", err)
 	}
+	logTurn(sendCtx, h.store, "otto", "user", args.Prompt)
+	logTurn(sendCtx, h.store, "otto", "assistant", out)
 	if len(lastResult.PermissionDenials) > 0 {
 		h.surfaceDenials(sendCtx, chatID, lastResult.PermissionDenials)
 	}
