@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -61,7 +62,7 @@ func TestChainAllFailReturnsError(t *testing.T) {
 		t.Fatal("expected error when all backends fail")
 	}
 	msg := err.Error()
-	if !contains(msg, "a") || !contains(msg, "b") {
+	if !strings.Contains(msg, "a") || !strings.Contains(msg, "b") {
 		t.Errorf("aggregated error should name both backends: %q", msg)
 	}
 }
@@ -78,16 +79,4 @@ func TestChainName(t *testing.T) {
 	if c.Name() == "" {
 		t.Error("chain name should be non-empty")
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
-}
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

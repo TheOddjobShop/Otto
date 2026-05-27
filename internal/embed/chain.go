@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// Compile-time assertion that *Chain satisfies Embedder.
+var _ Embedder = (*Chain)(nil)
+
 // Chain is an Embedder that tries its backends in order and returns the first
 // success. When every backend fails it returns an aggregated error; the caller
 // treats that as the signal to fall back to non-semantic (keyword) search.

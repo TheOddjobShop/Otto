@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// Compile-time assertion that *Ollama satisfies Embedder.
+var _ Embedder = (*Ollama)(nil)
+
 // Ollama embeds text via a local Ollama server's /api/embed endpoint.
 type Ollama struct {
 	baseURL string

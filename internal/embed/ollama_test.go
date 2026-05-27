@@ -62,6 +62,30 @@ func TestOllamaEmbedEmptyEmbeddingsIsError(t *testing.T) {
 	}
 }
 
+func TestOllamaEmbedMalformedJSONIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{not json`)
+	}))
+	defer srv.Close()
+	o := NewOllama(srv.URL, "m")
+	if _, err := o.Embed(context.Background(), "x"); err == nil {
+		t.Fatal("expected error on malformed JSON body")
+	}
+}
+
+func TestOllamaEmbedRespectsCancelledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"embeddings":[[1,2]]}`)
+	}))
+	defer srv.Close()
+	o := NewOllama(srv.URL, "m")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the call
+	if _, err := o.Embed(ctx, "x"); err == nil {
+		t.Fatal("expected error when context is already cancelled")
+	}
+}
+
 func TestOllamaModelFallsBackWhenResponseModelMissing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"embeddings":[[1,2]]}`)
