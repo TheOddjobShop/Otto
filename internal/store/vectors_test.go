@@ -1,6 +1,7 @@
 package store
 
 import (
+	"path/filepath"
 	"testing"
 )
 
@@ -26,5 +27,18 @@ func TestEncodeVecLengthIsFourBytesPerFloat(t *testing.T) {
 func TestDecodeEmptyIsEmpty(t *testing.T) {
 	if got := decodeVec(nil); len(got) != 0 {
 		t.Fatalf("decode(nil) len = %d, want 0", len(got))
+	}
+}
+
+func TestSchemaHasVectorsTable(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	var name string
+	err = s.db.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'vectors'`).Scan(&name)
+	if err != nil {
+		t.Fatalf("vectors table missing: %v", err)
 	}
 }

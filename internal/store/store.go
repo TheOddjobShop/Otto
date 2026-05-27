@@ -30,6 +30,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts
 CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
 	INSERT INTO turns_fts(rowid, content) VALUES (new.id, new.content);
 END;
+CREATE TABLE IF NOT EXISTS vectors (
+	turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+	model   TEXT    NOT NULL,
+	dim     INTEGER NOT NULL,
+	vec     BLOB    NOT NULL
+);
 `
 
 // Open opens (creating if needed) the SQLite database at path and ensures the
