@@ -20,6 +20,7 @@ import (
 	"otto/internal/auth"
 	"otto/internal/claude"
 	"otto/internal/config"
+	"otto/internal/embed"
 	"otto/internal/memory"
 	"otto/internal/store"
 	"otto/internal/telegram"
@@ -88,6 +89,10 @@ func main() {
 	// via the otto-memory MCP server.
 	memCore := memory.NewCore(cfg.MemoryDir, memCapChars, userCapChars)
 
+	// Embedder for semantic memory. Degrades to keyword search if Ollama is
+	// unavailable (the chain returns an error and callers fall back to FTS).
+	embedder := embed.NewOllamaChain(cfg.EmbedOllamaURL, cfg.EmbedModels)
+
 	// Toto: separate runner with no MCP config (the empty mcpConfigPath
 	// makes NewExecRunner skip the --mcp-config flag entirely), separate
 	// session ID file, and a separate persona file. Toto's --model and
@@ -127,20 +132,22 @@ func main() {
 	}
 
 	toto := &Toto{
-		bot:     bot,
-		runner:  totoRunner,
-		session: totoSession,
-		persona: totoPersona,
-		mem:     memCore,
-		store:   memStore,
+		bot:      bot,
+		runner:   totoRunner,
+		session:  totoSession,
+		persona:  totoPersona,
+		mem:      memCore,
+		store:    memStore,
+		embedder: embedder,
 	}
 	toot := &Toot{
-		bot:     bot,
-		runner:  tootRunner,
-		session: tootSession,
-		persona: tootPersona,
-		mem:     memCore,
-		store:   memStore,
+		bot:      bot,
+		runner:   tootRunner,
+		session:  tootSession,
+		persona:  tootPersona,
+		mem:      memCore,
+		store:    memStore,
+		embedder: embedder,
 	}
 
 	h := &handler{
@@ -153,6 +160,7 @@ func main() {
 		toto:             toto,
 		mem:              memCore,
 		store:            memStore,
+		embedder:         embedder,
 		baseSystemPrompt: systemPrompt,
 		// Pet registry — addressed messages route here before Otto.
 		// Adding a new pet later: implement Pet, append to this list.
@@ -184,8 +192,8 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB memory_dir=%s state_db=%s",
-		session.ID(), totoSession.ID(), tootSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona), len(tootPersona), cfg.MemoryDir, cfg.StateDBPath)
+	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB memory_dir=%s state_db=%s embed=%s",
+		session.ID(), totoSession.ID(), tootSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona), len(tootPersona), cfg.MemoryDir, cfg.StateDBPath, embedder.Name())
 	if err := h.runPollingLoop(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("polling loop: %v", err)
 	}
