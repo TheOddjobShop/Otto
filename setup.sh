@@ -189,6 +189,45 @@ OTTO_MEMORY_DIR="$OTTO_STATE_DIR/memory"
 OTTO_STATE_DB="$OTTO_STATE_DIR/state.db"
 mkdir -p "$OTTO_MEMORY_DIR"
 
+# ── Ollama: local embeddings for semantic memory search (optional) ──────────
+# When Ollama + an embedding model are present, session_search uses semantic
+# retrieval; otherwise it degrades cleanly to keyword (FTS5) search. The whole
+# block is best-effort — failures only disable semantic search, never abort.
+OTTO_EMBED_URL="http://localhost:11434"
+OTTO_EMBED_MODELS="embeddinggemma,nomic-embed-text"
+echo ""
+echo "  Setting up Ollama for semantic memory (optional)..."
+if ! command -v ollama &>/dev/null; then
+  case "$PKG_MGR" in
+    pacman) sudo pacman -S --needed --noconfirm ollama || echo "  [!] ollama install failed; memory search will use keyword only" ;;
+    brew)   brew install ollama || echo "  [!] ollama install failed; memory search will use keyword only" ;;
+  esac
+fi
+if command -v ollama &>/dev/null; then
+  # Ensure the server is running so models can be pulled.
+  if [ "$OS" = Linux ]; then
+    sudo systemctl enable --now ollama 2>/dev/null || true
+  else
+    brew services start ollama 2>/dev/null || { pgrep -x ollama >/dev/null 2>&1 || (ollama serve >/dev/null 2>&1 &); }
+  fi
+  # Wait briefly for the HTTP API before pulling.
+  for _ in $(seq 1 10); do
+    curl -fsS "$OTTO_EMBED_URL/api/tags" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  for m in embeddinggemma nomic-embed-text; do
+    if ollama list 2>/dev/null | grep -q "^$m"; then
+      echo "  [ok] embedding model present: $m"
+    else
+      echo "  Pulling embedding model: $m (first time may take a few minutes)..."
+      ollama pull "$m" || echo "  [!] pull $m failed; continuing (keyword fallback)"
+    fi
+  done
+  echo "  [ok] Ollama configured for semantic memory"
+else
+  echo "  [note] Ollama not installed — memory search will use keyword (FTS5) only."
+fi
+
 # ── Step 1: Google OAuth client (manual, one-time) ──────────────────────────
 if ! $HAS_GCAL_OAUTH; then
   clear
@@ -556,6 +595,8 @@ GMAIL_OAUTH_PATH="$GMAIL_OAUTH_PATH" \
 OTTO_MEMORY_BIN="$OTTO_MEMORY_BIN" \
 OTTO_MEMORY_DIR="$OTTO_MEMORY_DIR" \
 OTTO_STATE_DB="$OTTO_STATE_DB" \
+OTTO_EMBED_URL="$OTTO_EMBED_URL" \
+OTTO_EMBED_MODELS="$OTTO_EMBED_MODELS" \
 HOME_DIR="$HOME" \
 python3 - "${GMAIL_LABELS[@]}" > "$MCP_FILE" <<'PYEOF'
 import json, os, sys
@@ -567,6 +608,8 @@ config["mcpServers"]["otto-memory"] = {
     "args": [
         "--memory-dir", os.environ['OTTO_MEMORY_DIR'],
         "--state-db", os.environ['OTTO_STATE_DB'],
+        "--embed-url", os.environ['OTTO_EMBED_URL'],
+        "--embed-models", os.environ['OTTO_EMBED_MODELS'],
     ],
 }
 config["mcpServers"]["notion"] = {
