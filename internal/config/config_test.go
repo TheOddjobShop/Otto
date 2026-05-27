@@ -250,3 +250,70 @@ func TestLoadHonorsExplicitEmbedConfig(t *testing.T) {
 		t.Errorf("explicit models not honored: %v", cfg.EmbedModels)
 	}
 }
+
+func TestLoadDerivesRotationDefaults(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{bin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "telegram_bot_token = \"t\"\n" +
+		"telegram_allowed_user_id = 5\n" +
+		"claude_binary_path = \"" + bin + "\"\n" +
+		"mcp_config_path = \"" + mcp + "\"\n" +
+		"session_id_path = \"" + dir + "/session_id\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ModelContextTokens != 200000 {
+		t.Errorf("ModelContextTokens default = %d", cfg.ModelContextTokens)
+	}
+	if cfg.RotateSoftPct != 0.50 {
+		t.Errorf("RotateSoftPct default = %v", cfg.RotateSoftPct)
+	}
+	if cfg.RotateHardPct != 0.85 {
+		t.Errorf("RotateHardPct default = %v", cfg.RotateHardPct)
+	}
+	if cfg.RotateIdleMinutes != 15 {
+		t.Errorf("RotateIdleMinutes default = %d", cfg.RotateIdleMinutes)
+	}
+}
+
+func TestLoadHonorsExplicitRotation(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{bin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "telegram_bot_token = \"t\"\n" +
+		"telegram_allowed_user_id = 5\n" +
+		"claude_binary_path = \"" + bin + "\"\n" +
+		"mcp_config_path = \"" + mcp + "\"\n" +
+		"session_id_path = \"" + dir + "/session_id\"\n" +
+		"model_context_tokens = 100000\n" +
+		"rotate_soft_pct = 0.4\n" +
+		"rotate_hard_pct = 0.9\n" +
+		"rotate_idle_minutes = 5\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ModelContextTokens != 100000 || cfg.RotateSoftPct != 0.4 || cfg.RotateHardPct != 0.9 || cfg.RotateIdleMinutes != 5 {
+		t.Errorf("explicit rotation config not honored: %+v", cfg)
+	}
+}
