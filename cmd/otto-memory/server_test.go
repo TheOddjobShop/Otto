@@ -7,6 +7,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"otto/internal/embed"
 	"otto/internal/memory"
 	"otto/internal/store"
 )
@@ -184,6 +185,74 @@ func TestHandleSearchDefaultLimit(t *testing.T) {
 	}
 	if !strings.Contains(resultText(res), "8 matching") {
 		t.Fatalf("default limit should cap at 8 results, got: %q", resultText(res))
+	}
+}
+
+// fakeEmbedder returns a fixed vector regardless of input.
+type fakeEmbedder struct{ vec []float32 }
+
+func (f fakeEmbedder) Embed(ctx context.Context, text string) (embed.Result, error) {
+	return embed.Result{Vector: f.vec, Model: "fake"}, nil
+}
+func (f fakeEmbedder) Name() string { return "fake" }
+
+func TestHandleSearchMergesSemanticAndFTS(t *testing.T) {
+	s := newTestServer(t)
+	s.embedder = fakeEmbedder{vec: []float32{1, 0}}
+	ctx := context.Background()
+	kwID, _ := s.store.AppendTurn(ctx, "otto", "user", "keyword apple")
+	semID, _ := s.store.AppendTurn(ctx, "otto", "assistant", "totally unrelated wording")
+	if err := s.store.PutVector(ctx, semID, "fake", []float32{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	_ = kwID
+
+	res, _, err := s.handleSearch(ctx, nil, searchArgs{Query: "apple"})
+	if err != nil || res.IsError {
+		t.Fatalf("handleSearch: err=%v res=%q", err, resultText(res))
+	}
+	text := resultText(res)
+	if !strings.Contains(text, "unrelated wording") {
+		t.Errorf("semantic hit missing: %q", text)
+	}
+	if !strings.Contains(text, "keyword apple") {
+		t.Errorf("keyword hit missing: %q", text)
+	}
+}
+
+func TestHandleSearchNoEmbedderIsKeywordOnly(t *testing.T) {
+	s := newTestServer(t) // embedder nil
+	ctx := context.Background()
+	if _, err := s.store.AppendTurn(ctx, "otto", "user", "keyword banana"); err != nil {
+		t.Fatal(err)
+	}
+	res, _, err := s.handleSearch(ctx, nil, searchArgs{Query: "banana"})
+	if err != nil || res.IsError {
+		t.Fatalf("handleSearch: err=%v", err)
+	}
+	if !strings.Contains(resultText(res), "banana") {
+		t.Errorf("keyword-only search failed: %q", resultText(res))
+	}
+}
+
+func TestMergeTurnsDedupesByIDSemanticFirst(t *testing.T) {
+	semantic := []store.Turn{{ID: 1, Content: "a"}, {ID: 2, Content: "b"}}
+	fts := []store.Turn{{ID: 2, Content: "b"}, {ID: 3, Content: "c"}}
+	got := mergeTurns(semantic, fts, 10)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 unique, got %d: %+v", len(got), got)
+	}
+	if got[0].ID != 1 || got[1].ID != 2 || got[2].ID != 3 {
+		t.Errorf("merge order wrong: %+v", got)
+	}
+}
+
+func TestMergeTurnsRespectsLimit(t *testing.T) {
+	semantic := []store.Turn{{ID: 1}, {ID: 2}}
+	fts := []store.Turn{{ID: 3}, {ID: 4}}
+	got := mergeTurns(semantic, fts, 3)
+	if len(got) != 3 {
+		t.Fatalf("limit not respected: got %d", len(got))
 	}
 }
 
