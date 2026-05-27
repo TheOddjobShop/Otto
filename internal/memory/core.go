@@ -92,3 +92,61 @@ func (c *Core) Inject() (string, error) {
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
 }
+
+// Add appends content as a new entry to the target file. It rejects unsafe
+// content (see scanContent), exact-duplicate entries, and any write that would
+// push the file past 80% of its cap — the over-capacity error includes the
+// current contents so the caller (the model) can consolidate via Replace.
+func (c *Core) Add(t Target, content string) error {
+	content = strings.TrimSpace(content)
+	if err := scanContent(content); err != nil {
+		return err
+	}
+	existing, err := c.read(t)
+	if err != nil {
+		return err
+	}
+	if entryExists(existing, content) {
+		return fmt.Errorf("memory: entry already present; not adding duplicate")
+	}
+
+	next := content
+	if existing != "" {
+		next = existing + "\n" + content
+	}
+	if threshold := c.cap(t) * 80 / 100; len(next) > threshold {
+		return fmt.Errorf(
+			"memory: at capacity (%d/%d chars over 80%% threshold) — consolidate existing entries with replace before adding. Current contents:\n%s",
+			len(next), c.cap(t), existing,
+		)
+	}
+	return c.write(t, next)
+}
+
+// write persists body to the target file with 0600 perms, creating the
+// directory if needed. Uses tmp+rename for atomicity.
+func (c *Core) write(t Target, body string) error {
+	if err := os.MkdirAll(c.dir, 0700); err != nil {
+		return fmt.Errorf("memory: ensure dir: %w", err)
+	}
+	path := c.path(t)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.TrimRight(body, "\n")+"\n"), 0600); err != nil {
+		return fmt.Errorf("memory: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("memory: rename %s: %w", path, err)
+	}
+	return nil
+}
+
+// entryExists reports whether content appears as a complete line in body.
+func entryExists(body, content string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == content {
+			return true
+		}
+	}
+	return false
+}
