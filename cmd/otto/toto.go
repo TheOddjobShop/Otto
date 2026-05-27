@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"otto/internal/claude"
+	"otto/internal/memory"
+	"otto/internal/store"
 	"otto/internal/telegram"
 )
 
@@ -116,6 +118,9 @@ type Toto struct {
 	session *claude.Session
 	persona string // base system prompt for Toto (TOTO.md content)
 
+	mem   *memory.Core // injected into Toto's prompt; nil disables
+	store *store.Store // turn log; nil disables
+
 	// ottoStatus, when non-nil, returns a snapshot of Otto's current
 	// state. Toto includes this in his per-call system prompt so he can
 	// answer "what's otto up to?" honestly. Production callers wire it
@@ -201,6 +206,8 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		}
 	}
 
+	systemPrompt = composeMemoryPrompt(systemPrompt, t.mem)
+
 	events := make(chan claude.Event, 32)
 	doneParsing := make(chan struct{})
 	var assistantText strings.Builder
@@ -261,6 +268,9 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 	}
 	out = stripMarkdown(out)
 	t.send(ctx, chatID, out)
+
+	logTurn(ctx, t.store, "toto", "user", userMessage)
+	logTurn(ctx, t.store, "toto", "assistant", out)
 }
 
 // SystemMessage delivers an out-of-band Toto reply (e.g. the watchdog's

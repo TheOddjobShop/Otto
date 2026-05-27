@@ -12,6 +12,8 @@ import (
 	"sync"
 
 	"otto/internal/claude"
+	"otto/internal/memory"
+	"otto/internal/store"
 	"otto/internal/telegram"
 )
 
@@ -57,6 +59,9 @@ type Toot struct {
 	runner  claude.Runner
 	session *claude.Session
 	persona string // base system prompt for Toot (TOOT.md content)
+
+	mem   *memory.Core // injected into Toot's prompt; nil disables
+	store *store.Store // turn log; nil disables
 
 	// pendingUpdate, when non-nil, returns the current pending release
 	// (or nil if none). Surfaced into Toot's chat-mode prompt so he
@@ -140,6 +145,8 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 		}
 	}
 
+	systemPrompt = composeMemoryPrompt(systemPrompt, t.mem)
+
 	prompt := userMessage
 	if prompt == "" {
 		prompt = "(the user pinged you with no content — likely a greeting or attention check)"
@@ -197,6 +204,9 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	if dErr := t.deliver(ctx, chatID, out); dErr != nil {
 		log.Printf("toot reply deliver error: %v", dErr)
 	}
+
+	logTurn(ctx, t.store, "toot", "user", userMessage)
+	logTurn(ctx, t.store, "toot", "assistant", out)
 
 	// Fire the install AFTER the deliver so the user sees Toot's
 	// "initiating install" message before the binary swap kicks off.
