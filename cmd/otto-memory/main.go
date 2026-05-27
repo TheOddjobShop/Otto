@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"otto/internal/embed"
 	"otto/internal/memory"
 	"otto/internal/store"
 )
@@ -28,6 +30,8 @@ func main() {
 func run() error {
 	memDir := flag.String("memory-dir", "", "directory holding USER.md and MEMORY.md (required)")
 	stateDB := flag.String("state-db", "", "path to the SQLite turn-log database (required)")
+	embedURL := flag.String("embed-url", "http://localhost:11434", "Ollama base URL for semantic search embeddings")
+	embedModels := flag.String("embed-models", "embeddinggemma,nomic-embed-text", "comma-separated Ollama embedding models, tried in order")
 	flag.Parse()
 
 	if *memDir == "" || *stateDB == "" {
@@ -44,6 +48,14 @@ func run() error {
 		core:  memory.NewCore(*memDir, memCapChars, userCapChars),
 		store: st,
 	}
+
+	var models []string
+	for _, m := range strings.Split(*embedModels, ",") {
+		if s := strings.TrimSpace(m); s != "" {
+			models = append(models, s)
+		}
+	}
+	srv.embedder = embed.NewOllamaChain(*embedURL, models)
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "otto-memory", Version: "v1"}, nil)
 	mcp.AddTool(server, &mcp.Tool{
