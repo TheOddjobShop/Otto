@@ -99,6 +99,42 @@ func TestHandleRemoveMissingIsError(t *testing.T) {
 	}
 }
 
+func TestHandleSearchFindsTurns(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	if _, err := s.store.AppendTurn(ctx, "otto", "user", "remind me about the Tokyo trip"); err != nil {
+		t.Fatalf("seed turn: %v", err)
+	}
+	if _, err := s.store.AppendTurn(ctx, "otto", "assistant", "your Tokyo flight is at 9am"); err != nil {
+		t.Fatalf("seed turn: %v", err)
+	}
+	res, _, err := s.handleSearch(ctx, nil, searchArgs{Query: "Tokyo"})
+	if err != nil {
+		t.Fatalf("handleSearch transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleSearch reported error: %s", resultText(res))
+	}
+	text := resultText(res)
+	if !strings.Contains(text, "Tokyo") {
+		t.Fatalf("search result should mention the matched content: %q", text)
+	}
+}
+
+func TestHandleSearchNoMatchesIsNotError(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleSearch(context.Background(), nil, searchArgs{Query: "nonexistent"})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatal("a no-match search is a normal empty result, not an error")
+	}
+	if !strings.Contains(strings.ToLower(resultText(res)), "no") {
+		t.Fatalf("empty search should say so, got: %q", resultText(res))
+	}
+}
+
 // resultText extracts the concatenated text of a tool result for assertions.
 func resultText(res *mcp.CallToolResult) string {
 	var b strings.Builder

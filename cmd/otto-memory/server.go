@@ -92,3 +92,33 @@ func (s *memoryServer) handleRemove(ctx context.Context, req *mcp.CallToolReques
 	}
 	return textResult("Removed."), nil, nil
 }
+
+// defaultSearchLimit bounds how many turns session_search returns when the
+// caller does not specify a limit.
+const defaultSearchLimit = 8
+
+type searchArgs struct {
+	Query string `json:"query" jsonschema:"keywords to look for in past conversation turns"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max results (default 8)"`
+}
+
+func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
+	limit := args.Limit
+	if limit <= 0 {
+		limit = defaultSearchLimit
+	}
+	turns, err := s.store.SearchFTS(ctx, args.Query, limit)
+	if err != nil {
+		return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
+	}
+	if len(turns) == 0 {
+		return textResult("No matching past conversation turns."), nil, nil
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%d matching turn(s):\n", len(turns)))
+	for _, tr := range turns {
+		b.WriteString(fmt.Sprintf("\n[%s/%s @ %s] %s",
+			tr.Persona, tr.Role, tr.TS.Format("2006-01-02 15:04"), tr.Content))
+	}
+	return textResult(b.String()), nil, nil
+}
