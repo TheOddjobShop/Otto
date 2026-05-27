@@ -126,3 +126,65 @@ session_id_path = "/tmp/otto-test-session"
 		t.Errorf("expected error mentioning mcp_config_path, got: %v", err)
 	}
 }
+
+func TestLoadDerivesMemoryDefaultsFromSessionPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{bin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "telegram_bot_token = \"t\"\n" +
+		"telegram_allowed_user_id = 5\n" +
+		"claude_binary_path = \"" + bin + "\"\n" +
+		"mcp_config_path = \"" + mcp + "\"\n" +
+		"session_id_path = \"" + dir + "/session_id\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantMem := filepath.Join(dir, "memory")
+	wantDB := filepath.Join(dir, "state.db")
+	if cfg.MemoryDir != wantMem {
+		t.Errorf("MemoryDir = %q, want %q", cfg.MemoryDir, wantMem)
+	}
+	if cfg.StateDBPath != wantDB {
+		t.Errorf("StateDBPath = %q, want %q", cfg.StateDBPath, wantDB)
+	}
+}
+
+func TestLoadHonorsExplicitMemoryPaths(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{bin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "telegram_bot_token = \"t\"\n" +
+		"telegram_allowed_user_id = 5\n" +
+		"claude_binary_path = \"" + bin + "\"\n" +
+		"mcp_config_path = \"" + mcp + "\"\n" +
+		"session_id_path = \"" + dir + "/session_id\"\n" +
+		"memory_dir = \"/custom/mem\"\n" +
+		"state_db_path = \"/custom/state.db\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MemoryDir != "/custom/mem" || cfg.StateDBPath != "/custom/state.db" {
+		t.Errorf("explicit paths not honored: mem=%q db=%q", cfg.MemoryDir, cfg.StateDBPath)
+	}
+}

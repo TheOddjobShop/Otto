@@ -14,6 +14,8 @@ import (
 
 	"otto/internal/auth"
 	"otto/internal/claude"
+	"otto/internal/memory"
+	"otto/internal/store"
 	"otto/internal/telegram"
 )
 
@@ -308,6 +310,45 @@ func TestSurfaceDenialsAsPlainText(t *testing.T) {
 		if !strings.Contains(m.text, "permissions.allow") {
 			t.Errorf("msg missing settings.json hint: %q", m.text)
 		}
+	}
+}
+
+func TestHandlerInjectsMemoryAndLogsTurns(t *testing.T) {
+	bot := &fakeBot{
+		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "what's my flight"}}},
+	}
+	runner := &fakeRunner{respond: "your flight is at 9am"}
+	h := newTestHandler(t, bot, runner)
+
+	dir := t.TempDir()
+	core := memory.NewCore(dir, 2200, 1375)
+	if err := core.Add(memory.TargetUser, "User flies to Tokyo on Friday."); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	h.mem = core
+	h.store = st
+	h.baseSystemPrompt = "BASE PERSONA"
+
+	runForBriefWindow(t, h)
+
+	if len(runner.called) != 1 {
+		t.Fatalf("runner called %d times, want 1", len(runner.called))
+	}
+	asp := runner.called[0].AppendSystemPrompt
+	if !strings.Contains(asp, "BASE PERSONA") || !strings.Contains(asp, "Tokyo on Friday") {
+		t.Errorf("AppendSystemPrompt missing base or memory: %q", asp)
+	}
+	ctx := context.Background()
+	if got, _ := st.SearchFTS(ctx, "flight", 5); len(got) == 0 {
+		t.Error("user turn not logged")
+	}
+	if got, _ := st.SearchFTS(ctx, "9am", 5); len(got) == 0 {
+		t.Error("assistant turn not logged")
 	}
 }
 

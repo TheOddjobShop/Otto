@@ -179,6 +179,16 @@ echo "  Building otto binary..."
 go build -o "$OTTO_BIN" ./cmd/otto
 echo "  [ok] $OTTO_BIN"
 
+OTTO_MEMORY_BIN="$OTTO_BIN_DIR/otto-memory"
+echo "  Building otto-memory MCP server..."
+go build -o "$OTTO_MEMORY_BIN" ./cmd/otto-memory
+echo "  [ok] $OTTO_MEMORY_BIN"
+
+# Memory storage locations (live under the state dir, alongside session ids).
+OTTO_MEMORY_DIR="$OTTO_STATE_DIR/memory"
+OTTO_STATE_DB="$OTTO_STATE_DIR/state.db"
+mkdir -p "$OTTO_MEMORY_DIR"
+
 # ── Step 1: Google OAuth client (manual, one-time) ──────────────────────────
 if ! $HAS_GCAL_OAUTH; then
   clear
@@ -498,6 +508,8 @@ chmod 600 "$CONFIG_FILE"
 write_toml_field claude_binary_path "$CLAUDE_BIN" "$CONFIG_FILE"
 write_toml_field mcp_config_path "$MCP_FILE" "$CONFIG_FILE"
 write_toml_field session_id_path "$OTTO_STATE_DIR/session_id" "$CONFIG_FILE"
+write_toml_field memory_dir "$OTTO_MEMORY_DIR" "$CONFIG_FILE"
+write_toml_field state_db_path "$OTTO_STATE_DB" "$CONFIG_FILE"
 
 # System prompt: SYSTEM.md is the source of truth. Every setup.sh run copies
 # it to ~/.config/otto/system_prompt.md, overwriting any previous version.
@@ -541,12 +553,22 @@ CLIENT_SECRET_FILE="$CLIENT_SECRET_FILE" \
 DESKTOP_CLIENT_ID="$DESKTOP_CLIENT_ID" \
 DESKTOP_CLIENT_SECRET="$DESKTOP_CLIENT_SECRET" \
 GMAIL_OAUTH_PATH="$GMAIL_OAUTH_PATH" \
+OTTO_MEMORY_BIN="$OTTO_MEMORY_BIN" \
+OTTO_MEMORY_DIR="$OTTO_MEMORY_DIR" \
+OTTO_STATE_DB="$OTTO_STATE_DB" \
 HOME_DIR="$HOME" \
 python3 - "${GMAIL_LABELS[@]}" > "$MCP_FILE" <<'PYEOF'
 import json, os, sys
 home = os.environ['HOME_DIR']
 labels = sys.argv[1:]
 config = {"mcpServers": {}}
+config["mcpServers"]["otto-memory"] = {
+    "command": os.environ['OTTO_MEMORY_BIN'],
+    "args": [
+        "--memory-dir", os.environ['OTTO_MEMORY_DIR'],
+        "--state-db", os.environ['OTTO_STATE_DB'],
+    ],
+}
 config["mcpServers"]["notion"] = {
     "command": "npx",
     "args": ["-y", "@notionhq/notion-mcp-server"],
