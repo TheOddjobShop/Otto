@@ -29,6 +29,7 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		if err := h.session.Clear(); err != nil {
 			return commandResult{reply: fmt.Sprintf("⚠️ clear failed: %v", err), handled: true}
 		}
+		h.otto.resetInputTokens()
 		return commandResult{reply: "✨ Started new session — your next message will start a fresh conversation.", handled: true}
 	case "/whoami":
 		sid := h.session.ID()

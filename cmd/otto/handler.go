@@ -42,6 +42,8 @@ type handler struct {
 	updater *updater
 	pets    *petRegistry // routes name-addressed messages to Toto/Toot/etc.
 
+	rotate rotateConfig // session-rotation thresholds (zero value disables)
+
 	mem              *memory.Core   // injected into every Otto prompt; nil disables
 	store            *store.Store   // turn log for session_search; nil disables
 	embedder         embed.Embedder // embeds turns for semantic search; nil disables
@@ -79,6 +81,9 @@ type ottoState struct {
 	// right now ("he's typing about your gmail, hold on") instead of
 	// just "he's busy."
 	lastSnippet string
+
+	lastInputTokens int       // usage.input_tokens of the most recent Otto turn
+	lastUserMsg     time.Time // time of the most recent user message (idle calc)
 }
 
 // snippetCap bounds how many tail bytes of Otto's stream we expose to
@@ -151,6 +156,39 @@ func (s *ottoState) markEvent() {
 	s.mu.Lock()
 	s.lastEvent = time.Now()
 	s.mu.Unlock()
+}
+
+// setInputTokens records the session's latest observed input-token count.
+func (s *ottoState) setInputTokens(n int) {
+	s.mu.Lock()
+	s.lastInputTokens = n
+	s.mu.Unlock()
+}
+
+// resetInputTokens zeroes the token count (after a session clear/rotation).
+func (s *ottoState) resetInputTokens() {
+	s.mu.Lock()
+	s.lastInputTokens = 0
+	s.mu.Unlock()
+}
+
+// markUserMessage records that the user just sent a message (resets idle).
+func (s *ottoState) markUserMessage() {
+	s.mu.Lock()
+	s.lastUserMsg = time.Now()
+	s.mu.Unlock()
+}
+
+// rotationSnapshot returns the latest token count and how long since the last
+// user message. If no user message has been seen, idle is 0.
+func (s *ottoState) rotationSnapshot() (tokens int, idle time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tokens = s.lastInputTokens
+	if !s.lastUserMsg.IsZero() {
+		idle = time.Since(s.lastUserMsg)
+	}
+	return tokens, idle
 }
 
 // appendSnippet adds streamed assistant text to the tail buffer, trimming
@@ -268,6 +306,7 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 		log.Printf("dropping message from non-allowlisted user %d", u.UserID)
 		return
 	}
+	h.otto.markUserMessage()
 	if strings.TrimSpace(u.Text) == "" && len(u.PhotoIDs) == 0 {
 		return
 	}
@@ -427,6 +466,11 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	err := h.runner.Run(callCtx, args)
 	close(events)
 	<-doneParsing
+
+	// Record the latest observed input-token count so the rotator can decide
+	// whether the session has grown large enough to clear. A non-success or
+	// errored turn leaves InputTokens at 0, which is harmless here.
+	h.otto.setInputTokens(lastResult.InputTokens)
 
 	if capturedSessionID != "" && capturedSessionID != h.session.ID() {
 		if setErr := h.session.Set(capturedSessionID); setErr != nil {

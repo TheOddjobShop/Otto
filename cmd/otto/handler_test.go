@@ -379,3 +379,48 @@ func TestHandlerForwardsPhotoToClaude(t *testing.T) {
 		t.Errorf("temp file not cleaned up: %v", err)
 	}
 }
+
+func TestOttoStateTokenAndActivityTracking(t *testing.T) {
+	s := newOttoState()
+	s.setInputTokens(1234)
+	s.markUserMessage()
+	tokens, idle := s.rotationSnapshot()
+	if tokens != 1234 {
+		t.Errorf("tokens = %d, want 1234", tokens)
+	}
+	if idle > time.Second {
+		t.Errorf("idle = %s, want ~0 right after markUserMessage", idle)
+	}
+	s.resetInputTokens()
+	tokens, _ = s.rotationSnapshot()
+	if tokens != 0 {
+		t.Errorf("after reset tokens = %d, want 0", tokens)
+	}
+}
+
+func TestRunRotatorClearsLargeIdleSession(t *testing.T) {
+	bot := &fakeBot{}
+	runner := &fakeRunner{}
+	h := newTestHandler(t, bot, runner)
+	h.rotate = rotateConfig{ctxTokens: 1000, soft: 0.5, hard: 0.85, idleWindow: 0}
+	if err := h.session.Set("sess-xyz"); err != nil {
+		t.Fatal(err)
+	}
+	h.otto.setInputTokens(900) // 90% → over hard
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.runRotator(ctx)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if h.session.ID() == "" {
+			break // rotated
+		}
+		select {
+		case <-deadline:
+			t.Fatal("session was not rotated within 3s")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
