@@ -28,6 +28,9 @@ func shouldRotate(tokens int, idle time.Duration, c rotateConfig) bool {
 		return false
 	}
 	frac := float64(tokens) / float64(c.ctxTokens)
+	// Hard cap intentionally ignores idle: at this size we rotate at the next
+	// free moment regardless of how recently the user spoke. Do not gate it on
+	// idleWindow.
 	if frac >= c.hard {
 		return true
 	}
