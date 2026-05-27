@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"otto/internal/claude"
+	"otto/internal/embed"
 	"otto/internal/memory"
 	"otto/internal/store"
 	"otto/internal/telegram"
@@ -60,8 +61,9 @@ type Toot struct {
 	session *claude.Session
 	persona string // base system prompt for Toot (TOOT.md content)
 
-	mem   *memory.Core // injected into Toot's prompt; nil disables
-	store *store.Store // turn log; nil disables
+	mem      *memory.Core   // injected into Toot's prompt; nil disables
+	store    *store.Store   // turn log; nil disables
+	embedder embed.Embedder // embeds turns for semantic search; nil disables
 
 	// pendingUpdate, when non-nil, returns the current pending release
 	// (or nil if none). Surfaced into Toot's chat-mode prompt so he
@@ -205,8 +207,8 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 		log.Printf("toot reply deliver error: %v", dErr)
 	}
 
-	logTurn(ctx, t.store, "toot", "user", userMessage)
-	logTurn(ctx, t.store, "toot", "assistant", out)
+	logTurn(ctx, t.store, t.embedder, "toot", "user", userMessage)
+	logTurn(ctx, t.store, t.embedder, "toot", "assistant", out)
 
 	// Fire the install AFTER the deliver so the user sees Toot's
 	// "initiating install" message before the binary swap kicks off.
