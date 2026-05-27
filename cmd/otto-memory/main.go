@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
-	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,17 +20,23 @@ const (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	memDir := flag.String("memory-dir", "", "directory holding USER.md and MEMORY.md (required)")
 	stateDB := flag.String("state-db", "", "path to the SQLite turn-log database (required)")
 	flag.Parse()
 
 	if *memDir == "" || *stateDB == "" {
-		log.Fatal("otto-memory: --memory-dir and --state-db are required")
+		return fmt.Errorf("otto-memory: --memory-dir and --state-db are required")
 	}
 
 	st, err := store.Open(*stateDB)
 	if err != nil {
-		log.Fatalf("otto-memory: open store: %v", err)
+		return fmt.Errorf("otto-memory: open store: %w", err)
 	}
 	defer st.Close()
 
@@ -58,7 +64,7 @@ func main() {
 	}, srv.handleSearch)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Printf("otto-memory: server exited: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("otto-memory: server exited: %w", err)
 	}
+	return nil
 }

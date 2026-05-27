@@ -97,6 +97,21 @@ func (s *memoryServer) handleRemove(ctx context.Context, req *mcp.CallToolReques
 // caller does not specify a limit.
 const defaultSearchLimit = 8
 
+// maxTurnContentChars bounds how much of each matched turn's content
+// session_search echoes back, so one very long stored turn can't blow up the
+// tool response (which is fed straight into the model's context).
+const maxTurnContentChars = 280
+
+// truncateContent shortens s to maxTurnContentChars runes, appending an
+// ellipsis when truncated. Rune-based so it never splits a multi-byte char.
+func truncateContent(s string) string {
+	r := []rune(s)
+	if len(r) <= maxTurnContentChars {
+		return s
+	}
+	return string(r[:maxTurnContentChars]) + "…"
+}
+
 type searchArgs struct {
 	Query string `json:"query" jsonschema:"keywords to look for in past conversation turns"`
 	Limit int    `json:"limit,omitempty" jsonschema:"max results (default 8)"`
@@ -118,7 +133,7 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 	b.WriteString(fmt.Sprintf("%d matching turn(s):\n", len(turns)))
 	for _, tr := range turns {
 		b.WriteString(fmt.Sprintf("\n[%s/%s @ %s] %s",
-			tr.Persona, tr.Role, tr.TS.Format("2006-01-02 15:04"), tr.Content))
+			tr.Persona, tr.Role, tr.TS.Format("2006-01-02 15:04"), truncateContent(tr.Content)))
 	}
 	return textResult(b.String()), nil, nil
 }

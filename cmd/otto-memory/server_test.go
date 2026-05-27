@@ -135,6 +135,58 @@ func TestHandleSearchNoMatchesIsNotError(t *testing.T) {
 	}
 }
 
+func TestHandleAddCapacityErrorPassesThroughAsIsError(t *testing.T) {
+	s := newTestServer(t) // userCap = 1375 → 80% threshold = 1100 chars
+	big := strings.Repeat("x", 1101)
+	res, _, err := s.handleAdd(context.Background(), nil, addArgs{Target: "user", Content: big})
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("over-capacity Add should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "consolidate") {
+		t.Fatalf("capacity error should tell the model to consolidate, got: %q", resultText(res))
+	}
+}
+
+func TestHandleSearchTruncatesLongContent(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	long := "Tokyo " + strings.Repeat("z", 1000)
+	if _, err := s.store.AppendTurn(ctx, "otto", "assistant", long); err != nil {
+		t.Fatalf("seed turn: %v", err)
+	}
+	res, _, err := s.handleSearch(ctx, nil, searchArgs{Query: "Tokyo"})
+	if err != nil || res.IsError {
+		t.Fatalf("search failed: err=%v res=%q", err, resultText(res))
+	}
+	text := resultText(res)
+	if !strings.Contains(text, "…") {
+		t.Fatalf("long content should be truncated with an ellipsis: %q", text)
+	}
+	if strings.Count(text, "z") >= 1000 {
+		t.Fatalf("full long content should not be echoed; got %d z's", strings.Count(text, "z"))
+	}
+}
+
+func TestHandleSearchDefaultLimit(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	for i := 0; i < 12; i++ {
+		if _, err := s.store.AppendTurn(ctx, "otto", "user", "Tokyo trip note"); err != nil {
+			t.Fatalf("seed turn %d: %v", i, err)
+		}
+	}
+	res, _, err := s.handleSearch(ctx, nil, searchArgs{Query: "Tokyo"}) // no Limit → default 8
+	if err != nil || res.IsError {
+		t.Fatalf("search failed: err=%v res=%q", err, resultText(res))
+	}
+	if !strings.Contains(resultText(res), "8 matching") {
+		t.Fatalf("default limit should cap at 8 results, got: %q", resultText(res))
+	}
+}
+
 // resultText extracts the concatenated text of a tool result for assertions.
 func resultText(res *mcp.CallToolResult) string {
 	var b strings.Builder
