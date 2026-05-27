@@ -26,7 +26,11 @@ func (s *Store) AppendTurn(ctx context.Context, persona, role, content string) (
 	if err != nil {
 		return 0, fmt.Errorf("store: append turn: %w", err)
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: append turn: last insert id: %w", err)
+	}
+	return id, nil
 }
 
 // SearchFTS runs an FTS5 keyword search over logged turns, most-relevant first.
