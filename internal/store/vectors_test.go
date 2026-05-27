@@ -25,6 +25,14 @@ func TestEncodeVecLengthIsFourBytesPerFloat(t *testing.T) {
 	}
 }
 
+func TestDecodeOddLengthTruncatesWithoutPanic(t *testing.T) {
+	// 5 bytes = one full float32 (4 bytes) + 1 trailing byte that must be
+	// dropped, not cause an out-of-bounds read.
+	if got := decodeVec([]byte{1, 2, 3, 4, 5}); len(got) != 1 {
+		t.Fatalf("decode(5 bytes) len = %d, want 1 (trailing byte dropped)", len(got))
+	}
+}
+
 func TestDecodeEmptyIsEmpty(t *testing.T) {
 	if got := decodeVec(nil); len(got) != 0 {
 		t.Fatalf("decode(nil) len = %d, want 0", len(got))

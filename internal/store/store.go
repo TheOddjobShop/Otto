@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS vectors (
 // schema is present. WAL + a busy timeout let Otto's multiple goroutines share
 // the handle without "database is locked" errors.
 func Open(path string) (*Store, error) {
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	// foreign_keys(1) makes the vectors→turns ON DELETE CASCADE live, so a
+	// future turn-deletion path cleans up orphaned embeddings automatically.
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
