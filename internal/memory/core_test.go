@@ -97,3 +97,78 @@ func TestAddErrorsAtCapacity(t *testing.T) {
 		t.Fatalf("capacity error should prompt consolidation, got: %v", err)
 	}
 }
+
+func TestReplaceSubstring(t *testing.T) {
+	c := newTestCore(t)
+	if err := c.Add(TargetUser, "User prefers dark mode everywhere."); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	err := c.Replace(TargetUser, "dark mode everywhere", "light mode in editor, dark in terminal")
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	user, _, _ := c.Load()
+	if !strings.Contains(user, "light mode in editor") {
+		t.Fatalf("replacement not applied: %q", user)
+	}
+	if strings.Contains(user, "dark mode everywhere") {
+		t.Fatalf("old text still present: %q", user)
+	}
+}
+
+func TestReplaceMissingErrors(t *testing.T) {
+	c := newTestCore(t)
+	if err := c.Add(TargetUser, "some fact"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := c.Replace(TargetUser, "nonexistent", "x"); err == nil {
+		t.Fatal("Replace of missing text should error")
+	}
+}
+
+func TestReplaceAmbiguousErrors(t *testing.T) {
+	c := newTestCore(t)
+	if err := c.Add(TargetMemory, "foo and foo again"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := c.Replace(TargetMemory, "foo", "bar"); err == nil {
+		t.Fatal("ambiguous (multi-match) Replace should error")
+	}
+}
+
+func TestReplaceScansNewContent(t *testing.T) {
+	c := newTestCore(t)
+	if err := c.Add(TargetUser, "harmless fact"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := c.Replace(TargetUser, "harmless fact", "sk-ant-api03-secretLeak"); err == nil {
+		t.Fatal("Replace must scan the new content")
+	}
+}
+
+func TestRemoveSubstring(t *testing.T) {
+	c := newTestCore(t)
+	if err := c.Add(TargetMemory, "keep this"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := c.Add(TargetMemory, "remove this"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := c.Remove(TargetMemory, "remove this"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	_, mem, _ := c.Load()
+	if strings.Contains(mem, "remove this") {
+		t.Fatalf("entry not removed: %q", mem)
+	}
+	if !strings.Contains(mem, "keep this") {
+		t.Fatalf("wrong entry removed: %q", mem)
+	}
+}
+
+func TestRemoveMissingErrors(t *testing.T) {
+	c := newTestCore(t)
+	if err := c.Remove(TargetMemory, "not there"); err == nil {
+		t.Fatal("Remove of missing text should error")
+	}
+}

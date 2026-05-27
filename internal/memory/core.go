@@ -150,3 +150,57 @@ func entryExists(body, content string) bool {
 	}
 	return false
 }
+
+// Replace swaps the unique occurrence of oldText for content. It errors if
+// oldText is absent or appears more than once (ambiguous), and scans the new
+// content for unsafe material. Capacity is not re-checked because a replace
+// that shrinks or holds size steady is always safe; a growing replace that
+// breaches the cap is caught on the next Add.
+func (c *Core) Replace(t Target, oldText, content string) error {
+	content = strings.TrimSpace(content)
+	if err := scanContent(content); err != nil {
+		return err
+	}
+	body, err := c.read(t)
+	if err != nil {
+		return err
+	}
+	n := strings.Count(body, oldText)
+	if n == 0 {
+		return fmt.Errorf("memory: replace target %q not found", oldText)
+	}
+	if n > 1 {
+		return fmt.Errorf("memory: replace target %q is ambiguous (%d matches)", oldText, n)
+	}
+	return c.write(t, strings.Replace(body, oldText, content, 1))
+}
+
+// Remove deletes the unique occurrence of oldText. Errors if absent or
+// ambiguous. Leftover blank lines from the removed entry are collapsed.
+func (c *Core) Remove(t Target, oldText string) error {
+	body, err := c.read(t)
+	if err != nil {
+		return err
+	}
+	n := strings.Count(body, oldText)
+	if n == 0 {
+		return fmt.Errorf("memory: remove target %q not found", oldText)
+	}
+	if n > 1 {
+		return fmt.Errorf("memory: remove target %q is ambiguous (%d matches)", oldText, n)
+	}
+	stripped := strings.Replace(body, oldText, "", 1)
+	return c.write(t, collapseBlankLines(stripped))
+}
+
+// collapseBlankLines removes empty lines left behind by a removed entry.
+func collapseBlankLines(s string) string {
+	var keep []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.Join(keep, "\n")
+}
