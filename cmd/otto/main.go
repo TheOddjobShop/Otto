@@ -167,6 +167,13 @@ func main() {
 		pets: newPetRegistry(toto, toot),
 	}
 
+	h.rotate = rotateConfig{
+		ctxTokens:  cfg.ModelContextTokens,
+		soft:       cfg.RotateSoftPct,
+		hard:       cfg.RotateHardPct,
+		idleWindow: time.Duration(cfg.RotateIdleMinutes) * time.Minute,
+	}
+
 	// Toto can see what Otto's up to so he can answer "what's otto
 	// doing?" honestly when addressed directly.
 	toto.ottoStatus = h.otto.Snapshot
@@ -183,6 +190,7 @@ func main() {
 	toot.triggerUpdate = h.runUpdate
 
 	go h.updater.Run(ctx)
+	go h.runRotator(ctx)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)

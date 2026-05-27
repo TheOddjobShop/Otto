@@ -14,6 +14,7 @@ type ResultEvent struct {
 	// This can be non-empty even on a success Subtype: claude often
 	// recovers by asking the user for permission and continuing.
 	PermissionDenials []PermissionDenial
+	InputTokens       int // usage.input_tokens from the result event; 0 if absent
 }
 
 func (ResultEvent) isEvent() {}

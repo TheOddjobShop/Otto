@@ -15,7 +15,10 @@ type rawMessage struct {
 	SessionID         string              `json:"session_id"`
 	Error             string              `json:"error"`
 	PermissionDenials []rawPermissionDeny `json:"permission_denials"`
-	Message           struct {
+	Usage             struct {
+		InputTokens int `json:"input_tokens"`
+	} `json:"usage"`
+	Message struct {
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -67,7 +70,7 @@ func ParseStream(ctx context.Context, r io.Reader, events chan<- Event) error {
 				}
 			}
 		case "result":
-			ev := ResultEvent{Subtype: raw.Subtype, Error: raw.Error}
+			ev := ResultEvent{Subtype: raw.Subtype, Error: raw.Error, InputTokens: raw.Usage.InputTokens}
 			for _, d := range raw.PermissionDenials {
 				if d.ToolName == "" {
 					continue

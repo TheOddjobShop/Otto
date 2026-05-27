@@ -50,6 +50,18 @@ type Config struct {
 	// EmbedModels is the ordered list of Ollama embedding models to try
 	// (first healthy wins). Default ["embeddinggemma", "nomic-embed-text"].
 	EmbedModels []string `toml:"embed_models"`
+	// ModelContextTokens is Otto's model context window, used as the denominator
+	// for rotation thresholds. Default 200000.
+	ModelContextTokens int `toml:"model_context_tokens"`
+	// RotateSoftPct: at this fraction of context, the session is eligible to
+	// rotate once the user goes idle. Default 0.50.
+	RotateSoftPct float64 `toml:"rotate_soft_pct"`
+	// RotateHardPct: at this fraction, rotate at the next idle tick regardless
+	// of how recently the user spoke (safety cap). Default 0.85.
+	RotateHardPct float64 `toml:"rotate_hard_pct"`
+	// RotateIdleMinutes: minutes of user silence required before a soft-eligible
+	// session rotates. Default 15.
+	RotateIdleMinutes int `toml:"rotate_idle_minutes"`
 }
 
 func Load(path string) (*Config, error) {
@@ -72,6 +84,18 @@ func Load(path string) (*Config, error) {
 	}
 	if len(cfg.EmbedModels) == 0 {
 		cfg.EmbedModels = []string{"embeddinggemma", "nomic-embed-text"}
+	}
+	if cfg.ModelContextTokens <= 0 {
+		cfg.ModelContextTokens = 200000
+	}
+	if cfg.RotateSoftPct <= 0 {
+		cfg.RotateSoftPct = 0.50
+	}
+	if cfg.RotateHardPct <= 0 {
+		cfg.RotateHardPct = 0.85
+	}
+	if cfg.RotateIdleMinutes <= 0 {
+		cfg.RotateIdleMinutes = 15
 	}
 	return &cfg, nil
 }

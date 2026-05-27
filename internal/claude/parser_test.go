@@ -158,3 +158,26 @@ func TestParseStreamReturnsOnContextCancel(t *testing.T) {
 		t.Fatal("ParseStream did not return after ctx cancel — deadlock")
 	}
 }
+
+func TestParseStreamCapturesInputTokens(t *testing.T) {
+	line := `{"type":"result","subtype":"success","usage":{"input_tokens":4242,"output_tokens":17},"session_id":"s1"}` + "\n"
+	events := make(chan Event, 8)
+	go func() {
+		_ = ParseStream(context.Background(), strings.NewReader(line), events)
+		close(events)
+	}()
+	var got ResultEvent
+	var found bool
+	for ev := range events {
+		if r, ok := ev.(ResultEvent); ok {
+			got = r
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no ResultEvent emitted")
+	}
+	if got.InputTokens != 4242 {
+		t.Fatalf("InputTokens = %d, want 4242", got.InputTokens)
+	}
+}
