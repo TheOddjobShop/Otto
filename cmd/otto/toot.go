@@ -65,6 +65,11 @@ type Toot struct {
 	store    *store.Store   // turn log; nil disables
 	embedder embed.Embedder // embeds turns for semantic search; nil disables
 
+	// version is the running otto binary's version string (set from main's
+	// build-stamped var). Surfaced in Toot's chat prompt so he can answer
+	// "what version are we on?" without telling the user to go check git.
+	version string
+
 	// pendingUpdate, when non-nil, returns the current pending release
 	// (or nil if none). Surfaced into Toot's chat-mode prompt so he
 	// knows whether install requests are valid. Wired to the updater
@@ -112,6 +117,16 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	systemPrompt += "THE USER ADDRESSED YOU DIRECTLY (CHAT MODE).\n"
 	systemPrompt += "───────────────────────────────────────────────\n\n"
 	systemPrompt += "This is not a release announcement. They want to talk to YOU. Stay in your voice — dutiful, formal-ish, dryly nerdy — but engage. You may discuss Otto, Toto, releases, your job, whatever they bring up. Decline tool requests politely (you only talk). Keep replies brief; phone-screen friendly."
+
+	// Running version — so "what version are we on?" gets a real answer
+	// instead of a "check git yourself" deflection.
+	if t.version != "" {
+		systemPrompt += "\n\n───────────────────────────────────────────────\n"
+		systemPrompt += "CURRENT OTTO VERSION (this running build):\n"
+		systemPrompt += "───────────────────────────────────────────────\n\n"
+		systemPrompt += t.version
+		systemPrompt += "\n\nIf asked what version is running, answer with this directly. If the user asks whether they're up to date, compare against the pending-update tag below (if any) or say there's no pending release."
+	}
 
 	// Inject the install_update tool when a release is pending. Framing
 	// it as a "tool you can call" (rather than a strict marker rule)
