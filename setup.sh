@@ -174,14 +174,19 @@ CLAUDE_BIN="$(command -v claude)"
 echo "  [ok] claude at $CLAUDE_BIN"
 
 # ── Build Otto ──────────────────────────────────────────────────────────────
+# Stamp main.version from git so the auto-updater can compare against GitHub
+# release tags. Without this the binary is "dev" and updater.Run short-circuits,
+# so Toot never announces a new release. Fall back to "dev" only when git is
+# unavailable (e.g. a tarball install).
+OTTO_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 echo ""
-echo "  Building otto binary..."
-go build -o "$OTTO_BIN" ./cmd/otto
+echo "  Building otto binary (version=$OTTO_VERSION)..."
+go build -ldflags "-X main.version=$OTTO_VERSION" -o "$OTTO_BIN" ./cmd/otto
 echo "  [ok] $OTTO_BIN"
 
 OTTO_MEMORY_BIN="$OTTO_BIN_DIR/otto-memory"
 echo "  Building otto-memory MCP server..."
-go build -o "$OTTO_MEMORY_BIN" ./cmd/otto-memory
+go build -ldflags "-X main.version=$OTTO_VERSION" -o "$OTTO_MEMORY_BIN" ./cmd/otto-memory
 echo "  [ok] $OTTO_MEMORY_BIN"
 
 # Memory storage locations (live under the state dir, alongside session ids).

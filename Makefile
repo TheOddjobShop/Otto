@@ -1,6 +1,10 @@
 .PHONY: build install test test-integration vet clean
 
-VERSION ?= dev
+# Default to git describe so locally-built binaries advertise a real version
+# string; the updater treats literal "dev" as "skip polling," so a missing
+# -ldflags here means Toot never announces new releases. Override with
+# `make build VERSION=vX.Y.Z` if you need an explicit tag.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 # build: produce ./otto in the repo for local testing.
 build:
