@@ -148,6 +148,7 @@ func main() {
 		mem:      memCore,
 		store:    memStore,
 		embedder: embedder,
+		version:  version,
 	}
 
 	h := &handler{

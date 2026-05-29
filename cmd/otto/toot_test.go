@@ -232,6 +232,21 @@ func TestTootReplyPromptsPendingUpdateWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestTootReplySurfacesCurrentVersion(t *testing.T) {
+	bot := &fakeBot{}
+	toot, runner := newTestToot(t, bot, "noted")
+	toot.version = "v9.9.9-test"
+
+	toot.Reply(context.Background(), 42, "toot what version are we on")
+
+	if len(runner.called) != 1 {
+		t.Fatalf("runner.called=%d, want 1", len(runner.called))
+	}
+	if !strings.Contains(runner.called[0].AppendSystemPrompt, "v9.9.9-test") {
+		t.Errorf("prompt missing current version: %q", runner.called[0].AppendSystemPrompt)
+	}
+}
+
 func TestTootReplyPromptsNoPendingWhenAbsent(t *testing.T) {
 	bot := &fakeBot{}
 	toot, runner := newTestToot(t, bot, "noted")
