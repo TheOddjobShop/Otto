@@ -198,6 +198,7 @@ func main() {
 	toot.triggerUpdate = h.runUpdate
 
 	go h.updater.Run(ctx)
+	go h.runBusDrain(ctx)
 	go h.runRotator(ctx)
 
 	sigs := make(chan os.Signal, 1)

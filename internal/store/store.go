@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS vectors (
 	dim     INTEGER NOT NULL,
 	vec     BLOB    NOT NULL
 );
+CREATE TABLE IF NOT EXISTS inbox (
+	id        INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts        TEXT    NOT NULL,
+	target    TEXT    NOT NULL,
+	source    TEXT    NOT NULL,
+	sender    TEXT    NOT NULL,
+	body      TEXT    NOT NULL,
+	delivered INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS inbox_undelivered ON inbox(delivered, id);
 `
 
 // Open opens (creating if needed) the SQLite database at path and ensures the
