@@ -24,7 +24,7 @@ The script is idempotent — re-run anytime to add credentials, install missing 
 7. Browser sign-ins for Google Calendar, Drive, Gmail.
 8. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
 9. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms. `mcp.json` registers the local `otto-memory` server alongside the community MCPs.
-10. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy.
+10. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy. On macOS, install a launchd user agent at `~/Library/LaunchAgents/com.otto.bot.plist` (with `KeepAlive=true` so `/update`'s SIGTERM auto-respawns) and bootstrap it into the current session.
 
 ## Manual smoke test
 
@@ -51,6 +51,15 @@ systemctl --user stop otto            # stop
 
 systemctl --user status ollama        # Ollama service (semantic embeddings)
 ollama list                           # which embedding models are pulled
+```
+
+### Service (macOS)
+
+```bash
+launchctl list | grep otto                          # confirm loaded
+launchctl print gui/$(id -u)/com.otto.bot           # full status
+launchctl kickstart -k gui/$(id -u)/com.otto.bot    # restart
+tail -f ~/Library/Logs/otto.log                     # logs
 ```
 
 ## Build / test
@@ -83,6 +92,7 @@ go build ./cmd/otto-memory   # build the MCP server binary
 │   └── embed/            # local text embeddings (Ollama /api/embed) + ordered fallthrough Chain
 │                         # + cosine similarity (brute-force top-k at single-user scale)
 ├── systemd/otto.service  # user-service template (Linux only)
+├── launchd/com.otto.bot.plist  # user-agent template (macOS only)
 ├── setup.sh              # idempotent installer (Arch + macOS), incl. Ollama + model pull
 ├── testdata/             # fake-claude.sh stub for integration tests
 ├── docs/superpowers/
@@ -191,6 +201,7 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 - **Session never rotates:** the rotator only fires when (a) the tracked `input_tokens` from Claude's `result` events crosses the soft threshold, (b) you've been idle ≥ `rotate_idle_minutes`, and (c) Otto isn't busy. The journal logs `rotator: rotated session ...` on success. Disable by setting `model_context_tokens = 0`.
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.
 - **`/update` seems to hang:** after `/update`, the bot exits within ~10s and systemd brings up the new binary on the next tick. Toot pings you back from the fresh process once it's settled. If you don't see that ping within ~30s, check `systemctl --user status otto` and `journalctl --user -u otto -n 50`.
+- **macOS: `/update` leaves Otto offline:** check `launchctl print gui/$(id -u)/com.otto.bot` and confirm `KeepAlive = true`. Older hand-written plists may be missing it (or have the default `ThrottleInterval = 10` that swallows back-to-back `kickstart` calls) — re-run `./setup.sh` to install the canonical one.
 
 ## License
 
