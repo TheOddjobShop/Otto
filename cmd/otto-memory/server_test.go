@@ -367,8 +367,8 @@ func TestHandleForwardRefusesInsideAgentHop(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("loop-guarded forward should be an IsError result")
 	}
-	if !strings.Contains(resultText(res), "nested agent forwards not allowed") {
-		t.Errorf("expected loop-guard diagnostic, got %q", resultText(res))
+	if !strings.Contains(resultText(res), "3-hop cap") {
+		t.Errorf("expected hop-cap diagnostic, got %q", resultText(res))
 	}
 }
 
@@ -460,8 +460,8 @@ func TestHandleMessageTotoRefusesInsideAgentHop(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("loop-guarded message should be an IsError result")
 	}
-	if !strings.Contains(resultText(res), "message_toto refused: nested agent forwards not allowed") {
-		t.Errorf("expected loop-guard diagnostic, got %q", resultText(res))
+	if !strings.Contains(resultText(res), "message_toto refused: agent-to-agent conversation reached its 3-hop cap") {
+		t.Errorf("expected hop-cap diagnostic, got %q", resultText(res))
 	}
 }
 
@@ -553,8 +553,8 @@ func TestHandleMessageTootRefusesInsideAgentHop(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("loop-guarded message should be an IsError result")
 	}
-	if !strings.Contains(resultText(res), "message_toot refused: nested agent forwards not allowed") {
-		t.Errorf("expected loop-guard diagnostic, got %q", resultText(res))
+	if !strings.Contains(resultText(res), "message_toot refused: agent-to-agent conversation reached its 3-hop cap") {
+		t.Errorf("expected hop-cap diagnostic, got %q", resultText(res))
 	}
 }
 
