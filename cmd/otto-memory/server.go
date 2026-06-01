@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -164,6 +165,41 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 			tr.Persona, tr.Role, tr.TS.Format("2006-01-02 15:04"), truncateContent(tr.Content)))
 	}
 	return textResult(b.String()), nil, nil
+}
+
+// forwardArgs is the schema for the forward_to_otto tool. Both fields are
+// required; the reason is shown to the user verbatim in the bus banner so
+// they know why Toto handed the message off.
+type forwardArgs struct {
+	Message string `json:"message" jsonschema:"the user's request, in their voice (cleaned up if rambly), to hand off to Otto"`
+	Reason  string `json:"reason" jsonschema:"a short one-line reason — e.g. \"user wants gmail summary\" — shown in the visible banner"`
+}
+
+// handleForward queues a user-meant message for Otto via the inbox bus.
+// Toto calls this when the user's message is actually work for Otto
+// (running code, sending email, anything Otto handles). The body is
+// formatted with a small "(from toto — <reason>)" prefix so Otto reads
+// the message with context about who handed it off and why.
+//
+// Refuses with a model-readable message when the agent-hop guard fires,
+// so the model knows not to retry inside a nested dispatch.
+func (s *memoryServer) handleForward(ctx context.Context, req *mcp.CallToolRequest, args forwardArgs) (*mcp.CallToolResult, any, error) {
+	msg := strings.TrimSpace(args.Message)
+	if msg == "" {
+		return errResult("forward_to_otto refused: message is empty"), nil, nil
+	}
+	reason := strings.TrimSpace(args.Reason)
+	if reason == "" {
+		return errResult("forward_to_otto refused: reason is empty (the user needs to see why you handed off)"), nil, nil
+	}
+	body := "(from toto — " + reason + ")\n\n" + msg
+	if _, err := s.store.Enqueue(ctx, "otto", "agent", "toto", body); err != nil {
+		if errors.Is(err, store.ErrBusLoopGuard) {
+			return errResult("forward_to_otto refused: nested agent forwards not allowed"), nil, nil
+		}
+		return errResult(fmt.Sprintf("forward_to_otto failed: %v", err)), nil, nil
+	}
+	return textResult("Queued for Otto."), nil, nil
 }
 
 // mergeTurns combines semantic and keyword results, semantic first, deduped by

@@ -93,15 +93,23 @@ func main() {
 	// unavailable (the chain returns an error and callers fall back to FTS).
 	embedder := embed.NewOllamaChain(cfg.EmbedOllamaURL, cfg.EmbedModels)
 
-	// Toto: separate runner with no MCP config (the empty mcpConfigPath
-	// makes NewExecRunner skip the --mcp-config flag entirely), separate
-	// session ID file, and a separate persona file. Toto's --model and
-	// --disallowedTools are set per-call inside Toto.Reply.
+	// Toto: separate runner with a scoped MCP config that exposes ONLY
+	// otto-memory (so Toto can use forward_to_otto and session_search,
+	// but cannot reach gmail/notion/etc.). Toto's --model, --allowedTools,
+	// and per-call system prompt are set inside Toto.Reply.
 	totoPersona, err := readTotoPersona(cfg.TotoPersonaPath)
 	if err != nil {
 		log.Fatalf("toto persona: %v", err)
 	}
-	totoRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, "", "", home)
+	stateDir := filepath.Dir(cfg.StateDBPath)
+	totoMCPPath, err := writeTotoMCPConfig(stateDir, cfg.MCPConfigPath)
+	if err != nil {
+		log.Fatalf("toto mcp config: %v", err)
+	}
+	if totoMCPPath == "" {
+		log.Printf("toto: no otto-memory entry found in %s — forward_to_otto disabled", cfg.MCPConfigPath)
+	}
+	totoRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, totoMCPPath, "", home)
 	totoSessionPath := cfg.TotoSessionIDPath
 	if totoSessionPath == "" {
 		// Default: sibling of the Otto session file. Keeps Toto's
@@ -277,6 +285,50 @@ func buildSystemPrompt(promptPath, mcpConfigPath string) (string, error) {
 	}
 	footer := operationalContextFooter(servers)
 	return strings.TrimRight(string(body), "\n") + "\n\n" + footer, nil
+}
+
+// writeTotoMCPConfig produces a Toto-scoped mcp.json containing ONLY the
+// "otto-memory" server entry pulled from the user's full mcp.json, and
+// writes it under stateDir with perms 0600. Returns the written path,
+// or "" if the source mcp.json has no otto-memory entry (in which case
+// the caller should run Toto in no-tools mode).
+//
+// Scoping matters: Otto's full mcp.json exposes Gmail, Notion, Calendar,
+// etc. Toto is a chat persona, not an assistant — handing him those
+// servers would let the model exfiltrate or mutate data outside its
+// remit. We give him exactly the MCP he needs to talk to Otto.
+func writeTotoMCPConfig(stateDir, ottoMCPPath string) (string, error) {
+	data, err := os.ReadFile(ottoMCPPath)
+	if err != nil {
+		return "", fmt.Errorf("read otto mcp config %s: %w", ottoMCPPath, err)
+	}
+	var v struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return "", fmt.Errorf("parse otto mcp config: %w", err)
+	}
+	entry, ok := v.MCPServers["otto-memory"]
+	if !ok {
+		return "", nil
+	}
+	scoped := struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}{
+		MCPServers: map[string]json.RawMessage{"otto-memory": entry},
+	}
+	out, err := json.MarshalIndent(scoped, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode toto mcp config: %w", err)
+	}
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		return "", fmt.Errorf("ensure state dir %s: %w", stateDir, err)
+	}
+	path := filepath.Join(stateDir, "toto-mcp.json")
+	if err := os.WriteFile(path, out, 0600); err != nil {
+		return "", fmt.Errorf("write toto mcp config %s: %w", path, err)
+	}
+	return path, nil
 }
 
 func readMCPServerNames(path string) ([]string, error) {

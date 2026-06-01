@@ -151,6 +151,17 @@ func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPro
 	t.replyWithContext(ctx, chatID, userMessage, true, ottoPrompt, ottoSnippet)
 }
 
+// totoAllowedTools is the closed allowlist of MCP tools Toto may call.
+// Everything else is blocked, including built-in filesystem and shell.
+// forward_to_otto lets Toto hand actual work off to Otto via the inbox
+// bus; session_search lets Toto recall past turns when needed. The
+// scoped mcp.json restricts what's even reachable; this allowlist
+// tightens it further to specific tool names.
+var totoAllowedTools = []string{
+	"mcp__otto-memory__forward_to_otto",
+	"mcp__otto-memory__session_search",
+}
+
 // replyWithContext is the shared implementation for both paths.
 // busyFallback distinguishes the two modes: in busy-fallback the user's
 // message wasn't addressed to Toto and Otto's the one they meant; in
@@ -158,8 +169,9 @@ func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPro
 // (busy/idle/working-on-X) is injected in BOTH modes so Toto always
 // knows what's going on.
 //
-// Toto is invoked with no MCP config and --disallowedTools "*", so
-// even if the model tried to call a tool, Claude Code would refuse.
+// Toto runs with a Toto-scoped mcp.json (only otto-memory) plus an
+// explicit --allowedTools allowlist of forward_to_otto + session_search.
+// He can't reach gmail/notion/etc., and he can't call any built-in tool.
 func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage string, busyFallback bool, ottoPrompt, ottoSnippet string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -238,7 +250,7 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),
 		Model:              totoModel,
-		DisallowedTools:    []string{"*"},
+		AllowedTools:       totoAllowedTools,
 		AppendSystemPrompt: systemPrompt,
 		Events:             events,
 	})
