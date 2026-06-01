@@ -190,6 +190,17 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 | `rotate_hard_pct` | `0.85` | rotate at next idle tick regardless |
 | `rotate_idle_minutes` | `15` | quiet window required for a soft rotation |
 
+### Caveman skill (or other SessionStart prose-changers)
+
+Otto sets `OTTO_RUNNING=1` on every Claude Code subprocess. If you have a
+SessionStart hook (e.g. the caveman skill) that alters reply tone, gate it
+on this env var so it only fires in your IDE, not in Otto's replies:
+
+    [ -n "$OTTO_RUNNING" ] && exit 0
+
+Otto's personas also carry an explicit IGNORE-CAVEMAN instruction as a
+backstop, so this hook patch is optional but cleaner.
+
 ## Troubleshooting
 
 - **`go build` fails:** check `go.mod`'s `go` directive matches your installed Go (`go version`).

@@ -195,6 +195,12 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 		cmd.Dir = r.workDir
 	}
 	cmd.Env = os.Environ()
+	// Signal to user-installed Claude Code SessionStart hooks (e.g. the
+	// "caveman" skill that strips articles and uses fragments) that we are
+	// running inside Otto, so they can early-exit. Otto's audience is a
+	// Telegram user reading on a phone — they expect normal prose, not the
+	// terse IDE-tuned voice. Hooks gate on `[ -n "$OTTO_RUNNING" ] && exit 0`.
+	cmd.Env = append(cmd.Env, "OTTO_RUNNING=1")
 	for k, v := range r.extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
