@@ -363,6 +363,42 @@ func TestExitForceFallbackFiresWhenSIGTERMIgnored(t *testing.T) {
 	}
 }
 
+func TestCheckNowUpdatesPendingOnFreshRelease(t *testing.T) {
+	// CheckNow is what Toot's [CHECK_FOR_UPDATE] marker invokes — a
+	// synchronous wrapper around checkOnce. After it returns, Pending()
+	// must reflect the freshly-detected release and the same value must
+	// be the return.
+	json := fmt.Sprintf(`{
+		"tag_name": "v1.0.1",
+		"body": "What's Changed\n* On-demand check (#9)",
+		"assets": [{"name": "otto-%s-%s", "browser_download_url": "https://x/asset"}]
+	}`, runtime.GOOS, runtime.GOARCH)
+	u, _, cleanup := newTestUpdater(t, json)
+	defer cleanup()
+
+	got := u.CheckNow(context.Background())
+	if got == nil {
+		t.Fatal("CheckNow returned nil, want pending update")
+	}
+	if got.Tag != "v1.0.1" {
+		t.Errorf("CheckNow.Tag=%q, want v1.0.1", got.Tag)
+	}
+	if u.Pending() == nil || u.Pending().Tag != "v1.0.1" {
+		t.Errorf("Pending() did not reflect CheckNow result: %+v", u.Pending())
+	}
+}
+
+func TestCheckNowReturnsNilWhenCurrent(t *testing.T) {
+	// Same tag as currentVersion → no pending state, CheckNow returns nil.
+	json := `{"tag_name": "v1.0.0", "assets": []}`
+	u, _, cleanup := newTestUpdater(t, json)
+	defer cleanup()
+
+	if got := u.CheckNow(context.Background()); got != nil {
+		t.Errorf("CheckNow=%+v, want nil when already current", got)
+	}
+}
+
 func TestInstallConcurrentReturnsBusy(t *testing.T) {
 	// First install holds the installing flag while a second one tries.
 	// The second must return errInstallInProgress and leave the binary alone.

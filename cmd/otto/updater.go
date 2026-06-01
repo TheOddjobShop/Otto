@@ -198,6 +198,17 @@ func (u *updater) Pending() *pendingUpdate {
 	return u.pending
 }
 
+// CheckNow runs a synchronous release poll (the same routine the
+// hourly ticker invokes) and returns the new pending state. Used by
+// Toot's [CHECK_FOR_UPDATE] marker so the user can ask "check for
+// updates" in chat instead of waiting for the next hourly tick.
+// Returns whatever Pending() resolves to after the check completes
+// (nil = up to date).
+func (u *updater) CheckNow(ctx context.Context) *pendingUpdate {
+	u.checkOnce(ctx)
+	return u.Pending()
+}
+
 // newUpdater constructs an updater that polls the default GitHub URL.
 // Pass version="dev" for local builds — Run will short-circuit and not
 // poll at all.
