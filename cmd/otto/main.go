@@ -206,6 +206,12 @@ func main() {
 	toot.triggerUpdate = h.runUpdate
 
 	go h.updater.Run(ctx)
+	// Bus drain reads inbox rows and dispatches them. Otto's
+	// message_toto / message_toot tools (in otto-memory) rely on Otto's
+	// mcp.json already exposing the "otto-memory" server entry — setup.sh
+	// writes that entry, so no wiring is needed here. If a user's mcp.json
+	// somehow lacks it, that's a config issue (the tools simply won't
+	// appear in Otto's tool list); no code change makes them work.
 	go h.runBusDrain(ctx)
 	go h.runRotator(ctx)
 
