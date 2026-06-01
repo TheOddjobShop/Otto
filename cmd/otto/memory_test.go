@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"otto/internal/embed"
 	"otto/internal/memory"
@@ -118,6 +119,83 @@ func TestEmbedAndStorePersistsVector(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != id {
 		t.Fatalf("embedded turn not searchable: %+v", got)
+	}
+}
+
+func TestCurrentTimeBlockFormatsLocalAndUTC(t *testing.T) {
+	// Pin both the instant and the local zone so the assertion is deterministic
+	// regardless of the host clock or TZ.
+	prev := time.Local
+	t.Cleanup(func() { time.Local = prev })
+	loc := time.FixedZone("PDT", -7*3600)
+	time.Local = loc
+
+	fixed := time.Date(2026, 5, 31, 21, 32, 8, 0, time.UTC)
+	got := currentTimeBlock(fixed)
+
+	for _, want := range []string{
+		"CURRENT TIME (sampled at this turn)",
+		"Local:   Sun 2026-05-31 14:32:08 PDT (UTC-07:00)",
+		"UTC:     2026-05-31 21:32:08",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("block missing %q\nfull block:\n%s", want, got)
+		}
+	}
+}
+
+func TestCurrentTimeBlockPositiveOffset(t *testing.T) {
+	prev := time.Local
+	t.Cleanup(func() { time.Local = prev })
+	// Asia/Tokyo, no DST, fixed +09:00.
+	time.Local = time.FixedZone("JST", 9*3600)
+
+	fixed := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	got := currentTimeBlock(fixed)
+
+	if !strings.Contains(got, "(UTC+09:00)") {
+		t.Errorf("positive offset missing: %q", got)
+	}
+	if !strings.Contains(got, "Fri 2026-01-02 09:00:00 JST") {
+		t.Errorf("local time wrong: %q", got)
+	}
+}
+
+func TestComposePromptWithTimeAndMemoryIncludesTimeBlock(t *testing.T) {
+	got := composePromptWithTimeAndMemory("BASE", nil)
+	if !strings.HasPrefix(got, "BASE") {
+		t.Errorf("base should come first: %q", got)
+	}
+	if !strings.Contains(got, "CURRENT TIME") {
+		t.Errorf("time block missing: %q", got)
+	}
+}
+
+func TestComposePromptWithTimeAndMemoryAlsoIncludesMemory(t *testing.T) {
+	c := memory.NewCore(t.TempDir(), 2200, 1375)
+	if err := c.Add(memory.TargetUser, "User is named Justin."); err != nil {
+		t.Fatal(err)
+	}
+	got := composePromptWithTimeAndMemory("BASE", c)
+	if !strings.Contains(got, "CURRENT TIME") {
+		t.Errorf("time block missing: %q", got)
+	}
+	if !strings.Contains(got, "Justin") {
+		t.Errorf("memory block missing: %q", got)
+	}
+	// Time block must precede the memory block.
+	if strings.Index(got, "CURRENT TIME") > strings.Index(got, "Justin") {
+		t.Errorf("time block should precede memory: %q", got)
+	}
+}
+
+func TestComposePromptWithTimeAndMemoryEmptyBase(t *testing.T) {
+	got := composePromptWithTimeAndMemory("", nil)
+	if strings.HasPrefix(got, "\n") {
+		t.Errorf("empty base should not leave a leading separator: %q", got)
+	}
+	if !strings.Contains(got, "CURRENT TIME") {
+		t.Errorf("time block missing: %q", got)
 	}
 }
 

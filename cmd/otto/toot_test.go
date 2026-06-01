@@ -54,7 +54,7 @@ func TestTootAnnounce(t *testing.T) {
 	if len(args.DisallowedTools) != 1 || args.DisallowedTools[0] != "*" {
 		t.Errorf("DisallowedTools=%v, want [\"*\"]", args.DisallowedTools)
 	}
-	for _, want := range []string{"v1.0.0", "v1.0.1", "Item one", "TEST PERSONA"} {
+	for _, want := range []string{"v1.0.0", "v1.0.1", "Item one", "TEST PERSONA", "CURRENT TIME"} {
 		if !strings.Contains(args.AppendSystemPrompt, want) {
 			t.Errorf("system prompt missing %q: %q", want, args.AppendSystemPrompt)
 		}
@@ -247,6 +247,9 @@ func TestTootReplySurfacesCurrentVersion(t *testing.T) {
 	}
 	if !strings.Contains(runner.called[0].AppendSystemPrompt, "v9.9.9-test") {
 		t.Errorf("prompt missing current version: %q", runner.called[0].AppendSystemPrompt)
+	}
+	if !strings.Contains(runner.called[0].AppendSystemPrompt, "CURRENT TIME") {
+		t.Errorf("toot reply prompt missing time block: %q", runner.called[0].AppendSystemPrompt)
 	}
 }
 

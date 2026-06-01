@@ -424,7 +424,7 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 		Prompt:             u.Text,
 		SessionID:          h.session.ID(),
 		ImagePaths:         imagePaths,
-		AppendSystemPrompt: composeMemoryPrompt(h.baseSystemPrompt, h.mem),
+		AppendSystemPrompt: composePromptWithTimeAndMemory(h.baseSystemPrompt, h.mem),
 	})
 }
 

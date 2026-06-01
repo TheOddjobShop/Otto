@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -40,6 +41,58 @@ func composeMemoryPrompt(base string, core *memory.Core) string {
 		return block
 	}
 	return base + "\n\n" + block
+}
+
+// currentTimeBlock formats a structured block describing the moment t, in both
+// the host's local timezone and UTC. The helper is deterministic — callers pass
+// the instant explicitly so tests can pin it. Use currentTimeBlockNow() in
+// production code paths.
+func currentTimeBlock(t time.Time) string {
+	local := t.In(time.Local)
+	utc := t.UTC()
+
+	zoneName, offsetSeconds := local.Zone()
+	sign := "+"
+	if offsetSeconds < 0 {
+		sign = "-"
+		offsetSeconds = -offsetSeconds
+	}
+	offH := offsetSeconds / 3600
+	offM := (offsetSeconds % 3600) / 60
+	offset := fmt.Sprintf("UTC%s%02d:%02d", sign, offH, offM)
+
+	var b strings.Builder
+	b.WriteString("───────────────────────────────────────────────\n")
+	b.WriteString("  CURRENT TIME (sampled at this turn)\n")
+	b.WriteString("───────────────────────────────────────────────\n\n")
+	b.WriteString(fmt.Sprintf("Local:   %s %s (%s)\n",
+		local.Format("Mon 2006-01-02 15:04:05"), zoneName, offset))
+	b.WriteString(fmt.Sprintf("UTC:     %s", utc.Format("2006-01-02 15:04:05")))
+	return b.String()
+}
+
+// currentTimeBlockNow is the production wrapper around currentTimeBlock —
+// it samples time.Now() at call time so each composed prompt reflects the
+// actual moment of composition rather than process boot.
+func currentTimeBlockNow() string {
+	return currentTimeBlock(time.Now())
+}
+
+// composePromptWithTimeAndMemory layers the current-time block and the memory
+// core onto a base persona prompt, in that order. The time block is sampled at
+// call time (via currentTimeBlockNow) so each turn reflects the exact moment
+// the prompt is composed. Memory is appended last via composeMemoryPrompt so
+// its responsibility stays narrow.
+func composePromptWithTimeAndMemory(base string, core *memory.Core) string {
+	timeBlock := currentTimeBlockNow()
+	var withTime string
+	switch {
+	case base == "":
+		withTime = timeBlock
+	default:
+		withTime = base + "\n\n" + timeBlock
+	}
+	return composeMemoryPrompt(withTime, core)
 }
 
 // embedAndStore embeds content and persists the vector for turnID, best-effort.
