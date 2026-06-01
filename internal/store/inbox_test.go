@@ -21,11 +21,11 @@ func TestInboxEnqueueDequeueRoundtrip(t *testing.T) {
 	s := newInboxStore(t)
 	ctx := context.Background()
 
-	id1, err := s.Enqueue(ctx, "otto", "agent", "toto", "forwarded thing")
+	id1, err := s.Enqueue(ctx, "otto", "agent", "toto", "forwarded thing", 1)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	id2, err := s.Enqueue(ctx, "toot", "user", "", "hello toot")
+	id2, err := s.Enqueue(ctx, "toot", "user", "", "hello toot", 0)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
@@ -46,6 +46,12 @@ func TestInboxEnqueueDequeueRoundtrip(t *testing.T) {
 	if got[0].Target != "otto" || got[0].Source != "agent" || got[0].Sender != "toto" || got[0].Body != "forwarded thing" {
 		t.Errorf("row 0 round-trip mismatch: %+v", got[0])
 	}
+	if got[0].Hop != 1 {
+		t.Errorf("row 0 Hop=%d, want 1", got[0].Hop)
+	}
+	if got[1].Hop != 0 {
+		t.Errorf("row 1 Hop=%d, want 0", got[1].Hop)
+	}
 	if got[0].TS.IsZero() {
 		t.Errorf("row 0 TS should have been parsed")
 	}
@@ -55,7 +61,7 @@ func TestInboxDequeueClears(t *testing.T) {
 	s := newInboxStore(t)
 	ctx := context.Background()
 
-	if _, err := s.Enqueue(ctx, "otto", "user", "", "first"); err != nil {
+	if _, err := s.Enqueue(ctx, "otto", "user", "", "first", 0); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	first, err := s.DequeueAll(ctx)
@@ -88,7 +94,7 @@ func TestInboxValidationErrors(t *testing.T) {
 		{"empty body", "otto", "user", "", "   "},
 	}
 	for _, tc := range cases {
-		if _, err := s.Enqueue(ctx, tc.target, tc.source, tc.sender, tc.body); err == nil {
+		if _, err := s.Enqueue(ctx, tc.target, tc.source, tc.sender, tc.body, 0); err == nil {
 			t.Errorf("%s: expected error, got nil", tc.name)
 		}
 	}
@@ -100,7 +106,7 @@ func TestInboxDequeueCap(t *testing.T) {
 
 	const inserted = inboxDequeueCap + 10
 	for i := 0; i < inserted; i++ {
-		if _, err := s.Enqueue(ctx, "otto", "user", "", "msg"); err != nil {
+		if _, err := s.Enqueue(ctx, "otto", "user", "", "msg", 0); err != nil {
 			t.Fatalf("Enqueue %d: %v", i, err)
 		}
 	}
@@ -120,16 +126,60 @@ func TestInboxDequeueCap(t *testing.T) {
 	}
 }
 
-func TestInboxAgentHopGuard(t *testing.T) {
+// TestEnqueueRejectsHopOverMax confirms the hop cap fires at MaxBusHop+1.
+// MCP tool handlers turn this into a model-readable refusal so the bus
+// chain stops cleanly.
+func TestEnqueueRejectsHopOverMax(t *testing.T) {
+	s := newInboxStore(t)
+	ctx := context.Background()
+	if _, err := s.Enqueue(ctx, "toto", "agent", "otto", "ping", MaxBusHop+1); !errors.Is(err, ErrBusHopExceeded) {
+		t.Fatalf("expected ErrBusHopExceeded, got %v", err)
+	}
+	// Sanity: hop exactly at the cap still goes through.
+	if _, err := s.Enqueue(ctx, "toto", "agent", "otto", "ping", MaxBusHop); err != nil {
+		t.Fatalf("hop=MaxBusHop should succeed, got %v", err)
+	}
+}
+
+// TestDequeueAllReturnsHop ensures the hop column round-trips through the
+// scan path. Dispatcher relies on this so it can compose the per-call
+// "HOPS REMAINING: N" line accurately.
+func TestDequeueAllReturnsHop(t *testing.T) {
+	s := newInboxStore(t)
+	ctx := context.Background()
+	if _, err := s.Enqueue(ctx, "toto", "agent", "otto", "ping", 2); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	got, err := s.DequeueAll(ctx)
+	if err != nil {
+		t.Fatalf("DequeueAll: %v", err)
+	}
+	if len(got) != 1 || got[0].Hop != 2 {
+		t.Fatalf("expected one row with Hop=2, got %+v", got)
+	}
+}
+
+// TestBusHopCtxRoundtrip locks in the WithBusHop / BusHopFromCtx contract.
+// The dispatcher writes the count; tool handlers read it and pass hop+1
+// back into Enqueue.
+func TestBusHopCtxRoundtrip(t *testing.T) {
+	ctx := WithBusHop(context.Background(), 2)
+	n, ok := BusHopFromCtx(ctx)
+	if !ok || n != 2 {
+		t.Fatalf("BusHopFromCtx = (%d, %v), want (2, true)", n, ok)
+	}
+	if _, ok := BusHopFromCtx(context.Background()); ok {
+		t.Errorf("plain ctx should report no hop counter")
+	}
+}
+
+// TestLegacyAgentHopStillTripsCap exercises the back-compat shim so older
+// call sites that used WithAgentHop continue to refuse nested enqueues.
+func TestLegacyAgentHopStillTripsCap(t *testing.T) {
 	s := newInboxStore(t)
 	ctx := WithAgentHop(context.Background())
-
-	_, err := s.Enqueue(ctx, "toto", "agent", "otto", "ping")
-	if !errors.Is(err, ErrBusLoopGuard) {
-		t.Fatalf("expected ErrBusLoopGuard, got %v", err)
-	}
-	// Sanity: undecorated context still works.
-	if _, err := s.Enqueue(context.Background(), "toto", "agent", "otto", "ping"); err != nil {
-		t.Fatalf("plain ctx enqueue should succeed: %v", err)
+	n, _ := BusHopFromCtx(ctx)
+	if _, err := s.Enqueue(ctx, "toto", "agent", "otto", "ping", n+1); !errors.Is(err, ErrBusLoopGuard) {
+		t.Fatalf("expected ErrBusLoopGuard from legacy hop ctx, got %v", err)
 	}
 }

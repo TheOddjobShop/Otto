@@ -14,6 +14,12 @@ import (
 // the next tick than to wedge the bus loop on a single iteration.
 const inboxDequeueCap = 64
 
+// MaxBusHop caps how many agent-to-agent hops a single conversation chain
+// may take before the bus refuses further enqueues. Conversations winding
+// down before the cap are nudged by the per-call "HOPS REMAINING" prompt
+// the dispatcher injects.
+const MaxBusHop = 3
+
 // validTargets / validSources enumerate the closed sets of recipients and
 // origins the bus accepts. New values added here must also be wired into
 // the dispatch path in cmd/otto.
@@ -30,45 +36,76 @@ type InboxMsg struct {
 	Source string // "user" | "agent"
 	Sender string // "otto" | "toto" | "toot" | "" (user)
 	Body   string
+	Hop    int // 0 for user-originated; +1 per agent-to-agent forward
 }
 
-// ErrBusLoopGuard is returned by Enqueue when the caller's context indicates
-// it is already running on behalf of an agent-sourced bus message. Without
-// this guard, dispatch of an agent message could itself enqueue another
-// agent message, producing an unbounded ping-pong between bots. Bus drain
-// reads rows directly from SQLite and is unaffected — only the in-process
-// Enqueue path needs to refuse.
-var ErrBusLoopGuard = errors.New("store: inbox enqueue blocked by agent-hop guard")
+// ErrBusHopExceeded is returned by Enqueue when a caller tries to push a
+// row whose hop would exceed MaxBusHop. The bus dispatcher trusts this to
+// halt a conversation chain that's run away, and the MCP tool handlers
+// surface it back to the model as a polite refusal so it knows to wind
+// down rather than retry.
+var ErrBusHopExceeded = errors.New("store: inbox enqueue blocked by hop cap")
 
-// ctxKeyAgentHop tags a context as "currently dispatching an agent-sourced
-// message". Set by the bus drain when source=="agent"; read by Enqueue so
-// nested enqueues from downstream tool handlers (PR-C/D will plug in here)
-// fail fast with ErrBusLoopGuard.
-type ctxKeyAgentHop struct{}
+// ErrBusLoopGuard is retained as an alias of ErrBusHopExceeded for
+// backwards compatibility with callers/tests that referenced the older
+// boolean-flavored loop guard. New code should reference ErrBusHopExceeded
+// directly.
+var ErrBusLoopGuard = ErrBusHopExceeded
 
-// WithAgentHop marks ctx as carrying an in-flight agent-sourced bus message.
-// Exported so cmd/otto can wrap its dispatch context.
+// ctxKeyBusHop tags a context with the hop count of the currently
+// dispatching bus message. The dispatcher in cmd/otto wraps each agent-
+// targeted ctx via WithBusHop(n); downstream tool handlers read it via
+// BusHopFromCtx and pass hop+1 to Enqueue so the chain self-counts.
+type ctxKeyBusHop struct{}
+
+// WithBusHop returns a child context carrying the bus-hop counter n. The
+// dispatcher uses this to thread the current hop through the per-call
+// context handed to Otto/Toto/Toot so their tool handlers can increment it
+// when enqueueing a follow-up.
+func WithBusHop(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, ctxKeyBusHop{}, n)
+}
+
+// BusHopFromCtx returns the bus-hop counter set by WithBusHop, and whether
+// it was present. Absent counters are treated as zero by callers (the
+// initial user-originated turn is hop 0).
+func BusHopFromCtx(ctx context.Context) (int, bool) {
+	v, ok := ctx.Value(ctxKeyBusHop{}).(int)
+	return v, ok
+}
+
+// WithAgentHop is the pre-hop-counter compatibility shim. It marks ctx as
+// already being inside an agent dispatch so legacy callers that called
+// Enqueue without specifying a hop still trip the cap. Equivalent to
+// WithBusHop(ctx, MaxBusHop).
 func WithAgentHop(ctx context.Context) context.Context {
-	return context.WithValue(ctx, ctxKeyAgentHop{}, true)
+	return WithBusHop(ctx, MaxBusHop)
 }
 
-// IsAgentHop reports whether ctx was tagged by WithAgentHop.
+// IsAgentHop reports whether ctx was tagged by WithAgentHop / WithBusHop
+// with a counter at or above the cap. Retained for tests that predate the
+// counter-based API.
 func IsAgentHop(ctx context.Context) bool {
-	v, _ := ctx.Value(ctxKeyAgentHop{}).(bool)
-	return v
+	n, ok := BusHopFromCtx(ctx)
+	return ok && n >= MaxBusHop
 }
 
 // Enqueue inserts one row into the inbox and returns its id.
 //
 // target ∈ {otto,toto,toot}, source ∈ {user,agent}. body must be non-empty
 // after trimming whitespace; sender may be empty when source=="user".
+// hop is the bus-chain depth this row will carry; the dispatcher injects
+// it into the recipient's per-call prompt so the model can wind down
+// before hitting the cap.
 //
-// If ctx is tagged via WithAgentHop, Enqueue refuses with ErrBusLoopGuard:
-// an agent-dispatch is already in flight, and letting it queue another
-// agent message would let the bus chase its own tail.
-func (s *Store) Enqueue(ctx context.Context, target, source, sender, body string) (int64, error) {
-	if IsAgentHop(ctx) {
-		return 0, ErrBusLoopGuard
+// If hop > MaxBusHop, Enqueue refuses with ErrBusHopExceeded so chained
+// agent-to-agent conversations stop after a bounded number of forwards.
+func (s *Store) Enqueue(ctx context.Context, target, source, sender, body string, hop int) (int64, error) {
+	if hop < 0 {
+		return 0, fmt.Errorf("store: inbox enqueue: negative hop %d", hop)
+	}
+	if hop > MaxBusHop {
+		return 0, ErrBusHopExceeded
 	}
 	if _, ok := validTargets[target]; !ok {
 		return 0, fmt.Errorf("store: inbox enqueue: invalid target %q", target)
@@ -80,8 +117,8 @@ func (s *Store) Enqueue(ctx context.Context, target, source, sender, body string
 		return 0, fmt.Errorf("store: inbox enqueue: empty body")
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO inbox(ts, target, source, sender, body) VALUES (?, ?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339Nano), target, source, sender, body,
+		`INSERT INTO inbox(ts, target, source, sender, body, hop) VALUES (?, ?, ?, ?, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano), target, source, sender, body, hop,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: inbox enqueue: %w", err)
@@ -105,7 +142,7 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, ts, target, source, sender, body
+		SELECT id, ts, target, source, sender, body, hop
 		FROM inbox
 		WHERE delivered = 0
 		ORDER BY id
@@ -119,7 +156,7 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 	for rows.Next() {
 		var m InboxMsg
 		var ts string
-		if err := rows.Scan(&m.ID, &ts, &m.Target, &m.Source, &m.Sender, &m.Body); err != nil {
+		if err := rows.Scan(&m.ID, &ts, &m.Target, &m.Source, &m.Sender, &m.Body, &m.Hop); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("store: inbox dequeue: scan: %w", err)
 		}

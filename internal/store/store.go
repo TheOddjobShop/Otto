@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS inbox (
 	source    TEXT    NOT NULL,
 	sender    TEXT    NOT NULL,
 	body      TEXT    NOT NULL,
-	delivered INTEGER NOT NULL DEFAULT 0
+	delivered INTEGER NOT NULL DEFAULT 0,
+	hop       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS inbox_undelivered ON inbox(delivered, id);
 `
@@ -62,6 +63,15 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
+	}
+	// Idempotent column migration: older DBs predate the inbox.hop column.
+	// Sniff with a SELECT; if the column is missing, ALTER. Re-running on a
+	// DB that already has the column hits the SELECT happy path and skips.
+	if _, err := db.Exec(`SELECT hop FROM inbox LIMIT 1`); err != nil {
+		if _, aerr := db.Exec(`ALTER TABLE inbox ADD COLUMN hop INTEGER NOT NULL DEFAULT 0`); aerr != nil {
+			db.Close()
+			return nil, fmt.Errorf("store: migrate inbox.hop: %w", aerr)
+		}
 	}
 	return &Store{db: db}, nil
 }
