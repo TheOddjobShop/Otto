@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.otto.bot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__OTTO_BIN__</string>
+  </array>
+
+  <!-- Always restart on exit (matches systemd Restart=always). The
+       updater SIGTERMs the process during /update; KeepAlive brings
+       the new binary back. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Start on load + on user login. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Default is 10s which blocks back-to-back launchctl kickstart
+       calls; 5s lets /update's exit-and-respawn flow complete
+       smoothly without being throttled. -->
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <!-- Logs land in the user's standard Library/Logs path so they're
+       easy to tail without needing `log show` privileges. -->
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/otto.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/otto.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <!-- Run from the user's home so `claude` and any relative paths
+       behave the same as a logged-in interactive shell. -->
+  <key>WorkingDirectory</key>
+  <string>__HOME__</string>
+</dict>
+</plist>
