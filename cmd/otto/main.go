@@ -204,6 +204,7 @@ func main() {
 	// callback is the same goroutine /update spawns.
 	toot.pendingUpdate = h.updater.Pending
 	toot.triggerUpdate = h.runUpdate
+	toot.checkNow = h.updater.CheckNow
 
 	go h.updater.Run(ctx)
 	// Bus drain reads inbox rows and dispatches them. Otto's

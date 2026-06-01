@@ -10,6 +10,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"otto/internal/claude"
 	"otto/internal/embed"
@@ -82,6 +83,11 @@ type Toot struct {
 	// chat. Wired to handler.runUpdate in main.go.
 	triggerUpdate func()
 
+	// checkNow, when non-nil, runs a synchronous GitHub release poll
+	// and returns the latest pending update (nil if none). Toot calls
+	// this when emitting [CHECK_FOR_UPDATE] in chat.
+	checkNow func(ctx context.Context) *pendingUpdate
+
 	mu sync.Mutex // serializes Toot's own --resume against the toot session
 }
 
@@ -89,6 +95,12 @@ type Toot struct {
 // emit when the user has authorized an install during chat. The
 // dispatcher strips it from the visible reply and fires triggerUpdate.
 const tootUpdateMarker = "[TRIGGER_UPDATE]"
+
+// tootCheckMarker is the literal string Toot's LLM is instructed to
+// emit when the user has asked him to poll GitHub right now. The
+// dispatcher strips it from the visible reply, runs CheckNow, and
+// appends a one-line result to Toot's outgoing message.
+const tootCheckMarker = "[CHECK_FOR_UPDATE]"
 
 // stripUpdateMarker removes the install-trigger marker from Toot's
 // reply. Returns the cleaned text and a bool indicating whether the
@@ -98,6 +110,18 @@ func stripUpdateMarker(s string) (string, bool) {
 		return s, false
 	}
 	cleaned := strings.ReplaceAll(s, tootUpdateMarker, "")
+	return strings.TrimSpace(cleaned), true
+}
+
+// stripCheckMarker removes the check-for-update marker from Toot's
+// reply. Returns the cleaned text and a bool indicating whether the
+// marker was present. Mirrors stripUpdateMarker semantics so both
+// markers can coexist on the same reply.
+func stripCheckMarker(s string) (string, bool) {
+	if !strings.Contains(s, tootCheckMarker) {
+		return s, false
+	}
+	cleaned := strings.ReplaceAll(s, tootCheckMarker, "")
 	return strings.TrimSpace(cleaned), true
 }
 
@@ -133,10 +157,12 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	// nudges Toot toward using judgment on natural phrasings ("can you
 	// update", "would you mind installing", etc.) rather than only
 	// matching the literal example wordings.
-	if t.pendingUpdate != nil {
+	if t.pendingUpdate != nil || t.checkNow != nil {
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
 		systemPrompt += "TOOLS AVAILABLE TO YOU\n"
 		systemPrompt += "───────────────────────────────────────────────\n\n"
+	}
+	if t.pendingUpdate != nil {
 		if p := t.pendingUpdate(); p != nil {
 			systemPrompt += fmt.Sprintf("install_update — installs the pending release (%s).\n\n", p.Tag)
 			systemPrompt += "To call this tool, end your reply with the literal marker on its own line:\n\n  "
@@ -156,10 +182,24 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 			systemPrompt += "  - speculation (\"should I update?\", \"is it worth it?\")\n"
 			systemPrompt += "  - hesitation (\"maybe later\", \"idk\")\n\n"
 			systemPrompt += "If you're genuinely uncertain whether they're asking, reply with one short clarifying question (\"Confirm: install " + p.Tag + " now, sir?\") and DON'T call the tool. The user will need to address you again with their answer.\n\n"
-			systemPrompt += "When you DO call the tool, phrase your reply as though you're personally seeing the install through (\"Initiating install of " + p.Tag + ", sir. Stand by.\"). Stay in your voice."
-		} else {
-			systemPrompt += "(no tools available right now — there's no pending update.)\n\nIf the user asks you to install something, explain politely that there's nothing to install — Otto is on the latest version."
+			systemPrompt += "When you DO call the tool, phrase your reply as though you're personally seeing the install through (\"Initiating install of " + p.Tag + ", sir. Stand by.\"). Stay in your voice.\n\n"
+		} else if t.checkNow == nil {
+			// No pending update AND no on-demand check tool available — the
+			// user has no install path to offer. Tell Toot to deflect.
+			systemPrompt += "(no tools available right now — there's no pending update.)\n\nIf the user asks you to install something, explain politely that there's nothing to install — Otto is on the latest version.\n\n"
 		}
+	}
+	if t.checkNow != nil {
+		systemPrompt += "check_for_update — runs an immediate release poll right now.\n\n"
+		systemPrompt += "To call this tool, end your reply with the literal marker on its own line:\n\n  "
+		systemPrompt += tootCheckMarker
+		systemPrompt += "\n\nThe marker is invisible to the user — the system polls GitHub and appends a one-line result to your message (\"Update found: vX.Y.Z.\" or \"Up to date as of HH:MM.\").\n\n"
+		systemPrompt += "WHEN TO CALL check_for_update\n\n"
+		systemPrompt += "  - User asks any form of \"check for updates\", \"is there a new release\", \"anything new on github\", \"see if there's a patch\".\n"
+		systemPrompt += "  - User pings you out of curiosity (\"yo what's the latest\", \"any new version?\") — call it.\n\n"
+		systemPrompt += "If the user ALSO wants you to install whatever comes back (\"check and install\", \"if there's one, do it\", \"yes and update if found\"), end your reply with BOTH markers, each on its own line:\n\n  "
+		systemPrompt += tootCheckMarker + "\n  " + tootUpdateMarker
+		systemPrompt += "\n\nIf the check returns nothing, " + tootUpdateMarker + " safely no-ops."
 	}
 
 	systemPrompt = composePromptWithTimeAndMemory(systemPrompt, t.mem)
@@ -213,10 +253,31 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	}
 
 	out := strings.TrimSpace(assistantText.String())
+	out, shouldCheck := stripCheckMarker(out)
 	out, shouldTrigger := stripUpdateMarker(out)
 	if out == "" {
-		out = "Noted."
+		if shouldCheck {
+			out = "Checking, sir."
+		} else {
+			out = "Noted."
+		}
 	}
+
+	// Run the synchronous release poll BEFORE delivering so the result
+	// line can ride along on the same message. Bounded context keeps a
+	// slow GitHub from hanging Toot's reply chain.
+	var checkResult *pendingUpdate
+	if shouldCheck && t.checkNow != nil {
+		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		checkResult = t.checkNow(checkCtx)
+		cancel()
+		if checkResult != nil {
+			out += "\n\nUpdate found: " + checkResult.Tag + "."
+		} else {
+			out += "\n\nUp to date as of " + time.Now().Format("15:04") + "."
+		}
+	}
+
 	out = stripMarkdown(out)
 	if dErr := t.deliver(ctx, chatID, out); dErr != nil {
 		log.Printf("toot reply deliver error: %v", dErr)
@@ -228,9 +289,17 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 	// Fire the install AFTER the deliver so the user sees Toot's
 	// "initiating install" message before the binary swap kicks off.
 	// runUpdate handles the rest (download → swap → Confirm → Exit).
+	//
+	// Combined check+install: only fire if the just-completed CheckNow
+	// turned up a release. Otherwise log and skip — there's nothing to
+	// install and Pending() is already nil so /update would error too.
 	if shouldTrigger && t.triggerUpdate != nil {
-		log.Printf("toot: user-authorized install via chat marker")
-		go t.triggerUpdate()
+		if shouldCheck && checkResult == nil {
+			log.Printf("toot: check+install requested but no update — skipping install")
+		} else {
+			log.Printf("toot: user-authorized install via chat marker")
+			go t.triggerUpdate()
+		}
 	}
 }
 
