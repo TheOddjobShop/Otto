@@ -25,8 +25,8 @@ case "$OS" in
     ;;
   Darwin)
     PKG_MGR=brew
-    echo "  [note] macOS detected. Will build the binary and write config, but"
-    echo "         skip systemd unit install (use launchd or run ./otto manually)."
+    echo "  [note] macOS detected. Will build the binary, write config, and"
+    echo "         install a launchd user agent (~/Library/LaunchAgents/com.otto.bot.plist)."
     ;;
   *) echo "  [!] Unsupported OS: $OS"; exit 1 ;;
 esac
@@ -678,10 +678,40 @@ if [ "$OS" = Linux ]; then
     exit 1
   fi
 else
-  echo ""
-  echo "  [note] macOS — to run otto:"
-  echo "         $OTTO_BIN"
-  echo "  Or install a launchd plist (not auto-installed on macOS)."
+  # ── launchd user agent (macOS) ────────────────────────────────────────────
+  LAUNCHD_DIR="$HOME/Library/LaunchAgents"
+  LAUNCHD_PLIST="$LAUNCHD_DIR/com.otto.bot.plist"
+  LAUNCHD_LABEL="com.otto.bot"
+  LAUNCHD_TARGET="gui/$(id -u)/$LAUNCHD_LABEL"
+  mkdir -p "$LAUNCHD_DIR" "$HOME/Library/Logs"
+
+  # Substitute placeholders into the canonical template.
+  sed -e "s|__OTTO_BIN__|$OTTO_BIN|g" \
+      -e "s|__HOME__|$HOME|g" \
+      "$DIR/launchd/com.otto.bot.plist" > "$LAUNCHD_PLIST"
+
+  # Bootout any existing instance (ignore failure if not loaded), then
+  # bootstrap the fresh plist and kickstart -k to guarantee a clean
+  # start of the new binary.
+  launchctl bootout "$LAUNCHD_TARGET" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST"
+  launchctl kickstart -k "$LAUNCHD_TARGET"
+
+  # Smoke test: wait briefly, then check status.
+  sleep 3
+  if launchctl print "$LAUNCHD_TARGET" >/dev/null 2>&1; then
+    echo ""
+    echo "  [ok] otto is running."
+    echo "       Logs:    tail -f ~/Library/Logs/otto.log"
+    echo "       Status:  launchctl print $LAUNCHD_TARGET"
+    echo "       Restart: launchctl kickstart -k $LAUNCHD_TARGET"
+    echo ""
+    echo "  Send 'hi' to your Telegram bot to test."
+  else
+    echo "  [!] otto did not start cleanly."
+    echo "      Check: tail -n 50 ~/Library/Logs/otto.log"
+    exit 1
+  fi
 fi
 
 # ── Done ────────────────────────────────────────────────────────────────────
