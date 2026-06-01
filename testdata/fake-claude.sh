@@ -19,4 +19,11 @@ JSON
   hang)
     sleep 30
     ;;
+  env)
+    # Emit OTTO_RUNNING (or "unset") as assistant text so the test can
+    # assert the runner propagated the env var into the subprocess.
+    val="${OTTO_RUNNING:-unset}"
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"OTTO_RUNNING=%s"}]}}\n' "$val"
+    printf '{"type":"result","subtype":"success"}\n'
+    ;;
 esac

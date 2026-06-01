@@ -226,6 +226,30 @@ func TestRunnerSurfacesNonZeroExit(t *testing.T) {
 	}
 }
 
+func TestRunnerSetsOttoRunningEnv(t *testing.T) {
+	// The runner must export OTTO_RUNNING=1 to the claude subprocess so
+	// user-installed SessionStart hooks (e.g. the "caveman" skill) can
+	// early-exit when invoked under Otto. Drive a real fake-binary mode
+	// that echoes the env var back through the stream-json text channel.
+	r := NewExecRunner(fakeClaudePath(t), "/tmp/mcp.json", "", "")
+	r = r.WithEnv(map[string]string{"FAKE_CLAUDE_MODE": "env"})
+	events := make(chan Event, 16)
+	err := r.Run(context.Background(), RunArgs{Prompt: "hi", SessionID: "abc", Events: events})
+	close(events)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var text strings.Builder
+	for ev := range events {
+		if at, ok := ev.(AssistantTextEvent); ok {
+			text.WriteString(at.Text)
+		}
+	}
+	if !strings.Contains(text.String(), "OTTO_RUNNING=1") {
+		t.Errorf("expected OTTO_RUNNING=1 in subprocess env, got %q", text.String())
+	}
+}
+
 func TestRunnerRespectsContextTimeout(t *testing.T) {
 	r := NewExecRunner(fakeClaudePath(t), "/tmp/mcp.json", "", "")
 	r = r.WithEnv(map[string]string{"FAKE_CLAUDE_MODE": "hang"})
