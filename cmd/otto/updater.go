@@ -70,6 +70,12 @@ type updater struct {
 	toot           *Toot
 	chatID         int64
 
+	// stateDBPath is the path to Otto's state.db. The updater drops an
+	// install-confirm marker in the same directory after a successful
+	// binary swap so the next boot can ping the user "back online".
+	// Empty disables the marker (tests that don't care about the ping).
+	stateDBPath string
+
 	mu            sync.Mutex
 	pending       *pendingUpdate
 	lastAnnounced string
@@ -77,10 +83,21 @@ type updater struct {
 
 	// Hooks for testing — production callers leave these at zero values
 	// (nil), which means use defaults: os.Executable + filepath.EvalSymlinks
-	// for exePath, and syscall.Kill(SIGTERM) for exitFunc.
-	exePath  func() (string, error)
-	exitFunc func()
+	// for exePath, syscall.Kill(SIGTERM) for exitFunc, and os.Exit for
+	// forceExitFunc (the fallback when SIGTERM-driven shutdown stalls).
+	exePath       func() (string, error)
+	exitFunc      func()
+	forceExitFunc func(int)
 }
+
+// forceExitGrace bounds how long Exit waits after sending SIGTERM before
+// it force-exits the process. SIGTERM normally triggers a clean shutdown
+// via main.go's signal handler, but if an in-flight Claude subprocess
+// holds dispatchWG past systemd's TimeoutStopSec, the user sees ~2 min
+// of downtime while waiting for SIGKILL. Capping this here keeps /update
+// restart latency predictable regardless of dispatch state. Package-level
+// so tests can shorten it.
+var forceExitGrace = 10 * time.Second
 
 // fetchLatest hits the releases/latest endpoint and parses the response.
 // Returns an error on non-200 status or unparseable JSON.
@@ -184,13 +201,14 @@ func (u *updater) Pending() *pendingUpdate {
 // newUpdater constructs an updater that polls the default GitHub URL.
 // Pass version="dev" for local builds — Run will short-circuit and not
 // poll at all.
-func newUpdater(toot *Toot, chatID int64, currentVersion string) *updater {
+func newUpdater(toot *Toot, chatID int64, currentVersion, stateDBPath string) *updater {
 	return &updater{
 		httpClient:     &http.Client{Timeout: 30 * time.Second},
 		releasesURL:    releasesURLDefault,
 		currentVersion: currentVersion,
 		toot:           toot,
 		chatID:         chatID,
+		stateDBPath:    stateDBPath,
 	}
 }
 
@@ -289,6 +307,17 @@ func (u *updater) Install(ctx context.Context) error {
 	u.pending = nil
 	u.mu.Unlock()
 
+	// Drop the boot-confirm marker BEFORE Toot.Confirm and Exit. If the
+	// process dies between these calls, the worst case is a missed
+	// "Installed v…" message — the marker still tells the new process
+	// to ping "back online" once it's up. Errors are logged but
+	// non-fatal: the ping is UX polish, not correctness.
+	if u.stateDBPath != "" {
+		if err := writeInstallConfirm(u.stateDBPath, p.Tag); err != nil {
+			log.Printf("install: %v", err)
+		}
+	}
+
 	if sendErr := u.toot.Confirm(ctx, u.chatID, p.Tag); sendErr != nil {
 		log.Printf("install: toot confirm: %v", sendErr)
 	}
@@ -330,10 +359,28 @@ func (u *updater) resolveExePath() (string, error) {
 
 // Exit triggers a clean process shutdown via SIGTERM (or the test hook).
 // systemd's Restart=always brings Otto back on the new binary.
+//
+// A fallback goroutine force-exits after forceExitGrace if SIGTERM doesn't
+// take the process down in time — covers the case where an in-flight
+// Claude subprocess pins WaitDispatches past systemd's TimeoutStopSec
+// and the user would otherwise see ~2 min of dead-bot downtime before
+// SIGKILL lands. The force-exit short-circuits that worst case.
 func (u *updater) Exit() {
 	if u.exitFunc != nil {
 		u.exitFunc()
-		return
+	} else {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
 	}
-	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	// Schedule the force-exit fallback. If the SIGTERM path completes
+	// shutdown first, this goroutine never gets a chance to run (the
+	// process is gone). If shutdown stalls, os.Exit caps the wait.
+	go func() {
+		time.Sleep(forceExitGrace)
+		log.Printf("updater: SIGTERM shutdown exceeded %s, force-exiting", forceExitGrace)
+		if u.forceExitFunc != nil {
+			u.forceExitFunc(0)
+			return
+		}
+		os.Exit(0)
+	}()
 }
