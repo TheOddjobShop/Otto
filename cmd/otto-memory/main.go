@@ -74,6 +74,10 @@ func run() error {
 		Name:        "session_search",
 		Description: "Search past conversation turns by meaning AND keyword (semantic + keyword retrieval). Use for \"what did we discuss about X\" and fuzzy recall where you don't remember the exact words.",
 	}, srv.handleSearch)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "forward_to_otto",
+		Description: "Hand off a user message to Otto. Use when the user's request is actual work Otto should handle (running code, sending email, files, calendar, anything beyond chat). message = the user's request in their voice; reason = a one-line \"why I forwarded\" shown to the user in the visible banner. Do NOT forward chitchat or questions about Toto himself. Refused inside a nested agent dispatch.",
+	}, srv.handleForward)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		return fmt.Errorf("otto-memory: server exited: %w", err)

@@ -280,6 +280,98 @@ func TestHandleSearchFailingEmbedderFallsBackToKeyword(t *testing.T) {
 	}
 }
 
+func TestHandleForwardEnqueuesForOtto(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	res, _, err := s.handleForward(ctx, nil, forwardArgs{
+		Message: "send the gmail summary",
+		Reason:  "user wants gmail summary",
+	})
+	if err != nil {
+		t.Fatalf("handleForward transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleForward reported tool error: %s", resultText(res))
+	}
+	if !strings.Contains(resultText(res), "Queued for Otto") {
+		t.Fatalf("expected success text, got %q", resultText(res))
+	}
+
+	// One row should now be in the inbox, targeted at otto, sender=toto,
+	// source=agent, with the body prefixed by the (from toto — reason) hint.
+	msgs, err := s.store.DequeueAll(ctx)
+	if err != nil {
+		t.Fatalf("DequeueAll: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 enqueued message, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Target != "otto" || m.Source != "agent" || m.Sender != "toto" {
+		t.Errorf("bad routing: target=%q source=%q sender=%q", m.Target, m.Source, m.Sender)
+	}
+	if !strings.HasPrefix(m.Body, "(from toto — user wants gmail summary)") {
+		t.Errorf("body missing reason prefix: %q", m.Body)
+	}
+	if !strings.Contains(m.Body, "send the gmail summary") {
+		t.Errorf("body missing user message: %q", m.Body)
+	}
+}
+
+func TestHandleForwardEmptyMessageIsError(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleForward(context.Background(), nil, forwardArgs{
+		Message: "   ",
+		Reason:  "anything",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("empty message should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "message is empty") {
+		t.Errorf("expected message-empty diagnostic, got %q", resultText(res))
+	}
+}
+
+func TestHandleForwardEmptyReasonIsError(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleForward(context.Background(), nil, forwardArgs{
+		Message: "do the thing",
+		Reason:  "",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("empty reason should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "reason is empty") {
+		t.Errorf("expected reason-empty diagnostic, got %q", resultText(res))
+	}
+}
+
+func TestHandleForwardRefusesInsideAgentHop(t *testing.T) {
+	s := newTestServer(t)
+	ctx := store.WithAgentHop(context.Background())
+
+	res, _, err := s.handleForward(ctx, nil, forwardArgs{
+		Message: "do the thing",
+		Reason:  "user wants the thing",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("loop-guarded forward should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "nested agent forwards not allowed") {
+		t.Errorf("expected loop-guard diagnostic, got %q", resultText(res))
+	}
+}
+
 // resultText extracts the concatenated text of a tool result for assertions.
 func resultText(res *mcp.CallToolResult) string {
 	var b strings.Builder
