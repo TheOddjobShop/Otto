@@ -319,11 +319,22 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 // No LLM call — the message is short, predictable, and frequent
 // enough that an extra Claude invocation per install would be waste.
 // The voice is encoded in the templated string itself.
+//
+// The phrasing primes the user for a brief outage (~10s, capped by the
+// updater's force-exit fallback) and promises a follow-up ping from the
+// next boot — see maybeSendBootConfirm in main.go.
 func (t *Toot) Confirm(ctx context.Context, chatID int64, tag string) error {
 	body := fmt.Sprintf(
-		"Installation complete. %s is in place. Restarting the process — Otto will be back online shortly.",
+		"Installation complete. %s is in place. Restarting now — expect ~10s downtime, I'll ping back when we're up.",
 		tag,
 	)
+	return t.deliver(ctx, chatID, body)
+}
+
+// SystemMessage delivers a templated message in Toot's voice with no
+// LLM call. Used for boot-back-online pings and similar lifecycle
+// notifications where the prose is fixed at the call site.
+func (t *Toot) SystemMessage(ctx context.Context, chatID int64, body string) error {
 	return t.deliver(ctx, chatID, body)
 }
 

@@ -86,7 +86,10 @@ func TestTootConfirm(t *testing.T) {
 		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
 	}
 	msg := bot.sent[0].text
-	for _, want := range []string{"v1.0.1", "TOOT", "Restarting"} {
+	// New phrasing keeps the tag, keeps a "Restart"-ish word, and promises
+	// the boot-back-online ping so the user expects ~10s of downtime
+	// instead of assuming Otto is hung.
+	for _, want := range []string{"v1.0.1", "TOOT", "Restarting", "ping back"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("confirm missing %q: %q", want, msg)
 		}

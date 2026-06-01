@@ -323,6 +323,46 @@ func TestInstallDownloadFailure(t *testing.T) {
 	}
 }
 
+func TestExitForceFallbackFiresWhenSIGTERMIgnored(t *testing.T) {
+	// Simulate the bug we're guarding against: SIGTERM is sent but the
+	// process never shuts down (e.g. WaitDispatches stuck on a Claude
+	// subprocess). The force-exit fallback must fire after
+	// forceExitGrace so the user doesn't sit through systemd's
+	// TimeoutStopSec before SIGKILL.
+
+	// Shorten the grace for the test, restore after.
+	prev := forceExitGrace
+	forceExitGrace = 20 * time.Millisecond
+	defer func() { forceExitGrace = prev }()
+
+	exitCalled := make(chan struct{}, 1)
+	forced := make(chan int, 1)
+	u := &updater{
+		// exitFunc drops the "SIGTERM" on the floor, modelling the stuck
+		// dispatch case where the signal handler runs but shutdown
+		// blocks on WaitDispatches.
+		exitFunc: func() { exitCalled <- struct{}{} },
+		// forceExitFunc replaces os.Exit so the test can observe the
+		// fallback without actually killing the test runner.
+		forceExitFunc: func(code int) { forced <- code },
+	}
+	u.Exit()
+
+	select {
+	case <-exitCalled:
+	case <-time.After(time.Second):
+		t.Fatal("exitFunc not called")
+	}
+	select {
+	case code := <-forced:
+		if code != 0 {
+			t.Errorf("forceExitFunc code=%d, want 0", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forceExitFunc not called within deadline (force-exit fallback didn't fire)")
+	}
+}
+
 func TestInstallConcurrentReturnsBusy(t *testing.T) {
 	// First install holds the installing flag while a second one tries.
 	// The second must return errInstallInProgress and leave the binary alone.

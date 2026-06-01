@@ -190,6 +190,7 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 - **Semantic search not working:** check Ollama (`systemctl --user status ollama` on Linux, `brew services list` on macOS) and `ollama list`. Without a pulled embedding model, `session_search` falls back to keyword (FTS5) and logs `session_search: embed unavailable, keyword-only`. To enable semantic recall after a fresh install: `ollama pull embeddinggemma`.
 - **Session never rotates:** the rotator only fires when (a) the tracked `input_tokens` from Claude's `result` events crosses the soft threshold, (b) you've been idle ≥ `rotate_idle_minutes`, and (c) Otto isn't busy. The journal logs `rotator: rotated session ...` on success. Disable by setting `model_context_tokens = 0`.
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.
+- **`/update` seems to hang:** after `/update`, the bot exits within ~10s and systemd brings up the new binary on the next tick. Toot pings you back from the fresh process once it's settled. If you don't see that ping within ~30s, check `systemctl --user status otto` and `journalctl --user -u otto -n 50`.
 
 ## License
 
