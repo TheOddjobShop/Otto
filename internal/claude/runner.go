@@ -49,7 +49,7 @@ type RunArgs struct {
 	Prompt     string
 	SessionID  string
 	ImagePaths []string // optional; appended to prompt as path references
-	// AllowedTools is forwarded as --allowed-tools <csv>. Used by the
+	// AllowedTools is forwarded as --allowedTools <csv>. Used by the
 	// permission-button replay path: passing the just-approved tool
 	// pattern here ensures the retry succeeds even if claude hasn't
 	// re-read settings.json.
@@ -170,7 +170,7 @@ func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model, effort 
 		cmdArgs = append(cmdArgs, "--append-system-prompt", systemPrompt)
 	}
 	if len(allowedTools) > 0 {
-		cmdArgs = append(cmdArgs, "--allowed-tools", strings.Join(allowedTools, ","))
+		cmdArgs = append(cmdArgs, "--allowedTools", strings.Join(allowedTools, ","))
 	}
 	if len(disallowedTools) > 0 {
 		cmdArgs = append(cmdArgs, "--disallowedTools", strings.Join(disallowedTools, ","))

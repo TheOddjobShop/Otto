@@ -146,19 +146,19 @@ func TestBuildCmdArgsIncludesSystemPromptWhenSet(t *testing.T) {
 
 func TestBuildCmdArgsOmitsAllowedToolsWhenEmpty(t *testing.T) {
 	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, nil, nil)
-	if slices.Contains(got, "--allowed-tools") {
-		t.Errorf("--allowed-tools should not appear when empty: %v", got)
+	if slices.Contains(got, "--allowedTools") {
+		t.Errorf("--allowedTools should not appear when empty: %v", got)
 	}
 }
 
 func TestBuildCmdArgsIncludesAllowedToolsAsCSV(t *testing.T) {
 	got := buildCmdArgs("hi", "", "/tmp/mcp.json", "", "", "", nil, []string{"mcp__gmail__*", "Bash"}, nil)
-	idx := slices.Index(got, "--allowed-tools")
+	idx := slices.Index(got, "--allowedTools")
 	if idx < 0 {
-		t.Fatalf("--allowed-tools missing: %v", got)
+		t.Fatalf("--allowedTools missing: %v", got)
 	}
 	if idx+1 >= len(got) || got[idx+1] != "mcp__gmail__*,Bash" {
-		t.Errorf("--allowed-tools value = %q, want comma-separated", got[idx+1])
+		t.Errorf("--allowedTools value = %q, want comma-separated", got[idx+1])
 	}
 }
 
