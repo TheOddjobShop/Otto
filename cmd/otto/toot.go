@@ -131,12 +131,43 @@ func (t *Toot) Name() string { return "toot" }
 
 // Reply runs a chat turn — the user addressed Toot directly. Stays in
 // his nerdy/dutiful voice but engages conversationally rather than
-// reciting changelog. Tools remain disallowed; Toot can talk, that's it.
+// reciting changelog. Most tools remain disallowed; Toot can use his
+// bus-messaging tools for relays but otherwise just talks.
 func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
+	t.reply(ctx, chatID, userMessage, nil)
+}
+
+// BusReply runs a chat turn for a message arriving via the inbox from
+// another agent. The per-call system prompt grows a BUS CONTEXT + HOPS
+// REMAINING block so Toot can reply via message_<sender> or wind down on
+// the last hop.
+func (t *Toot) BusReply(ctx context.Context, chatID int64, body string, bc busContext) {
+	t.reply(ctx, chatID, body, &bc)
+}
+
+// tootAllowedTools is the closed allowlist of MCP tools Toot may call.
+// He gets the inbox bus tools so he can relay back to Toto / Otto and
+// session_search so he can remember past releases, but nothing that
+// touches the world directly. The scoped mcp.json restricts what's
+// even reachable; this allowlist tightens it further.
+var tootAllowedTools = []string{
+	"mcp__otto-memory__message_toto",
+	"mcp__otto-memory__forward_to_otto",
+	"mcp__otto-memory__session_search",
+}
+
+// reply is the shared body of Reply / BusReply. bc is nil for direct
+// chat turns (Telegram-addressed) and non-nil for inbox-dispatched
+// turns, in which case the BUS CONTEXT block is prepended and the
+// runner is wrapped with env vars carrying the hop counter + self-name.
+func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *busContext) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	systemPrompt := t.persona
+	if bc != nil {
+		systemPrompt += "\n\n" + busPromptBlock(*bc, "toot")
+	}
 	systemPrompt += "\n\n───────────────────────────────────────────────\n"
 	systemPrompt += "THE USER ADDRESSED YOU DIRECTLY (CHAT MODE).\n"
 	systemPrompt += "───────────────────────────────────────────────\n\n"
@@ -226,12 +257,16 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 		}
 	}()
 
-	err := t.runner.Run(ctx, claude.RunArgs{
+	runner := t.runner
+	if bc != nil {
+		runner = runner.WithEnv(busEnv(bc.Hop, "toot"))
+	}
+	err := runner.Run(ctx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),
 		Model:              tootModel,
 		Effort:             tootEffort,
-		DisallowedTools:    []string{"*"},
+		AllowedTools:       tootAllowedTools,
 		AppendSystemPrompt: systemPrompt,
 		Events:             events,
 	})

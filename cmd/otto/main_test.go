@@ -121,15 +121,15 @@ func TestWriteTotoMCPConfigOnlyIncludesOttoMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := writeTotoMCPConfig(stateDir, mcpPath)
+	out, err := writeScopedPetMCPConfig(stateDir, mcpPath)
 	if err != nil {
-		t.Fatalf("writeTotoMCPConfig: %v", err)
+		t.Fatalf("writeScopedPetMCPConfig: %v", err)
 	}
 	if out == "" {
 		t.Fatal("expected a non-empty path when otto-memory is present")
 	}
-	if filepath.Base(out) != "toto-mcp.json" {
-		t.Errorf("expected toto-mcp.json basename, got %q", out)
+	if filepath.Base(out) != "pet-mcp.json" {
+		t.Errorf("expected pet-mcp.json basename, got %q", out)
 	}
 
 	// Permissions should be 0600 — this file is per-user, not shared.
@@ -175,9 +175,9 @@ func TestWriteTotoMCPConfigNoOttoMemoryReturnsEmpty(t *testing.T) {
 	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"gmail":{}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := writeTotoMCPConfig(stateDir, mcpPath)
+	out, err := writeScopedPetMCPConfig(stateDir, mcpPath)
 	if err != nil {
-		t.Fatalf("writeTotoMCPConfig: %v", err)
+		t.Fatalf("writeScopedPetMCPConfig: %v", err)
 	}
 	if out != "" {
 		t.Errorf("expected empty path when otto-memory absent, got %q", out)
@@ -186,7 +186,7 @@ func TestWriteTotoMCPConfigNoOttoMemoryReturnsEmpty(t *testing.T) {
 
 func TestWriteTotoMCPConfigBadSourceErrors(t *testing.T) {
 	dir := t.TempDir()
-	_, err := writeTotoMCPConfig(filepath.Join(dir, "state"), filepath.Join(dir, "missing.json"))
+	_, err := writeScopedPetMCPConfig(filepath.Join(dir, "state"), filepath.Join(dir, "missing.json"))
 	if err == nil {
 		t.Fatal("expected error reading nonexistent source mcp config")
 	}

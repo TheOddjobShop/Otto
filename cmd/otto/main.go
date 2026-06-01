@@ -102,14 +102,14 @@ func main() {
 		log.Fatalf("toto persona: %v", err)
 	}
 	stateDir := filepath.Dir(cfg.StateDBPath)
-	totoMCPPath, err := writeTotoMCPConfig(stateDir, cfg.MCPConfigPath)
+	petMCPPath, err := writeScopedPetMCPConfig(stateDir, cfg.MCPConfigPath)
 	if err != nil {
-		log.Fatalf("toto mcp config: %v", err)
+		log.Fatalf("pet mcp config: %v", err)
 	}
-	if totoMCPPath == "" {
-		log.Printf("toto: no otto-memory entry found in %s — forward_to_otto disabled", cfg.MCPConfigPath)
+	if petMCPPath == "" {
+		log.Printf("pets: no otto-memory entry found in %s — pet bus tools disabled", cfg.MCPConfigPath)
 	}
-	totoRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, totoMCPPath, "", home)
+	totoRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, petMCPPath, "", home)
 	totoSessionPath := cfg.TotoSessionIDPath
 	if totoSessionPath == "" {
 		// Default: sibling of the Otto session file. Keeps Toto's
@@ -129,7 +129,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("toot persona: %v", err)
 	}
-	tootRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, "", "", home)
+	// Toot reuses the scoped pet MCP config (only otto-memory) so he has
+	// access to the bus tools — message_toto / forward_to_otto / session_search.
+	// The persona keeps him from touching them in plain chat mode; in bus
+	// mode the per-call BUS CONTEXT block tells him to reply via
+	// message_<sender>.
+	tootRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, petMCPPath, "", home)
 	tootSessionPath := cfg.TootSessionIDPath
 	if tootSessionPath == "" {
 		tootSessionPath = cfg.SessionIDPath + "_toot"
@@ -294,17 +299,23 @@ func buildSystemPrompt(promptPath, mcpConfigPath string) (string, error) {
 	return strings.TrimRight(string(body), "\n") + "\n\n" + footer, nil
 }
 
-// writeTotoMCPConfig produces a Toto-scoped mcp.json containing ONLY the
-// "otto-memory" server entry pulled from the user's full mcp.json, and
-// writes it under stateDir with perms 0600. Returns the written path,
+// writeScopedPetMCPConfig produces a pet-scoped mcp.json containing ONLY
+// the "otto-memory" server entry pulled from the user's full mcp.json,
+// and writes it under stateDir with perms 0600. Returns the written path,
 // or "" if the source mcp.json has no otto-memory entry (in which case
-// the caller should run Toto in no-tools mode).
+// the caller should run the pets in no-tools mode).
 //
 // Scoping matters: Otto's full mcp.json exposes Gmail, Notion, Calendar,
-// etc. Toto is a chat persona, not an assistant — handing him those
-// servers would let the model exfiltrate or mutate data outside its
-// remit. We give him exactly the MCP he needs to talk to Otto.
-func writeTotoMCPConfig(stateDir, ottoMCPPath string) (string, error) {
+// etc. The pets are chat personas, not assistants — handing them those
+// servers would let the model exfiltrate or mutate data outside their
+// remit. We give them exactly the MCP they need to talk to each other
+// and to Otto via the inbox bus.
+//
+// Both Toto and Toot read this same file: their per-call --allowedTools
+// allowlists already differ to encode each pet's narrower toolset, so a
+// shared scoped mcp.json is sufficient and avoids two near-identical
+// generated files on disk.
+func writeScopedPetMCPConfig(stateDir, ottoMCPPath string) (string, error) {
 	data, err := os.ReadFile(ottoMCPPath)
 	if err != nil {
 		return "", fmt.Errorf("read otto mcp config %s: %w", ottoMCPPath, err)
@@ -331,9 +342,9 @@ func writeTotoMCPConfig(stateDir, ottoMCPPath string) (string, error) {
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		return "", fmt.Errorf("ensure state dir %s: %w", stateDir, err)
 	}
-	path := filepath.Join(stateDir, "toto-mcp.json")
+	path := filepath.Join(stateDir, "pet-mcp.json")
 	if err := os.WriteFile(path, out, 0600); err != nil {
-		return "", fmt.Errorf("write toto mcp config %s: %w", path, err)
+		return "", fmt.Errorf("write pet mcp config %s: %w", path, err)
 	}
 	return path, nil
 }
