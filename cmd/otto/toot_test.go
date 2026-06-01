@@ -253,6 +253,138 @@ func TestTootReplySurfacesCurrentVersion(t *testing.T) {
 	}
 }
 
+func TestStripCheckMarker(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantOut string
+		wantHit bool
+	}{
+		{"Hello world", "Hello world", false},
+		{"Checking, sir. [CHECK_FOR_UPDATE]", "Checking, sir.", true},
+		{"[CHECK_FOR_UPDATE]", "", true},
+		{"Right.\n\n[CHECK_FOR_UPDATE]", "Right.", true},
+		{"two markers [CHECK_FOR_UPDATE] both [CHECK_FOR_UPDATE]", "two markers  both", true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			out, hit := stripCheckMarker(c.in)
+			if hit != c.wantHit {
+				t.Errorf("hit=%v, want %v", hit, c.wantHit)
+			}
+			if out != c.wantOut {
+				t.Errorf("out=%q, want %q", out, c.wantOut)
+			}
+		})
+	}
+}
+
+func TestTootReplyChecksWhenMarkerPresent(t *testing.T) {
+	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "Checking, sir. [CHECK_FOR_UPDATE]")
+
+	triggered := make(chan struct{}, 1)
+	toot.checkNow = func(ctx context.Context) *pendingUpdate {
+		return &pendingUpdate{Tag: "v0.3.4"}
+	}
+	toot.triggerUpdate = func() { triggered <- struct{}{} }
+
+	toot.Reply(context.Background(), 42, "toot, check for updates")
+
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
+	}
+	msg := bot.sent[0].text
+	if strings.Contains(msg, "CHECK_FOR_UPDATE") {
+		t.Errorf("marker leaked to user: %q", msg)
+	}
+	if !strings.Contains(msg, "Update found: v0.3.4.") {
+		t.Errorf("missing check result line: %q", msg)
+	}
+
+	select {
+	case <-triggered:
+		t.Fatal("triggerUpdate fired when only [CHECK_FOR_UPDATE] was emitted")
+	case <-time.After(50 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestTootReplyChecksAndInstallsWhenBothMarkersPresent(t *testing.T) {
+	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "On it, sir. [CHECK_FOR_UPDATE]\n[TRIGGER_UPDATE]")
+
+	triggered := make(chan struct{}, 1)
+	toot.checkNow = func(ctx context.Context) *pendingUpdate {
+		return &pendingUpdate{Tag: "v0.3.5"}
+	}
+	toot.triggerUpdate = func() { triggered <- struct{}{} }
+
+	toot.Reply(context.Background(), 42, "toot, check and install if there's one")
+
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
+	}
+	msg := bot.sent[0].text
+	if strings.Contains(msg, "CHECK_FOR_UPDATE") || strings.Contains(msg, "TRIGGER_UPDATE") {
+		t.Errorf("marker leaked to user: %q", msg)
+	}
+	if !strings.Contains(msg, "Update found: v0.3.5.") {
+		t.Errorf("missing check result line: %q", msg)
+	}
+
+	select {
+	case <-triggered:
+		// expected
+	case <-time.After(time.Second):
+		t.Fatal("triggerUpdate was not called when both markers present and check found update")
+	}
+}
+
+func TestTootReplyCheckPlusInstallSkipsInstallWhenNothingFound(t *testing.T) {
+	bot := &fakeBot{}
+	toot, _ := newTestToot(t, bot, "On it. [CHECK_FOR_UPDATE]\n[TRIGGER_UPDATE]")
+
+	triggered := make(chan struct{}, 1)
+	toot.checkNow = func(ctx context.Context) *pendingUpdate { return nil }
+	toot.triggerUpdate = func() { triggered <- struct{}{} }
+
+	toot.Reply(context.Background(), 42, "toot, check and install if there's one")
+
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1", len(bot.sent))
+	}
+	msg := bot.sent[0].text
+	if !strings.Contains(msg, "Up to date as of ") {
+		t.Errorf("missing 'Up to date' line: %q", msg)
+	}
+
+	select {
+	case <-triggered:
+		t.Fatal("triggerUpdate fired even though CheckNow returned nil")
+	case <-time.After(50 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestTootReplyOmitsCheckMarkerInstructionsWhenCheckNowNil(t *testing.T) {
+	bot := &fakeBot{}
+	toot, runner := newTestToot(t, bot, "noted")
+	// checkNow stays nil — the prompt must not mention [CHECK_FOR_UPDATE].
+
+	toot.Reply(context.Background(), 42, "hey")
+
+	if len(runner.called) != 1 {
+		t.Fatalf("runner.called=%d, want 1", len(runner.called))
+	}
+	prompt := runner.called[0].AppendSystemPrompt
+	if strings.Contains(prompt, tootCheckMarker) {
+		t.Errorf("prompt should NOT mention check marker when checkNow is nil: %q", prompt)
+	}
+	if strings.Contains(prompt, "check_for_update") {
+		t.Errorf("prompt should NOT mention check_for_update tool when checkNow is nil")
+	}
+}
+
 func TestTootReplyPromptsNoPendingWhenAbsent(t *testing.T) {
 	bot := &fakeBot{}
 	toot, runner := newTestToot(t, bot, "noted")
