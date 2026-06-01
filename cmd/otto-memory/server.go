@@ -202,6 +202,55 @@ func (s *memoryServer) handleForward(ctx context.Context, req *mcp.CallToolReque
 	return textResult("Queued for Otto."), nil, nil
 }
 
+// messageArgs is the schema for the message_toto / message_toot tools. Both
+// fields are required; the reason is shown to the user verbatim in the bus
+// banner so they know why Otto pinged a pet.
+type messageArgs struct {
+	Message string `json:"message" jsonschema:"the message Otto wants the pet to deliver, in Otto's voice"`
+	Reason  string `json:"reason" jsonschema:"a short one-line reason — e.g. \"finishing report\" — shown in the visible banner"`
+}
+
+// handleMessageToto queues an Otto-authored message addressed to Toto via the
+// inbox bus. Mirrors handleForward but in the opposite direction: Otto picks
+// Toto when chitchat fits or just for the love of the game. The body is
+// prefixed with "(from otto — <reason>)" so Toto reads the message with
+// context about why Otto pinged.
+//
+// Refuses with a model-readable message when the agent-hop guard fires,
+// so the model knows nested agent forwards aren't allowed.
+func (s *memoryServer) handleMessageToto(ctx context.Context, req *mcp.CallToolRequest, args messageArgs) (*mcp.CallToolResult, any, error) {
+	return s.enqueueFromOtto(ctx, "toto", "message_toto", "Sent to Toto.", args)
+}
+
+// handleMessageToot queues an Otto-authored message addressed to Toot via the
+// inbox bus. Same shape as message_toto; Otto picks Toot when something is
+// list-shaped or release-shaped and the clipboard-owl voice fits.
+func (s *memoryServer) handleMessageToot(ctx context.Context, req *mcp.CallToolRequest, args messageArgs) (*mcp.CallToolResult, any, error) {
+	return s.enqueueFromOtto(ctx, "toot", "message_toot", "Sent to Toot.", args)
+}
+
+// enqueueFromOtto is the shared body of handleMessageToto / handleMessageToot.
+// The tool name is woven into every diagnostic so the model can tell which
+// call refused without parsing free-form text.
+func (s *memoryServer) enqueueFromOtto(ctx context.Context, target, tool, ok string, args messageArgs) (*mcp.CallToolResult, any, error) {
+	msg := strings.TrimSpace(args.Message)
+	if msg == "" {
+		return errResult(tool + " refused: message is empty"), nil, nil
+	}
+	reason := strings.TrimSpace(args.Reason)
+	if reason == "" {
+		return errResult(tool + " refused: reason is empty (the user needs to see why you pinged)"), nil, nil
+	}
+	body := "(from otto — " + reason + ")\n\n" + msg
+	if _, err := s.store.Enqueue(ctx, target, "agent", "otto", body); err != nil {
+		if errors.Is(err, store.ErrBusLoopGuard) {
+			return errResult(tool + " refused: nested agent forwards not allowed"), nil, nil
+		}
+		return errResult(fmt.Sprintf("%s failed: %v", tool, err)), nil, nil
+	}
+	return textResult(ok), nil, nil
+}
+
 // mergeTurns combines semantic and keyword results, semantic first, deduped by
 // turn ID, capped at limit. Semantic hits rank by meaning; keyword hits fill
 // the remainder (catching exact tokens vectors miss).

@@ -372,6 +372,192 @@ func TestHandleForwardRefusesInsideAgentHop(t *testing.T) {
 	}
 }
 
+func TestHandleMessageTotoEnqueuesForToto(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	res, _, err := s.handleMessageToto(ctx, nil, messageArgs{
+		Message: "you cover this one, vibe check",
+		Reason:  "user wants vibes",
+	})
+	if err != nil {
+		t.Fatalf("handleMessageToto transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleMessageToto reported tool error: %s", resultText(res))
+	}
+	if !strings.Contains(resultText(res), "Sent to Toto") {
+		t.Fatalf("expected success text, got %q", resultText(res))
+	}
+
+	msgs, err := s.store.DequeueAll(ctx)
+	if err != nil {
+		t.Fatalf("DequeueAll: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 enqueued message, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Target != "toto" || m.Source != "agent" || m.Sender != "otto" {
+		t.Errorf("bad routing: target=%q source=%q sender=%q", m.Target, m.Source, m.Sender)
+	}
+	if !strings.HasPrefix(m.Body, "(from otto — user wants vibes)") {
+		t.Errorf("body missing reason prefix: %q", m.Body)
+	}
+	if !strings.Contains(m.Body, "vibe check") {
+		t.Errorf("body missing message: %q", m.Body)
+	}
+}
+
+func TestHandleMessageTotoEmptyMessageIsError(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleMessageToto(context.Background(), nil, messageArgs{
+		Message: "   ",
+		Reason:  "anything",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("empty message should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "message_toto refused") {
+		t.Errorf("expected tool-named refusal, got %q", resultText(res))
+	}
+	if !strings.Contains(resultText(res), "message is empty") {
+		t.Errorf("expected message-empty diagnostic, got %q", resultText(res))
+	}
+}
+
+func TestHandleMessageTotoEmptyReasonIsError(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleMessageToto(context.Background(), nil, messageArgs{
+		Message: "say hi",
+		Reason:  "",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("empty reason should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "reason is empty") {
+		t.Errorf("expected reason-empty diagnostic, got %q", resultText(res))
+	}
+}
+
+func TestHandleMessageTotoRefusesInsideAgentHop(t *testing.T) {
+	s := newTestServer(t)
+	ctx := store.WithAgentHop(context.Background())
+
+	res, _, err := s.handleMessageToto(ctx, nil, messageArgs{
+		Message: "say hi",
+		Reason:  "feeling friendly",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("loop-guarded message should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "message_toto refused: nested agent forwards not allowed") {
+		t.Errorf("expected loop-guard diagnostic, got %q", resultText(res))
+	}
+}
+
+func TestHandleMessageTootEnqueuesForToot(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	res, _, err := s.handleMessageToot(ctx, nil, messageArgs{
+		Message: "report items: 1) done. 2) done. 3) done.",
+		Reason:  "finishing report",
+	})
+	if err != nil {
+		t.Fatalf("handleMessageToot transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleMessageToot reported tool error: %s", resultText(res))
+	}
+	if !strings.Contains(resultText(res), "Sent to Toot") {
+		t.Fatalf("expected success text, got %q", resultText(res))
+	}
+
+	msgs, err := s.store.DequeueAll(ctx)
+	if err != nil {
+		t.Fatalf("DequeueAll: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 enqueued message, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Target != "toot" || m.Source != "agent" || m.Sender != "otto" {
+		t.Errorf("bad routing: target=%q source=%q sender=%q", m.Target, m.Source, m.Sender)
+	}
+	if !strings.HasPrefix(m.Body, "(from otto — finishing report)") {
+		t.Errorf("body missing reason prefix: %q", m.Body)
+	}
+	if !strings.Contains(m.Body, "report items") {
+		t.Errorf("body missing message: %q", m.Body)
+	}
+}
+
+func TestHandleMessageTootEmptyMessageIsError(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleMessageToot(context.Background(), nil, messageArgs{
+		Message: "   ",
+		Reason:  "anything",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("empty message should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "message_toot refused") {
+		t.Errorf("expected tool-named refusal, got %q", resultText(res))
+	}
+	if !strings.Contains(resultText(res), "message is empty") {
+		t.Errorf("expected message-empty diagnostic, got %q", resultText(res))
+	}
+}
+
+func TestHandleMessageTootEmptyReasonIsError(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleMessageToot(context.Background(), nil, messageArgs{
+		Message: "say hi",
+		Reason:  "",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("empty reason should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "reason is empty") {
+		t.Errorf("expected reason-empty diagnostic, got %q", resultText(res))
+	}
+}
+
+func TestHandleMessageTootRefusesInsideAgentHop(t *testing.T) {
+	s := newTestServer(t)
+	ctx := store.WithAgentHop(context.Background())
+
+	res, _, err := s.handleMessageToot(ctx, nil, messageArgs{
+		Message: "filing one",
+		Reason:  "bureaucratic vibes",
+	})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("loop-guarded message should be an IsError result")
+	}
+	if !strings.Contains(resultText(res), "message_toot refused: nested agent forwards not allowed") {
+		t.Errorf("expected loop-guard diagnostic, got %q", resultText(res))
+	}
+}
+
 // resultText extracts the concatenated text of a tool result for assertions.
 func resultText(res *mcp.CallToolResult) string {
 	var b strings.Builder
