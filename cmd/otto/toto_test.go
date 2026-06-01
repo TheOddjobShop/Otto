@@ -47,6 +47,9 @@ func TestTotoInjectsMemoryAndLogsTurn(t *testing.T) {
 	if !strings.Contains(runner.called[0].AppendSystemPrompt, "User prefers brevity") {
 		t.Errorf("toto prompt missing injected memory: %q", runner.called[0].AppendSystemPrompt)
 	}
+	if !strings.Contains(runner.called[0].AppendSystemPrompt, "CURRENT TIME") {
+		t.Errorf("toto prompt missing time block: %q", runner.called[0].AppendSystemPrompt)
+	}
 	if got, _ := st.SearchFTS(context.Background(), "hello", 5); len(got) == 0 {
 		t.Error("toto user turn not logged")
 	}

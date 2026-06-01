@@ -343,6 +343,9 @@ func TestHandlerInjectsMemoryAndLogsTurns(t *testing.T) {
 	if !strings.Contains(asp, "BASE PERSONA") || !strings.Contains(asp, "Tokyo on Friday") {
 		t.Errorf("AppendSystemPrompt missing base or memory: %q", asp)
 	}
+	if !strings.Contains(asp, "CURRENT TIME") {
+		t.Errorf("AppendSystemPrompt missing time block: %q", asp)
+	}
 	ctx := context.Background()
 	if got, _ := st.SearchFTS(ctx, "flight", 5); len(got) == 0 {
 		t.Error("user turn not logged")

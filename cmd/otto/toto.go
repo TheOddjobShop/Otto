@@ -220,7 +220,7 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		}
 	}
 
-	systemPrompt = composeMemoryPrompt(systemPrompt, t.mem)
+	systemPrompt = composePromptWithTimeAndMemory(systemPrompt, t.mem)
 
 	events := make(chan claude.Event, 32)
 	doneParsing := make(chan struct{})

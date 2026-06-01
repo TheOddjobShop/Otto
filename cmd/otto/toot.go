@@ -162,7 +162,7 @@ func (t *Toot) Reply(ctx context.Context, chatID int64, userMessage string) {
 		}
 	}
 
-	systemPrompt = composeMemoryPrompt(systemPrompt, t.mem)
+	systemPrompt = composePromptWithTimeAndMemory(systemPrompt, t.mem)
 
 	prompt := userMessage
 	if prompt == "" {
@@ -258,6 +258,11 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 		systemPrompt += "No patch notes were attached to this release.\n\n"
 	}
 	systemPrompt += "Compose your announcement now. End by reminding the user to reply /update to install. Keep it concise — phone-screen friendly."
+
+	// Surface current local/UTC time so Toot can place the release in the
+	// user's day ("evening release", "early morning push", etc.) and answer
+	// follow-up questions about timing accurately.
+	systemPrompt = composePromptWithTimeAndMemory(systemPrompt, nil)
 
 	prompt := fmt.Sprintf("Announce release %s.", newTag)
 
