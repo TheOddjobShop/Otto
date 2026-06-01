@@ -182,7 +182,14 @@ func main() {
 	// Construct the updater BEFORE binding Toot's hooks: Go method values
 	// capture the receiver at evaluation time, so `h.updater.Pending`
 	// would otherwise bind to a nil *updater and panic on first call.
-	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version)
+	h.updater = newUpdater(toot, cfg.TelegramAllowedUserID, version, cfg.StateDBPath)
+
+	// Boot-back-online ping: if the previous process wrote an
+	// install-confirm marker (i.e. we're booting after a successful
+	// /update), have Toot tell the user we're up. Runs in a goroutine
+	// with a small grace period so the message lands after the bot has
+	// settled rather than racing the first log lines.
+	go maybeSendBootConfirm(ctx, toot, cfg.TelegramAllowedUserID, cfg.StateDBPath, version, bootConfirmGrace)
 
 	// Toot can see whether an update is pending and trigger the
 	// install when the user authorizes it in chat. The trigger
