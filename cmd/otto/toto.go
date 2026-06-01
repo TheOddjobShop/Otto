@@ -141,24 +141,36 @@ func (t *Toto) Name() string { return "toto" }
 // per-call prompt includes Otto's current status (if available) so
 // Toto can answer "what's otto doing?" truthfully.
 func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage string) {
-	t.replyWithContext(ctx, chatID, userMessage, false, "", "")
+	t.replyWithContext(ctx, chatID, userMessage, false, "", "", nil)
 }
 
 // BusyReply runs a Toto turn for the busy-fallback path — Otto is
 // mid-task and the user sent another message. ottoPrompt and
 // ottoSnippet ground Toto's reply in what Otto's actually working on.
 func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
-	t.replyWithContext(ctx, chatID, userMessage, true, ottoPrompt, ottoSnippet)
+	t.replyWithContext(ctx, chatID, userMessage, true, ottoPrompt, ottoSnippet, nil)
+}
+
+// BusReply runs a Toto turn for a message that arrived via the inbox
+// from another agent. The per-call system prompt grows a BUS CONTEXT +
+// HOPS REMAINING block so Toto can keep the loop alive via
+// message_<sender> or wind down naturally on the last hop. The bus env
+// vars are stamped on the underlying claude subprocess so the MCP tool
+// handlers know who Toto is and how deep the chain is.
+func (t *Toto) BusReply(ctx context.Context, chatID int64, body string, bc busContext) {
+	t.replyWithContext(ctx, chatID, body, false, "", "", &bc)
 }
 
 // totoAllowedTools is the closed allowlist of MCP tools Toto may call.
 // Everything else is blocked, including built-in filesystem and shell.
 // forward_to_otto lets Toto hand actual work off to Otto via the inbox
-// bus; session_search lets Toto recall past turns when needed. The
-// scoped mcp.json restricts what's even reachable; this allowlist
-// tightens it further to specific tool names.
+// bus; message_toot lets Toto DM the owl directly when functional
+// (release-shaped) pings warrant it; session_search lets Toto recall
+// past turns when needed. The scoped mcp.json restricts what's even
+// reachable; this allowlist tightens it further to specific tool names.
 var totoAllowedTools = []string{
 	"mcp__otto-memory__forward_to_otto",
+	"mcp__otto-memory__message_toot",
 	"mcp__otto-memory__session_search",
 }
 
@@ -172,11 +184,16 @@ var totoAllowedTools = []string{
 // Toto runs with a Toto-scoped mcp.json (only otto-memory) plus an
 // explicit --allowedTools allowlist of forward_to_otto + session_search.
 // He can't reach gmail/notion/etc., and he can't call any built-in tool.
-func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage string, busyFallback bool, ottoPrompt, ottoSnippet string) {
+func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage string, busyFallback bool, ottoPrompt, ottoSnippet string, bc *busContext) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	systemPrompt := t.persona
+	if bc != nil {
+		// Bus-sourced turn: prepend the BUS CONTEXT + HOPS REMAINING block
+		// so Toto knows he's mid-chain and how to keep / wrap the loop.
+		systemPrompt += "\n\n" + busPromptBlock(*bc, "toto")
+	}
 	if busyFallback {
 		// User's message was meant for Otto, but Otto is busy. ottoPrompt
 		// and ottoSnippet were captured by dispatch under lock and reflect
@@ -247,7 +264,14 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		prompt = "(the user pinged you with no content — likely a greeting or attention check)"
 	}
 
-	err := t.runner.Run(ctx, claude.RunArgs{
+	runner := t.runner
+	if bc != nil {
+		// Cross-process: env vars carry the hop counter and self-name to
+		// the MCP server child so its tools enqueue follow-ups at the
+		// right depth and stamp the right sender.
+		runner = runner.WithEnv(busEnv(bc.Hop, "toto"))
+	}
+	err := runner.Run(ctx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),
 		Model:              totoModel,

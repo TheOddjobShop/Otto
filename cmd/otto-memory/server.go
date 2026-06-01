@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,67 @@ import (
 	"otto/internal/memory"
 	"otto/internal/store"
 )
+
+// envBusHop is the environment variable the cmd/otto bus dispatcher sets
+// on each Claude subprocess (which in turn passes env through to its MCP
+// stdio children, including this one). It carries the bus-hop counter of
+// the message currently being processed by the recipient agent; absent
+// means the agent isn't running on behalf of a bus dispatch (e.g. it's
+// handling a fresh user message) and outgoing forwards start at hop 1.
+const envBusHop = "OTTO_BUS_HOP"
+
+// envBusSender is the environment variable that names the agent currently
+// running. Used to stamp the "(from <name> — …)" preamble on enqueued
+// bodies so the receiver can tell who pinged them without parsing args.
+const envBusSender = "OTTO_BUS_SENDER"
+
+// hopFromCtxOrEnv returns the effective bus hop for the current request:
+// the ctx value (set in-process by tests / cmd/otto's own dispatch paths)
+// wins; otherwise the env var the dispatcher attached to the parent
+// Claude process is read. Returns 0 when neither is present (the legitimate
+// "agent runs on a plain user prompt" case).
+func hopFromCtxOrEnv(ctx context.Context) int {
+	if n, ok := store.BusHopFromCtx(ctx); ok {
+		return n
+	}
+	if v := os.Getenv(envBusHop); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// senderFromCtxOrEnv returns the agent name to stamp on outgoing bus
+// rows. Mirrors hopFromCtxOrEnv: ctx for tests / in-process paths, env
+// for production cross-process.
+func senderFromCtxOrEnv(ctx context.Context, fallback string) string {
+	if s, ok := senderFromCtx(ctx); ok && s != "" {
+		return s
+	}
+	if v := strings.TrimSpace(os.Getenv(envBusSender)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ctxKeyBusSender carries the running agent's name through in-process
+// dispatch paths (mirror of the env-var transport used in production).
+type ctxKeyBusSender struct{}
+
+// WithBusSender returns a child context labelled with the agent name
+// running the current turn. The MCP tool handlers consult it to stamp
+// outgoing bus rows accurately. In production the same information rides
+// via the OTTO_BUS_SENDER env var on the Claude subprocess.
+func WithBusSender(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, ctxKeyBusSender{}, name)
+}
+
+// senderFromCtx reads the WithBusSender value.
+func senderFromCtx(ctx context.Context) (string, bool) {
+	s, ok := ctx.Value(ctxKeyBusSender{}).(string)
+	return s, ok
+}
 
 // memoryServer holds the dependencies the MCP tool handlers operate on.
 type memoryServer struct {
@@ -181,8 +244,8 @@ type forwardArgs struct {
 // formatted with a small "(from toto — <reason>)" prefix so Otto reads
 // the message with context about who handed it off and why.
 //
-// Refuses with a model-readable message when the agent-hop guard fires,
-// so the model knows not to retry inside a nested dispatch.
+// Refuses with a model-readable message when the hop cap is reached, so
+// the model knows the chain is over rather than retrying.
 func (s *memoryServer) handleForward(ctx context.Context, req *mcp.CallToolRequest, args forwardArgs) (*mcp.CallToolResult, any, error) {
 	msg := strings.TrimSpace(args.Message)
 	if msg == "" {
@@ -192,10 +255,12 @@ func (s *memoryServer) handleForward(ctx context.Context, req *mcp.CallToolReque
 	if reason == "" {
 		return errResult("forward_to_otto refused: reason is empty (the user needs to see why you handed off)"), nil, nil
 	}
-	body := "(from toto — " + reason + ")\n\n" + msg
-	if _, err := s.store.Enqueue(ctx, "otto", "agent", "toto", body); err != nil {
-		if errors.Is(err, store.ErrBusLoopGuard) {
-			return errResult("forward_to_otto refused: nested agent forwards not allowed"), nil, nil
+	sender := senderFromCtxOrEnv(ctx, "toto")
+	body := "(from " + sender + " — " + reason + ")\n\n" + msg
+	hop := hopFromCtxOrEnv(ctx)
+	if _, err := s.store.Enqueue(ctx, "otto", "agent", sender, body, hop+1); err != nil {
+		if errors.Is(err, store.ErrBusHopExceeded) {
+			return errResult(fmt.Sprintf("forward_to_otto refused: agent-to-agent conversation reached its %d-hop cap; ending here.", store.MaxBusHop)), nil, nil
 		}
 		return errResult(fmt.Sprintf("forward_to_otto failed: %v", err)), nil, nil
 	}
@@ -204,35 +269,38 @@ func (s *memoryServer) handleForward(ctx context.Context, req *mcp.CallToolReque
 
 // messageArgs is the schema for the message_toto / message_toot tools. Both
 // fields are required; the reason is shown to the user verbatim in the bus
-// banner so they know why Otto pinged a pet.
+// banner so they know why an agent pinged a pet.
 type messageArgs struct {
-	Message string `json:"message" jsonschema:"the message Otto wants the pet to deliver, in Otto's voice"`
+	Message string `json:"message" jsonschema:"the message to deliver, in the caller's voice"`
 	Reason  string `json:"reason" jsonschema:"a short one-line reason — e.g. \"finishing report\" — shown in the visible banner"`
 }
 
-// handleMessageToto queues an Otto-authored message addressed to Toto via the
-// inbox bus. Mirrors handleForward but in the opposite direction: Otto picks
-// Toto when chitchat fits or just for the love of the game. The body is
-// prefixed with "(from otto — <reason>)" so Toto reads the message with
-// context about why Otto pinged.
+// handleMessageToto queues an agent-authored message addressed to Toto via
+// the inbox bus. The caller is read from the WithBusHop ctx (set by the
+// dispatcher) so the same handler serves Otto-from-default and Toot-from-
+// bus dispatches. The body is prefixed with "(from <sender> — <reason>)"
+// so Toto reads the message with context about why he was pinged.
 //
-// Refuses with a model-readable message when the agent-hop guard fires,
-// so the model knows nested agent forwards aren't allowed.
+// Refuses with a model-readable message when the hop cap is reached so
+// the model knows to stop the chain.
 func (s *memoryServer) handleMessageToto(ctx context.Context, req *mcp.CallToolRequest, args messageArgs) (*mcp.CallToolResult, any, error) {
-	return s.enqueueFromOtto(ctx, "toto", "message_toto", "Sent to Toto.", args)
+	return s.enqueueAgentMessage(ctx, "toto", "message_toto", "Sent to Toto.", args)
 }
 
-// handleMessageToot queues an Otto-authored message addressed to Toot via the
-// inbox bus. Same shape as message_toto; Otto picks Toot when something is
-// list-shaped or release-shaped and the clipboard-owl voice fits.
+// handleMessageToot queues an agent-authored message addressed to Toot via
+// the inbox bus. Same shape as message_toto; the dispatcher's hop counter
+// drives the cap.
 func (s *memoryServer) handleMessageToot(ctx context.Context, req *mcp.CallToolRequest, args messageArgs) (*mcp.CallToolResult, any, error) {
-	return s.enqueueFromOtto(ctx, "toot", "message_toot", "Sent to Toot.", args)
+	return s.enqueueAgentMessage(ctx, "toot", "message_toot", "Sent to Toot.", args)
 }
 
-// enqueueFromOtto is the shared body of handleMessageToto / handleMessageToot.
-// The tool name is woven into every diagnostic so the model can tell which
-// call refused without parsing free-form text.
-func (s *memoryServer) enqueueFromOtto(ctx context.Context, target, tool, ok string, args messageArgs) (*mcp.CallToolResult, any, error) {
+// enqueueAgentMessage is the shared body of handleMessageToto /
+// handleMessageToot. The tool name is woven into every diagnostic so the
+// model can tell which call refused without parsing free-form text. The
+// sender is inferred from the recipient: if the bus-ctx has no hop set,
+// this is Otto's initial outbound; otherwise the chain alternates so the
+// sender is whichever non-target agent fits the addressing.
+func (s *memoryServer) enqueueAgentMessage(ctx context.Context, target, tool, ok string, args messageArgs) (*mcp.CallToolResult, any, error) {
 	msg := strings.TrimSpace(args.Message)
 	if msg == "" {
 		return errResult(tool + " refused: message is empty"), nil, nil
@@ -241,14 +309,27 @@ func (s *memoryServer) enqueueFromOtto(ctx context.Context, target, tool, ok str
 	if reason == "" {
 		return errResult(tool + " refused: reason is empty (the user needs to see why you pinged)"), nil, nil
 	}
-	body := "(from otto — " + reason + ")\n\n" + msg
-	if _, err := s.store.Enqueue(ctx, target, "agent", "otto", body); err != nil {
-		if errors.Is(err, store.ErrBusLoopGuard) {
-			return errResult(tool + " refused: nested agent forwards not allowed"), nil, nil
+	sender := senderFromCtxOrEnv(ctx, defaultSenderFor(target))
+	body := "(from " + sender + " — " + reason + ")\n\n" + msg
+	hop := hopFromCtxOrEnv(ctx)
+	if _, err := s.store.Enqueue(ctx, target, "agent", sender, body, hop+1); err != nil {
+		if errors.Is(err, store.ErrBusHopExceeded) {
+			return errResult(fmt.Sprintf("%s refused: agent-to-agent conversation reached its %d-hop cap; ending here.", tool, store.MaxBusHop)), nil, nil
 		}
 		return errResult(fmt.Sprintf("%s failed: %v", tool, err)), nil, nil
 	}
 	return textResult(ok), nil, nil
+}
+
+// defaultSenderFor returns the agent expected to be the most likely sender
+// when neither ctx nor env var names one. message_toto without context is
+// Otto pinging Toto; message_toot likewise. forward_to_otto is Toto handing
+// off to Otto.
+func defaultSenderFor(target string) string {
+	if target == "otto" {
+		return "toto"
+	}
+	return "otto"
 }
 
 // mergeTurns combines semantic and keyword results, semantic first, deduped by
