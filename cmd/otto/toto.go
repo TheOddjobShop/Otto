@@ -192,6 +192,7 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 			systemPrompt += ottoSnippet
 			systemPrompt += "\n\nUse this only to ground your reply in reality — e.g. 'he's typing about your gmail right now' if the snippet is about gmail. Do NOT relay Otto's words to the user verbatim or pretend his answer is yours."
 		}
+		systemPrompt += "\n\nRead the STATE above LITERALLY. Don't improvise verbs like \"pulling\" or \"offline\" — Otto is either BUSY (working on the prompt shown) or IDLE (nothing in progress). When the user asks, paraphrase this block, don't invent."
 	} else {
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
 		systemPrompt += "THE USER ADDRESSED YOU DIRECTLY.\n"
@@ -216,7 +217,7 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 			} else {
 				systemPrompt += "Otto is IDLE. Nothing in progress."
 			}
-			systemPrompt += "\n\nMention this only if the user asks or if it's clearly relevant. Don't volunteer it unprompted."
+			systemPrompt += "\n\nRead the STATE above LITERALLY. Don't improvise verbs like \"pulling\" or \"offline\" — Otto is either BUSY (working on the prompt shown) or IDLE (nothing in progress). When the user asks, paraphrase this block, don't invent."
 		}
 	}
 
