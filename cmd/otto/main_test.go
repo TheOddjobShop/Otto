@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,6 +105,90 @@ func TestBuildSystemPromptListsMultipleGmailAccounts(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("expected %q in built prompt", want)
 		}
+	}
+}
+
+func TestWriteTotoMCPConfigOnlyIncludesOttoMemory(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	mcpPath := filepath.Join(dir, "mcp.json")
+	full := `{"mcpServers":{` +
+		`"gmail":{"command":"gmail-mcp","args":["--account","x"]},` +
+		`"notion":{"command":"notion-mcp"},` +
+		`"otto-memory":{"command":"otto-memory","args":["--memory-dir","/tmp/m","--state-db","/tmp/s.db"]}` +
+		`}}`
+	if err := os.WriteFile(mcpPath, []byte(full), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := writeTotoMCPConfig(stateDir, mcpPath)
+	if err != nil {
+		t.Fatalf("writeTotoMCPConfig: %v", err)
+	}
+	if out == "" {
+		t.Fatal("expected a non-empty path when otto-memory is present")
+	}
+	if filepath.Base(out) != "toto-mcp.json" {
+		t.Errorf("expected toto-mcp.json basename, got %q", out)
+	}
+
+	// Permissions should be 0600 — this file is per-user, not shared.
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("stat scoped config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("expected 0600 perms, got %o", perm)
+	}
+
+	body, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("scoped config not valid json: %v", err)
+	}
+	if len(got.MCPServers) != 1 {
+		t.Fatalf("expected exactly 1 server entry, got %d (%v)", len(got.MCPServers), got.MCPServers)
+	}
+	if _, ok := got.MCPServers["otto-memory"]; !ok {
+		t.Errorf("otto-memory missing from scoped config: %s", string(body))
+	}
+	for _, forbidden := range []string{"gmail", "notion"} {
+		if _, ok := got.MCPServers[forbidden]; ok {
+			t.Errorf("scoped config must not include %q: %s", forbidden, string(body))
+		}
+	}
+	// Defense in depth: also check the raw bytes don't even mention them.
+	if strings.Contains(string(body), "gmail") || strings.Contains(string(body), "notion") {
+		t.Errorf("scoped config leaks other server names: %s", string(body))
+	}
+}
+
+func TestWriteTotoMCPConfigNoOttoMemoryReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	mcpPath := filepath.Join(dir, "mcp.json")
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"gmail":{}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := writeTotoMCPConfig(stateDir, mcpPath)
+	if err != nil {
+		t.Fatalf("writeTotoMCPConfig: %v", err)
+	}
+	if out != "" {
+		t.Errorf("expected empty path when otto-memory absent, got %q", out)
+	}
+}
+
+func TestWriteTotoMCPConfigBadSourceErrors(t *testing.T) {
+	dir := t.TempDir()
+	_, err := writeTotoMCPConfig(filepath.Join(dir, "state"), filepath.Join(dir, "missing.json"))
+	if err == nil {
+		t.Fatal("expected error reading nonexistent source mcp config")
 	}
 }
 
