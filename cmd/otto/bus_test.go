@@ -122,7 +122,17 @@ func TestDispatchBusMessageToOttoFromAgentInjectsBusContext(t *testing.T) {
 		t.Fatalf("expected 1 runner call, got %d", len(runner.called))
 	}
 	got := runner.called[0].AppendSystemPrompt
-	for _, want := range []string{"BUS CONTEXT", "From: toto", "Hop 1 of 3", "HOPS REMAINING: 2", "message_toto"} {
+	for _, want := range []string{
+		"BUS CONTEXT",
+		"From:  toto",
+		"To:    otto",
+		"Hop:   1 of 3",
+		"Remaining hops: 2",
+		"HOPS REMAINING: 2",
+		"REPLY PATH",
+		"you MUST call",
+		"message_toto",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("otto bus prompt missing %q:\n%s", want, got)
 		}
@@ -153,7 +163,17 @@ func TestDispatchBusMessageToTotoFromAgentInjectsBusContext(t *testing.T) {
 		t.Fatalf("expected 1 toto runner call, got %d", len(runner.called))
 	}
 	got := runner.called[0].AppendSystemPrompt
-	for _, want := range []string{"BUS CONTEXT", "From: otto", "Hop 2 of 3", "HOPS REMAINING: 1", "message_otto"} {
+	for _, want := range []string{
+		"BUS CONTEXT",
+		"From:  otto",
+		"To:    toto",
+		"Hop:   2 of 3",
+		"Remaining hops: 1",
+		"HOPS REMAINING: 1",
+		"REPLY PATH",
+		"you MUST call",
+		"message_otto",
+	} {
 		// Note: "message_otto" doesn't exist as a tool; the prompt mentions
 		// message_<sender>. For sender=otto the literal string is
 		// "message_otto"; the toto persona handles the no-tool case in voice.
@@ -196,7 +216,17 @@ func TestDispatchBusMessageToTootFromAgentInjectsBusContext(t *testing.T) {
 		t.Fatalf("expected 1 toot runner call, got %d", len(runner.called))
 	}
 	got := runner.called[0].AppendSystemPrompt
-	for _, want := range []string{"BUS CONTEXT", "From: toto", "Hop 1 of 3", "HOPS REMAINING: 2"} {
+	for _, want := range []string{
+		"BUS CONTEXT",
+		"From:  toto",
+		"To:    toot",
+		"Hop:   1 of 3",
+		"Remaining hops: 2",
+		"HOPS REMAINING: 2",
+		"REPLY PATH",
+		"you MUST call",
+		"message_toto",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("toot bus prompt missing %q:\n%s", want, got)
 		}
@@ -242,9 +272,23 @@ func TestDispatchBusLastHopWindsDown(t *testing.T) {
 		t.Fatalf("expected 1 runner call, got %d", len(runner.called))
 	}
 	got := runner.called[0].AppendSystemPrompt
-	for _, want := range []string{"HOPS REMAINING: 0", "do NOT call", "chain ends"} {
+	for _, want := range []string{
+		"HOPS REMAINING: 0",
+		"Remaining hops: 0",
+		"REPLY PATH",
+		"Do NOT call",
+		"chain ends",
+		"wrap up",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("last-hop prompt missing %q:\n%s", want, got)
+		}
+	}
+	// On the last hop, we must NOT tell the model to call a bus tool —
+	// otherwise the wind-down is muddied and the model may fire one anyway.
+	for _, banned := range []string{"you MUST call", "Standard pattern for this turn"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("last-hop prompt unexpectedly contains %q:\n%s", banned, got)
 		}
 	}
 }

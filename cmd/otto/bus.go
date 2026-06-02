@@ -189,17 +189,44 @@ func busPromptBlock(bc busContext, selfName string) string {
 	if remaining < 0 {
 		remaining = 0
 	}
-	var winddown string
-	if remaining == 0 {
-		winddown = "HOPS REMAINING: 0. Wrap things up. Reply to the user in plain text only — do NOT call message_" + bc.Sender + " or any other agent-message tool. The chain ends with this turn."
-	} else {
-		winddown = fmt.Sprintf("HOPS REMAINING: %d (of %d). If you want to continue the conversation with %s, call message_%s(message, reason) — that keeps the loop alive. If you're wrapping up, reply in plain text only and the chain ends here. Don't ask a follow-up question on the last hop; better to land cleanly.", remaining, store.MaxBusHop, bc.Sender, bc.Sender)
-	}
-	return "───────────────────────────────────────────────\n" +
-		"BUS CONTEXT (this message came via the inbox)\n" +
+
+	header := "───────────────────────────────────────────────\n" +
+		"  BUS CONTEXT (this message came via the inbox)\n" +
 		"───────────────────────────────────────────────\n\n" +
-		fmt.Sprintf("From: %s. Hop %d of %d. You are: %s.\n\n", bc.Sender, bc.Hop, store.MaxBusHop, selfName) +
-		winddown
+		fmt.Sprintf("From:  %s      ← this is who sent you the message\n", bc.Sender) +
+		fmt.Sprintf("To:    %s    ← that's you\n", selfName) +
+		fmt.Sprintf("Hop:   %d of %d\n", bc.Hop, store.MaxBusHop) +
+		fmt.Sprintf("Remaining hops: %d\n\n", remaining) +
+		fmt.Sprintf("HOPS REMAINING: %d\n\n", remaining)
+
+	if remaining == 0 {
+		body := "REPLY PATH (read this carefully):\n\n" +
+			fmt.Sprintf("This message did NOT come from the user directly — it came from\n%s via the inbox. ", bc.Sender) +
+			"Remaining hops have reached 0. The chain ends\nwith this turn.\n\n" +
+			"stop. Reply only via plain Telegram text to wrap up — no more tool\n" +
+			"calls. The cap exists to prevent loops. Honor it gracefully\n" +
+			"(\"alright, that's me out for this thread.\") rather than getting\n" +
+			"cut off mid-question.\n\n" +
+			fmt.Sprintf("Do NOT call message_%s or any other agent-message tool. The chain\nends here.\n", bc.Sender)
+		return header + body
+	}
+
+	body := "REPLY PATH (read this carefully):\n\n" +
+		fmt.Sprintf("This message did NOT come from the user directly — it came from\n%s via the inbox. Plain Telegram text is visible to the user\n", bc.Sender) +
+		fmt.Sprintf("but does NOT reach %s. To respond to %s, you MUST call\n", bc.Sender, bc.Sender) +
+		fmt.Sprintf("message_%s(message, reason) — that's the only path back.\n\n", bc.Sender) +
+		"Standard pattern for this turn:\n" +
+		"  1. Compose your reply.\n" +
+		fmt.Sprintf("  2. Call message_%s(message=<your reply>, reason=\"<one-liner why>\").\n", bc.Sender) +
+		"  3. Optionally also send a brief Telegram text so the user can see\n" +
+		"     what you said. The two messages should match in substance.\n\n" +
+		fmt.Sprintf("If you do NOT call message_%s, the conversation ends here.\n", bc.Sender) +
+		fmt.Sprintf("%s will not see anything you write in plain text.\n\n", bc.Sender) +
+		"When Remaining hops reaches 0: stop. Reply only via plain Telegram\n" +
+		"text to wrap up — no more tool calls. The cap exists to prevent\n" +
+		"loops. Honor it gracefully (\"alright, that's me out for this\n" +
+		"thread.\") rather than getting cut off mid-question.\n"
+	return header + body
 }
 
 // fromLabel produces the "<sender>" string used in dispatch logs.
