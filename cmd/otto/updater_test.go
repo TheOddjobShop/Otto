@@ -399,6 +399,60 @@ func TestCheckNowReturnsNilWhenCurrent(t *testing.T) {
 	}
 }
 
+func TestTootReplyCheckDoesNotDeadlock(t *testing.T) {
+	// Regression: Toot.reply holds t.mu for the whole turn. When the LLM
+	// emits [CHECK_FOR_UPDATE], reply calls checkNow synchronously while
+	// still holding t.mu. Wired to the REAL updater.CheckNow, the old code
+	// ran checkOnce, which announced a freshly-found release via
+	// toot.Announce — and Announce re-acquires t.mu. sync.Mutex is
+	// non-reentrant, so reply self-deadlocked and Toot never responded.
+	// This drives the real wiring (not a stubbed checkNow) and asserts the
+	// turn completes and surfaces the result line exactly once.
+	json := fmt.Sprintf(`{
+		"tag_name": "v1.0.1",
+		"body": "What's Changed\n* Something (#1)",
+		"assets": [{"name": "otto-%s-%s", "browser_download_url": "https://x/asset"}]
+	}`, runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, json)
+	}))
+	defer server.Close()
+
+	bot := &fakeBot{}
+	// Toot's LLM emits the check marker, exercising the synchronous poll.
+	toot, _ := newTestToot(t, bot, "On it, sir. [CHECK_FOR_UPDATE]")
+	u := &updater{
+		httpClient:     server.Client(),
+		releasesURL:    server.URL,
+		currentVersion: "v1.0.0",
+		toot:           toot,
+		chatID:         42,
+	}
+	toot.checkNow = u.CheckNow
+
+	done := make(chan struct{})
+	go func() {
+		toot.Reply(context.Background(), 42, "toot, check for updates")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Toot.Reply deadlocked on check-for-update (t.mu re-entered via Announce)")
+	}
+
+	// The terse result line rides along on Toot's single reply — the
+	// chat path must NOT also fire the rich Announce (which both
+	// deadlocked and double-messaged the user).
+	if len(bot.sent) != 1 {
+		t.Fatalf("bot.sent=%d, want 1 (no separate Announce on chat-initiated check)", len(bot.sent))
+	}
+	if !strings.Contains(bot.sent[0].text, "Update found: v1.0.1.") {
+		t.Errorf("missing check result line: %q", bot.sent[0].text)
+	}
+}
+
 func TestInstallConcurrentReturnsBusy(t *testing.T) {
 	// First install holds the installing flag while a second one tries.
 	// The second must return errInstallInProgress and leave the binary alone.
