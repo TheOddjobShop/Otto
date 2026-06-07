@@ -141,28 +141,31 @@ func assetForPlatform(assets []releaseAsset, goos, goarch string) (releaseAsset,
 	return releaseAsset{}, false
 }
 
-// checkOnce hits releases/latest and, if the latest tag differs from
-// both the current version and the previously-announced tag, sends a
-// Toot announcement and records the pending install.
+// refreshPending hits releases/latest and updates u.pending to reflect
+// the newest release that's installable on this platform (nil if we're
+// already current or no asset matches). It returns the fetched release
+// and whether an installable, newer-than-current release is available.
 //
-// If the release exists but has no asset for the current platform, we
-// still announce (so the user knows an update is out) but record no
-// pending — /update will explain the mismatch.
-func (u *updater) checkOnce(ctx context.Context) {
+// It deliberately does NOT announce and does NOT touch lastAnnounced —
+// the announcement dedupe lives in checkOnce (the autonomous path). The
+// chat path (CheckNow) calls this directly so a user-initiated poll can
+// update pending state without taking Toot's reply lock: Announce
+// re-acquires that lock, and CheckNow runs while reply already holds it,
+// so announcing here would self-deadlock.
+func (u *updater) refreshPending(ctx context.Context) (release, bool) {
 	rel, err := u.fetchLatest(ctx)
 	if err != nil {
 		log.Printf("updater: %v", err)
-		return
+		return release{}, false
 	}
 	if rel.TagName == u.currentVersion {
-		return
-	}
-	u.mu.Lock()
-	if rel.TagName == u.lastAnnounced {
+		u.mu.Lock()
+		u.pending = nil
 		u.mu.Unlock()
-		return
+		return rel, false
 	}
 	asset, ok := assetForPlatform(rel.Assets, runtime.GOOS, runtime.GOARCH)
+	u.mu.Lock()
 	if ok {
 		u.pending = &pendingUpdate{
 			Tag:       rel.TagName,
@@ -171,20 +174,35 @@ func (u *updater) checkOnce(ctx context.Context) {
 		}
 	} else {
 		u.pending = nil
+		log.Printf("updater: %s available but no asset for %s/%s", rel.TagName, runtime.GOOS, runtime.GOARCH)
 	}
-	// Record lastAnnounced BEFORE the announcement is delivered: a flaky
-	// network shouldn't make us re-announce the same version every hour.
-	// Cost is one missed announcement (logged) until a newer tag ships.
+	u.mu.Unlock()
+	return rel, ok
+}
+
+// checkOnce is the autonomous (hourly) poll: it refreshes pending state
+// and, if a new installable release just appeared that we haven't already
+// announced, sends a Toot announcement. The lastAnnounced guard keeps a
+// flaky network or repeated ticks from re-announcing the same version.
+//
+// Releases with no asset for the current platform update pending (to nil)
+// but are never announced — Toot only narrates installable releases.
+func (u *updater) checkOnce(ctx context.Context) {
+	rel, ok := u.refreshPending(ctx)
+	if !ok {
+		return
+	}
+	u.mu.Lock()
+	if rel.TagName == u.lastAnnounced {
+		u.mu.Unlock()
+		return
+	}
+	// Record lastAnnounced BEFORE delivering: a flaky network shouldn't
+	// make us re-announce the same version every hour. Cost is one missed
+	// announcement until a newer tag ships.
 	u.lastAnnounced = rel.TagName
 	u.mu.Unlock()
 
-	if !ok {
-		// Platform mismatch: skip Toot's LLM call and send a short static
-		// note via the regular bot path. (We still set lastAnnounced so
-		// we don't repeat it.) Toot only narrates installable releases.
-		log.Printf("updater: %s available but no asset for %s/%s; skipping toot announce", rel.TagName, runtime.GOOS, runtime.GOARCH)
-		return
-	}
 	if err := u.toot.Announce(ctx, u.chatID, u.currentVersion, rel.TagName, rel.Body); err != nil {
 		log.Printf("updater: toot announce: %v", err)
 	}
@@ -198,14 +216,19 @@ func (u *updater) Pending() *pendingUpdate {
 	return u.pending
 }
 
-// CheckNow runs a synchronous release poll (the same routine the
-// hourly ticker invokes) and returns the new pending state. Used by
-// Toot's [CHECK_FOR_UPDATE] marker so the user can ask "check for
-// updates" in chat instead of waiting for the next hourly tick.
+// CheckNow runs a synchronous release poll and returns the new pending
+// state. Used by Toot's [CHECK_FOR_UPDATE] marker so the user can ask
+// "check for updates" in chat instead of waiting for the next hourly tick.
 // Returns whatever Pending() resolves to after the check completes
 // (nil = up to date).
+//
+// Unlike checkOnce, this does NOT announce: it runs while Toot's reply
+// already holds Toot's lock (Announce re-acquires it → deadlock), and the
+// chat reply surfaces its own one-line result. It also leaves
+// lastAnnounced untouched, so the next autonomous tick still delivers the
+// rich changelog announcement once.
 func (u *updater) CheckNow(ctx context.Context) *pendingUpdate {
-	u.checkOnce(ctx)
+	u.refreshPending(ctx)
 	return u.Pending()
 }
 
