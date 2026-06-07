@@ -14,7 +14,12 @@ type ResultEvent struct {
 	// This can be non-empty even on a success Subtype: claude often
 	// recovers by asking the user for permission and continuing.
 	PermissionDenials []PermissionDenial
-	InputTokens       int // usage.input_tokens from the result event; 0 if absent
+	// ContextTokens is the total input-side context occupancy for the turn:
+	// usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
+	// Summing the cache fields is essential — under prompt caching input_tokens
+	// alone is just the uncached delta, so the session rotator that reads this
+	// would otherwise never see the real context size. 0 if absent.
+	ContextTokens int
 }
 
 func (ResultEvent) isEvent() {}

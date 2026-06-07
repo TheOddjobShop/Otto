@@ -15,8 +15,16 @@ type rawMessage struct {
 	SessionID         string              `json:"session_id"`
 	Error             string              `json:"error"`
 	PermissionDenials []rawPermissionDeny `json:"permission_denials"`
-	Usage             struct {
-		InputTokens int `json:"input_tokens"`
+	// Usage carries the result event's token accounting. Under prompt
+	// caching, input_tokens is only the uncached delta (often single
+	// digits) — the bulk of the live context is in the two cache fields.
+	// The rotator needs total occupancy, so all three are summed into
+	// ResultEvent.ContextTokens; reading input_tokens alone made the
+	// rotator blind and the session never cleared.
+	Usage struct {
+		InputTokens              int `json:"input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage"`
 	Message struct {
 		Content []struct {
@@ -70,7 +78,8 @@ func ParseStream(ctx context.Context, r io.Reader, events chan<- Event) error {
 				}
 			}
 		case "result":
-			ev := ResultEvent{Subtype: raw.Subtype, Error: raw.Error, InputTokens: raw.Usage.InputTokens}
+			ctxTokens := raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens
+			ev := ResultEvent{Subtype: raw.Subtype, Error: raw.Error, ContextTokens: ctxTokens}
 			for _, d := range raw.PermissionDenials {
 				if d.ToolName == "" {
 					continue
