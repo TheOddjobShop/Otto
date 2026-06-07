@@ -159,7 +159,7 @@ func TestParseStreamReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
-func TestParseStreamCapturesInputTokens(t *testing.T) {
+func TestParseStreamCapturesContextTokens(t *testing.T) {
 	line := `{"type":"result","subtype":"success","usage":{"input_tokens":4242,"output_tokens":17},"session_id":"s1"}` + "\n"
 	events := make(chan Event, 8)
 	go func() {
@@ -177,7 +177,38 @@ func TestParseStreamCapturesInputTokens(t *testing.T) {
 	if !found {
 		t.Fatal("no ResultEvent emitted")
 	}
-	if got.InputTokens != 4242 {
-		t.Fatalf("InputTokens = %d, want 4242", got.InputTokens)
+	if got.ContextTokens != 4242 {
+		t.Fatalf("ContextTokens = %d, want 4242", got.ContextTokens)
+	}
+}
+
+// TestParseStreamSumsCacheTokens is the regression guard for the rotator
+// blindspot: under Claude Code prompt caching the bulk of the live context
+// is reported in cache_read_input_tokens (and cache_creation_input_tokens),
+// while input_tokens is just the uncached delta (often single digits). The
+// session rotator measures ContextTokens to decide when to clear, so it MUST
+// reflect total occupancy, not the tiny delta — otherwise a 118k-token
+// session reads as ~2 tokens and never rotates.
+func TestParseStreamSumsCacheTokens(t *testing.T) {
+	// Real shape captured from a live Otto turn: 2 + 1836 + 115867 = 117705.
+	line := `{"type":"result","subtype":"success","usage":{"input_tokens":2,"cache_creation_input_tokens":1836,"cache_read_input_tokens":115867,"output_tokens":1049},"session_id":"s1"}` + "\n"
+	events := make(chan Event, 8)
+	go func() {
+		_ = ParseStream(context.Background(), strings.NewReader(line), events)
+		close(events)
+	}()
+	var got ResultEvent
+	var found bool
+	for ev := range events {
+		if r, ok := ev.(ResultEvent); ok {
+			got = r
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no ResultEvent emitted")
+	}
+	if got.ContextTokens != 117705 {
+		t.Fatalf("ContextTokens = %d, want 117705 (input+cache_creation+cache_read)", got.ContextTokens)
 	}
 }

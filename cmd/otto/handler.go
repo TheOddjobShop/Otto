@@ -82,7 +82,7 @@ type ottoState struct {
 	// just "he's busy."
 	lastSnippet string
 
-	lastInputTokens int       // usage.input_tokens of the most recent Otto turn
+	lastInputTokens int       // ContextTokens (input+cache) of the most recent Otto turn
 	lastUserMsg     time.Time // time of the most recent user message (idle calc)
 }
 
@@ -467,10 +467,11 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	close(events)
 	<-doneParsing
 
-	// Record the latest observed input-token count so the rotator can decide
-	// whether the session has grown large enough to clear. A non-success or
-	// errored turn leaves InputTokens at 0, which is harmless here.
-	h.otto.setInputTokens(lastResult.InputTokens)
+	// Record the latest observed context-token count so the rotator can decide
+	// whether the session has grown large enough to clear. ContextTokens sums
+	// the cache fields, so it reflects true occupancy under prompt caching. A
+	// non-success or errored turn leaves ContextTokens at 0, harmless here.
+	h.otto.setInputTokens(lastResult.ContextTokens)
 
 	if capturedSessionID != "" && capturedSessionID != h.session.ID() {
 		if setErr := h.session.Set(capturedSessionID); setErr != nil {
