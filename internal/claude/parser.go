@@ -84,10 +84,7 @@ func ParseStream(ctx context.Context, r io.Reader, events chan<- Event) error {
 				if d.ToolName == "" {
 					continue
 				}
-				ev.PermissionDenials = append(ev.PermissionDenials, PermissionDenial{
-					ToolName:  d.ToolName,
-					ToolUseID: d.ToolUseID,
-				})
+				ev.PermissionDenials = append(ev.PermissionDenials, PermissionDenial(d))
 			}
 			select {
 			case events <- ev:

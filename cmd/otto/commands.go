@@ -47,16 +47,12 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		// just exposes the same lever to the user on demand.
 		h.otto.mu.Lock()
 		busy := h.otto.busy
-		cancel := h.otto.cancel
 		inflight := h.otto.currentPrompt
 		h.otto.mu.Unlock()
 		if !busy {
 			return commandResult{reply: "🔄 Otto isn't busy. Nothing to interrupt.", handled: true}
 		}
-		h.otto.markSuppressError()
-		if cancel != nil {
-			cancel()
-		}
+		h.otto.cancelInflight()
 		preview := inflight
 		if len(preview) > 80 {
 			preview = preview[:80] + "…"

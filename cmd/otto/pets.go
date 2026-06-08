@@ -84,10 +84,7 @@ func (r *petRegistry) Match(text string) (Pet, string, bool) {
 
 // matchAddress is the strict first-word matcher (with optional @).
 func (r *petRegistry) matchAddress(text string) (Pet, string, bool) {
-	head := text
-	if strings.HasPrefix(head, "@") {
-		head = head[1:]
-	}
+	head := strings.TrimPrefix(text, "@")
 	end := 0
 	for end < len(head) && isWordChar(head[end]) {
 		end++

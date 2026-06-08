@@ -204,10 +204,18 @@ func (s *ottoState) appendSnippet(text string) {
 	}
 }
 
-func (s *ottoState) markSuppressError() {
+// cancelInflight atomically marks the next error as suppressed and cancels
+// the in-flight Otto call, if any. Holding mu across the suppress+cancel
+// closes the TOCTOU window where release() could nil the cancel func
+// between a separate read and the call (which would otherwise mean a stale
+// or nil cancel). cancel() does not re-enter mu, so this cannot deadlock.
+func (s *ottoState) cancelInflight() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.suppressError = true
-	s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 // shouldSuppressError reports whether the last cancellation came from the

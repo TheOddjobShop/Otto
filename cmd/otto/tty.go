@@ -30,17 +30,22 @@ type ttyBot struct {
 
 	lines    chan string
 	shutdown context.CancelFunc
+	ctx      context.Context
 
 	once sync.Once
 }
 
 // newTTYBot starts a goroutine that reads stdin line-by-line. EOF on stdin
-// (Ctrl-D) calls shutdown so the polling loop exits cleanly.
-func newTTYBot(userID int64, shutdown context.CancelFunc) *ttyBot {
+// (Ctrl-D) calls shutdown so the polling loop exits cleanly. ctx is the
+// process context: once it is cancelled (signal or stdin EOF) the reader
+// stops trying to hand off lines instead of blocking forever on a send to
+// a polling loop that has already exited.
+func newTTYBot(ctx context.Context, userID int64, shutdown context.CancelFunc) *ttyBot {
 	t := &ttyBot{
 		userID:   userID,
 		lines:    make(chan string),
 		shutdown: shutdown,
+		ctx:      ctx,
 	}
 	go t.readStdin()
 	return t
@@ -54,7 +59,11 @@ func (t *ttyBot) readStdin() {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		t.lines <- line
+		select {
+		case t.lines <- line:
+		case <-t.ctx.Done():
+			return
+		}
 	}
 	fmt.Fprintln(os.Stderr, "\n[tty] stdin closed — shutting down")
 	t.once.Do(t.shutdown)

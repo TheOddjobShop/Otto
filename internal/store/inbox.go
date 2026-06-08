@@ -82,14 +82,6 @@ func WithAgentHop(ctx context.Context) context.Context {
 	return WithBusHop(ctx, MaxBusHop)
 }
 
-// IsAgentHop reports whether ctx was tagged by WithAgentHop / WithBusHop
-// with a counter at or above the cap. Retained for tests that predate the
-// counter-based API.
-func IsAgentHop(ctx context.Context) bool {
-	n, ok := BusHopFromCtx(ctx)
-	return ok && n >= MaxBusHop
-}
-
 // Enqueue inserts one row into the inbox and returns its id.
 //
 // target ∈ {otto,toto,toot}, source ∈ {user,agent}. body must be non-empty

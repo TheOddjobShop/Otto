@@ -68,15 +68,7 @@ func senderFromCtxOrEnv(ctx context.Context, fallback string) string {
 // dispatch paths (mirror of the env-var transport used in production).
 type ctxKeyBusSender struct{}
 
-// WithBusSender returns a child context labelled with the agent name
-// running the current turn. The MCP tool handlers consult it to stamp
-// outgoing bus rows accurately. In production the same information rides
-// via the OTTO_BUS_SENDER env var on the Claude subprocess.
-func WithBusSender(ctx context.Context, name string) context.Context {
-	return context.WithValue(ctx, ctxKeyBusSender{}, name)
-}
-
-// senderFromCtx reads the WithBusSender value.
+// senderFromCtx reads the in-process bus-sender value carried on ctx.
 func senderFromCtx(ctx context.Context) (string, bool) {
 	s, ok := ctx.Value(ctxKeyBusSender{}).(string)
 	return s, ok

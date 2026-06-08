@@ -46,6 +46,7 @@ func DownloadPhotoToTemp(ctx context.Context, c BotClient, fileID, dir string) (
 	}
 	abs, err := filepath.Abs(f.Name())
 	if err != nil {
+		os.Remove(f.Name())
 		return "", fmt.Errorf("telegram: abs path: %w", err)
 	}
 	return abs, nil

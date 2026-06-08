@@ -60,3 +60,18 @@ func TestScanRejectsEmpty(t *testing.T) {
 		t.Error("blank content should be rejected")
 	}
 }
+
+func TestScanRejectsNewlines(t *testing.T) {
+	// Entries are stored and deduplicated one-per-line; a multi-line entry
+	// would bypass entryExists duplicate detection, so it must be rejected.
+	bad := []string{
+		"line1\nline2",
+		"line1\r\nline2",
+		"trailing\n",
+	}
+	for _, c := range bad {
+		if err := scanContent(c); err == nil {
+			t.Errorf("multi-line content accepted: %q", c)
+		}
+	}
+}

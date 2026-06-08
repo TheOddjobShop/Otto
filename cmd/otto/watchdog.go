@@ -55,15 +55,11 @@ func (h *handler) runWatchdog(ctx context.Context, chatID int64, done <-chan str
 				return
 			}
 			silence := time.Since(h.otto.lastEvent)
-			cancel := h.otto.cancel
 			h.otto.mu.Unlock()
 
 			if silence >= watchdogCancelAfter {
 				log.Printf("watchdog: otto silent for %s — cancelling subprocess", silence.Round(time.Second))
-				h.otto.markSuppressError()
-				if cancel != nil {
-					cancel()
-				}
+				h.otto.cancelInflight()
 				h.toto.SystemMessage(ctx, chatID,
 					"otto wedged. i rebooted him. try sending your original message again whenever — he'll pick up where he left off.")
 				return

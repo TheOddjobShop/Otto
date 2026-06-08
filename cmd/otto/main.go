@@ -48,7 +48,7 @@ func main() {
 
 	var bot telegram.BotClient
 	if *ttyMode {
-		bot = newTTYBot(cfg.TelegramAllowedUserID, cancel)
+		bot = newTTYBot(ctx, cfg.TelegramAllowedUserID, cancel)
 		fmt.Fprintln(os.Stderr, "[tty] type messages and press enter; ctrl-d to exit")
 	} else {
 		bot, err = telegram.NewBotClient(cfg.TelegramBotToken, "https://api.telegram.org/bot%s/%s")

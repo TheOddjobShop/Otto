@@ -25,11 +25,17 @@ var injectionPatterns = []*regexp.Regexp{
 }
 
 // scanContent validates a candidate memory entry. It rejects blank content,
-// credential material, prompt-injection phrasings, and invisible / bidi
-// Unicode that could hide payloads in the always-injected core.
+// embedded newlines, credential material, prompt-injection phrasings, and
+// invisible / bidi Unicode that could hide payloads in the always-injected
+// core. Newlines are disallowed because entries are stored one-per-line and
+// deduplicated line-by-line (see entryExists); a multi-line entry would
+// silently bypass duplicate detection and corrupt the one-fact-per-line model.
 func scanContent(content string) error {
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("memory: refuse to store blank content")
+	}
+	if strings.ContainsAny(content, "\n\r") {
+		return fmt.Errorf("memory: entry must be a single line (no newlines)")
 	}
 	for _, r := range content {
 		if isInvisibleRune(r) {
