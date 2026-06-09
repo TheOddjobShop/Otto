@@ -313,3 +313,33 @@ func TestLoadHonorsExplicitRotation(t *testing.T) {
 		t.Errorf("explicit rotation config not honored: %+v", cfg)
 	}
 }
+
+func TestLoadClampsOutOfRangeRotateHardPct(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{bin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	// rotate_hard_pct > 1.0 is meaningless (tokens/ctx never exceeds 1.0) and
+	// would silently disable hard-cap rotation; Load must clamp it to the default.
+	body := "telegram_bot_token = \"t\"\n" +
+		"telegram_allowed_user_id = 5\n" +
+		"claude_binary_path = \"" + bin + "\"\n" +
+		"mcp_config_path = \"" + mcp + "\"\n" +
+		"session_id_path = \"" + dir + "/session_id\"\n" +
+		"rotate_hard_pct = 1.5\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RotateHardPct != 0.85 {
+		t.Errorf("RotateHardPct = %v, want 0.85 (clamped from out-of-range 1.5)", cfg.RotateHardPct)
+	}
+}

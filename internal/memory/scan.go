@@ -60,6 +60,10 @@ func scanContent(content string) error {
 // whitespace (space, tab, newline) is allowed.
 func isInvisibleRune(r rune) bool {
 	switch {
+	case r == '\u061c': // Arabic letter mark (RTL injection vector)
+		return true
+	case r == '\u180e': // Mongolian vowel separator (zero-width)
+		return true
 	case r == '\u200b', r == '\u200c', r == '\u200d': // zero-width space / ZWNJ / ZWJ
 		return true
 	case r >= '\u200e' && r <= '\u200f': // LRM / RLM
@@ -67,6 +71,8 @@ func isInvisibleRune(r rune) bool {
 	case r >= '\u202a' && r <= '\u202e': // bidi embeddings / overrides
 		return true
 	case r == '\u2060', r == '\ufeff': // word joiner / BOM
+		return true
+	case r >= '\u2066' && r <= '\u2069': // bidi isolates: LRI / RLI / FSI / PDI
 		return true
 	}
 	return false
