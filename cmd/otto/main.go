@@ -186,7 +186,6 @@ func main() {
 
 	h.rotate = rotateConfig{
 		ctxTokens:  cfg.ModelContextTokens,
-		soft:       cfg.RotateSoftPct,
 		hard:       cfg.RotateHardPct,
 		idleWindow: time.Duration(cfg.RotateIdleMinutes) * time.Minute,
 	}

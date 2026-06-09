@@ -405,7 +405,7 @@ func TestRunRotatorClearsLargeIdleSession(t *testing.T) {
 	bot := &fakeBot{}
 	runner := &fakeRunner{}
 	h := newTestHandler(t, bot, runner)
-	h.rotate = rotateConfig{ctxTokens: 1000, soft: 0.5, hard: 0.85, idleWindow: 0}
+	h.rotate = rotateConfig{ctxTokens: 1000, hard: 0.85, idleWindow: 0}
 	if err := h.session.Set("sess-xyz"); err != nil {
 		t.Fatal(err)
 	}

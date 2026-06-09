@@ -14,7 +14,6 @@ const rotateCheckInterval = 1 * time.Minute
 // rotateConfig holds the rotation thresholds, resolved from config at startup.
 type rotateConfig struct {
 	ctxTokens  int
-	soft       float64
 	hard       float64
 	idleWindow time.Duration
 }
@@ -27,14 +26,19 @@ func shouldRotate(tokens int, idle time.Duration, c rotateConfig) bool {
 	if c.ctxTokens <= 0 || tokens <= 0 {
 		return false
 	}
-	frac := float64(tokens) / float64(c.ctxTokens)
-	// Hard cap intentionally ignores idle: at this size we rotate at the next
-	// free moment regardless of how recently the user spoke. Do not gate it on
-	// idleWindow.
-	if frac >= c.hard {
+	// Idle reset: once the user has been quiet for the idle window, clear the
+	// session regardless of size so the next message starts fresh. Durable
+	// facts live in the always-injected memory core (USER.md + MEMORY.md), so
+	// nothing important is lost — this just bounds per-message context growth
+	// and cost. This is the "reset every ~15 minutes of inactivity" behaviour.
+	if idle >= c.idleWindow {
 		return true
 	}
-	if frac >= c.soft && idle >= c.idleWindow {
+	// Hard cap: a continuously-active session (never idle long enough to trip
+	// the idle reset) still rotates once it grows past this fraction of
+	// context, at the next free tick — regardless of how recently the user
+	// spoke.
+	if float64(tokens)/float64(c.ctxTokens) >= c.hard {
 		return true
 	}
 	return false
