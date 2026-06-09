@@ -14,3 +14,6 @@
 # Build artifacts
 /dist/
 /coverage.out
+
+# Claude Code runtime state (locks, scheduled tasks, transcripts)
+.claude/
