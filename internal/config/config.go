@@ -53,14 +53,12 @@ type Config struct {
 	// ModelContextTokens is Otto's model context window, used as the denominator
 	// for rotation thresholds. Default 200000.
 	ModelContextTokens int `toml:"model_context_tokens"`
-	// RotateSoftPct: at this fraction of context, the session is eligible to
-	// rotate once the user goes idle. Default 0.50.
-	RotateSoftPct float64 `toml:"rotate_soft_pct"`
-	// RotateHardPct: at this fraction, rotate at the next idle tick regardless
-	// of how recently the user spoke (safety cap). Default 0.85.
+	// RotateHardPct: at this fraction of context, a continuously-active session
+	// rotates at the next free tick regardless of how recently the user spoke
+	// (safety cap for sessions that never go idle). Default 0.85.
 	RotateHardPct float64 `toml:"rotate_hard_pct"`
-	// RotateIdleMinutes: minutes of user silence required before a soft-eligible
-	// session rotates. Default 15.
+	// RotateIdleMinutes: minutes of user silence after which the session is
+	// cleared regardless of size — the periodic "reset on inactivity". Default 15.
 	RotateIdleMinutes int `toml:"rotate_idle_minutes"`
 }
 
@@ -87,9 +85,6 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.ModelContextTokens <= 0 {
 		cfg.ModelContextTokens = 200000
-	}
-	if cfg.RotateSoftPct <= 0 {
-		cfg.RotateSoftPct = 0.50
 	}
 	if cfg.RotateHardPct <= 0 {
 		cfg.RotateHardPct = 0.85

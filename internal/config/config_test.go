@@ -276,9 +276,6 @@ func TestLoadDerivesRotationDefaults(t *testing.T) {
 	if cfg.ModelContextTokens != 200000 {
 		t.Errorf("ModelContextTokens default = %d", cfg.ModelContextTokens)
 	}
-	if cfg.RotateSoftPct != 0.50 {
-		t.Errorf("RotateSoftPct default = %v", cfg.RotateSoftPct)
-	}
 	if cfg.RotateHardPct != 0.85 {
 		t.Errorf("RotateHardPct default = %v", cfg.RotateHardPct)
 	}
@@ -303,7 +300,6 @@ func TestLoadHonorsExplicitRotation(t *testing.T) {
 		"mcp_config_path = \"" + mcp + "\"\n" +
 		"session_id_path = \"" + dir + "/session_id\"\n" +
 		"model_context_tokens = 100000\n" +
-		"rotate_soft_pct = 0.4\n" +
 		"rotate_hard_pct = 0.9\n" +
 		"rotate_idle_minutes = 5\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0600); err != nil {
@@ -313,7 +309,7 @@ func TestLoadHonorsExplicitRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.ModelContextTokens != 100000 || cfg.RotateSoftPct != 0.4 || cfg.RotateHardPct != 0.9 || cfg.RotateIdleMinutes != 5 {
+	if cfg.ModelContextTokens != 100000 || cfg.RotateHardPct != 0.9 || cfg.RotateIdleMinutes != 5 {
 		t.Errorf("explicit rotation config not honored: %+v", cfg)
 	}
 }
