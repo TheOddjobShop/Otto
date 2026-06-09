@@ -38,10 +38,20 @@ func TestShouldRotateActiveBelowHardDoesNotRotate(t *testing.T) {
 	}
 }
 
-func TestShouldRotateHardIgnoresIdle(t *testing.T) {
+func TestShouldRotateHardCapWaitsForActiveGrace(t *testing.T) {
 	c := testRotateConfig()
-	if !shouldRotate(180000, 10*time.Second, c) {
-		t.Error("hard threshold should rotate regardless of idle")
+	// Over the hard cap but the user is actively conversing (within the grace):
+	// must NOT rotate — otherwise a heavy turn wipes context between two
+	// back-to-back messages (the Notion-backlog bug).
+	if shouldRotate(180000, 10*time.Second, c) {
+		t.Error("over hard cap but actively conversing should not rotate")
+	}
+	if shouldRotate(180000, hardRotateActiveGrace-time.Second, c) {
+		t.Error("over hard cap, just under the active grace, should not rotate")
+	}
+	// Over the hard cap and the user has paused past the grace: rotate.
+	if !shouldRotate(180000, hardRotateActiveGrace+time.Second, c) {
+		t.Error("over hard cap and paused past the active grace should rotate")
 	}
 }
 

@@ -11,6 +11,14 @@ import (
 // rotateCheckInterval is how often the rotator evaluates whether to rotate.
 const rotateCheckInterval = 1 * time.Minute
 
+// hardRotateActiveGrace is how long the user must have been silent before the
+// hard cap will clear an over-budget session. It stops the cap from wiping a
+// session mid-conversation — e.g. right after a data-heavy fetch that balloons
+// context — which would make Otto "forget" between two back-to-back messages.
+// The idle reset (idleWindow) still clears regardless of size once the user
+// has been quiet that much longer.
+const hardRotateActiveGrace = 5 * time.Minute
+
 // petRotator is a pet (Toto/Toot) whose conversational session is cleared
 // after a period of inactivity, mirroring Otto's idle reset. Without this a
 // pet session lives forever and can answer from stale history.
@@ -41,11 +49,13 @@ func shouldRotate(tokens int, idle time.Duration, c rotateConfig) bool {
 	if idle >= c.idleWindow {
 		return true
 	}
-	// Hard cap: a continuously-active session (never idle long enough to trip
-	// the idle reset) still rotates once it grows past this fraction of
-	// context, at the next free tick — regardless of how recently the user
-	// spoke.
-	if float64(tokens)/float64(c.ctxTokens) >= c.hard {
+	// Hard cap: an over-budget session rotates once it grows past this fraction
+	// of context — but only after the user has paused for the active grace, so
+	// the cap never wipes context mid-conversation. A single heavy turn (e.g. a
+	// full Notion backlog dump) can push past the cap, and the user's very next
+	// message must still see that context. Once they pause, the bloated session
+	// clears so the following turn starts cheap.
+	if float64(tokens)/float64(c.ctxTokens) >= c.hard && idle >= hardRotateActiveGrace {
 		return true
 	}
 	return false
