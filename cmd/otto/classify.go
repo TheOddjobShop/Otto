@@ -18,9 +18,9 @@ import (
 // which, so the expensive model is only paid for when code work actually
 // warrants it.
 const (
-	ottoDefaultModel = "claude-haiku-4-5" // ordinary chat — the system prompt is small, so Haiku handles it well and cheaply
-	ottoCodingModel  = "claude-opus-4-8"  // coding tasks — the router escalates here
-	classifierModel  = "claude-haiku-4-5" // the router itself — cheap + fast
+	ottoDefaultModel = "claude-sonnet-4-6" // ordinary chat — Sonnet balances quality and a larger context window
+	ottoCodingModel  = "claude-opus-4-8"   // coding tasks — the router escalates here
+	classifierModel  = "claude-haiku-4-5"  // the router itself — cheap + fast
 )
 
 // classifyTimeout bounds the router subprocess so a slow or hung classify
@@ -77,7 +77,7 @@ func modelLabel(model string) string {
 	case ottoCodingModel:
 		return "opus-4.8 (coding)"
 	case ottoDefaultModel:
-		return "haiku-4.5 (chat)"
+		return "sonnet-4.6 (chat)"
 	case "":
 		return "default (inherited)"
 	default:

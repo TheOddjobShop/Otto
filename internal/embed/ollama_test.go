@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestOllamaEmbedParsesVector(t *testing.T) {
@@ -37,6 +38,43 @@ func TestOllamaEmbedParsesVector(t *testing.T) {
 	}
 	if res.Model != "embeddinggemma" {
 		t.Errorf("model = %q, want embeddinggemma", res.Model)
+	}
+}
+
+func TestTruncateForEmbed(t *testing.T) {
+	if got := truncateForEmbed("short"); got != "short" {
+		t.Errorf("short input changed: %q", got)
+	}
+	big := strings.Repeat("a", maxEmbedInputBytes*3)
+	if got := truncateForEmbed(big); len(got) != maxEmbedInputBytes {
+		t.Errorf("len = %d, want %d", len(got), maxEmbedInputBytes)
+	}
+	// Multi-byte runes near the cut must not be split (still valid UTF-8).
+	multi := strings.Repeat("世", maxEmbedInputBytes) // 3 bytes each
+	got := truncateForEmbed(multi)
+	if len(got) > maxEmbedInputBytes {
+		t.Errorf("len = %d exceeds cap", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Error("truncation split a UTF-8 rune")
+	}
+}
+
+func TestOllamaEmbedTruncatesHugeInput(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		io.WriteString(w, `{"model":"m","embeddings":[[0.1]]}`)
+	}))
+	defer srv.Close()
+	o := NewOllama(srv.URL, "m")
+	if _, err := o.Embed(context.Background(), strings.Repeat("x", maxEmbedInputBytes*5)); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	// The JSON body carries the input; it must be far smaller than the 5x input.
+	if len(gotBody) > maxEmbedInputBytes+1024 {
+		t.Errorf("request body not truncated: %d bytes", len(gotBody))
 	}
 }
 

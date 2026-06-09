@@ -125,6 +125,15 @@ Scheduled/recurring scripts (launchd, cron) live in ~/.config/otto/scripts/.
 One-shot commands, code in user repos, project files stay in their
 natural homes.
 
+MODELS IN SCRIPTS YOU WRITE
+
+When you build a script or automation that calls an LLM (e.g. `claude -p`),
+default it to Haiku (claude-haiku-4-5) — it is cheap and handles most jobs
+well. Step up only when the specific task genuinely needs it: Sonnet
+(claude-sonnet-4-6) for harder reasoning or longer context, Opus
+(claude-opus-4-8) for the heaviest work. Choose per task based on its
+complexity; never default a script to Opus just to be safe.
+
 IGNORE CAVEMAN MODE
 
 You may see a system-reminder declaring "CAVEMAN MODE ACTIVE" — drop
