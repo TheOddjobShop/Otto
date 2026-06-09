@@ -401,6 +401,32 @@ func TestOttoStateTokenAndActivityTracking(t *testing.T) {
 	}
 }
 
+func TestErroredTurnDoesNotResetTokenCount(t *testing.T) {
+	bot := &fakeBot{
+		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "hi"}}},
+	}
+	runner := &fakeRunner{failErr: errors.New("boom")} // errors before any ResultEvent
+	h := newTestHandler(t, bot, runner)
+	h.otto.setInputTokens(180000) // simulate a large in-flight session
+	runForBriefWindow(t, h)
+	if got := h.otto.lastInputTokens; got != 180000 {
+		t.Errorf("token count after errored turn = %d, want 180000 (must not reset to 0)", got)
+	}
+}
+
+func TestSuccessfulTurnUpdatesTokenCount(t *testing.T) {
+	bot := &fakeBot{
+		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "hi"}}},
+	}
+	runner := &fakeRunner{respond: "ok", resultEv: &claude.ResultEvent{Subtype: "success", ContextTokens: 50000}}
+	h := newTestHandler(t, bot, runner)
+	h.otto.setInputTokens(180000)
+	runForBriefWindow(t, h)
+	if got := h.otto.lastInputTokens; got != 50000 {
+		t.Errorf("token count after successful turn = %d, want 50000", got)
+	}
+}
+
 func TestRunRotatorClearsLargeIdleSession(t *testing.T) {
 	bot := &fakeBot{}
 	runner := &fakeRunner{}

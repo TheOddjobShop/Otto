@@ -86,7 +86,10 @@ func Load(path string) (*Config, error) {
 	if cfg.ModelContextTokens <= 0 {
 		cfg.ModelContextTokens = 200000
 	}
-	if cfg.RotateHardPct <= 0 {
+	// Clamp to (0, 1]: the hard cap is compared against tokens/ctxTokens, a
+	// ratio that can never exceed 1.0, so a value > 1.0 would silently disable
+	// hard-cap rotation entirely.
+	if cfg.RotateHardPct <= 0 || cfg.RotateHardPct > 1.0 {
 		cfg.RotateHardPct = 0.85
 	}
 	if cfg.RotateIdleMinutes <= 0 {

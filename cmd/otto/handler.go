@@ -479,6 +479,7 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	doneParsing := make(chan struct{})
 	var assistantText strings.Builder
 	var lastResult claude.ResultEvent
+	var gotResult bool
 	var capturedSessionID string
 
 	go func() {
@@ -493,6 +494,7 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 				capturedSessionID = e.ID
 			case claude.ResultEvent:
 				lastResult = e
+				gotResult = true
 			}
 		}
 	}()
@@ -503,9 +505,14 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 
 	// Record the latest observed context-token count so the rotator can decide
 	// whether the session has grown large enough to clear. ContextTokens sums
-	// the cache fields, so it reflects true occupancy under prompt caching. A
-	// non-success or errored turn leaves ContextTokens at 0, harmless here.
-	h.otto.setInputTokens(lastResult.ContextTokens)
+	// the cache fields, so it reflects true occupancy under prompt caching.
+	// Only update when a result event actually arrived: an errored or aborted
+	// turn (subprocess crash, timeout, parse failure) emits none, and writing
+	// 0 there would wrongly reset the rotator's view of session size — leaving
+	// a large session unrotated because shouldRotate ignores a zero count.
+	if gotResult {
+		h.otto.setInputTokens(lastResult.ContextTokens)
+	}
 
 	if capturedSessionID != "" && capturedSessionID != h.session.ID() {
 		if setErr := h.session.Set(capturedSessionID); setErr != nil {

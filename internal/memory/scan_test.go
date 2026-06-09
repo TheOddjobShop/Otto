@@ -44,9 +44,13 @@ func TestScanRejectsInjection(t *testing.T) {
 
 func TestScanRejectsInvisibleUnicode(t *testing.T) {
 	bad := []string{
-		"normal text" + "\u200b" + "with zero width space", // zero-width space
-		"text" + "\u202e" + "with bidi override",           // right-to-left override
-		"text" + "\ufeff" + "with BOM",                     // byte order mark
+		"normal text\u200bwith zero width space",   // zero-width space
+		"text\u202ewith bidi override",             // right-to-left override
+		"text\ufeffwith BOM",                       // byte order mark
+		"text\u061cwith arabic letter mark",        // RTL injection vector
+		"text\u180ewith mongolian vowel separator", // zero-width separator
+		"text\u2066with LRI isolate",               // bidi isolate (LRI)
+		"text\u2069with PDI isolate",               // bidi isolate (PDI)
 	}
 	for _, c := range bad {
 		if err := scanContent(c); err == nil {
