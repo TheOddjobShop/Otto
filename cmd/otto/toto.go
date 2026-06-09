@@ -129,7 +129,28 @@ type Toto struct {
 	// to handler.otto.Snapshot; tests leave it nil.
 	ottoStatus func() ottoSnapshot
 
-	mu sync.Mutex // serializes Toto's own --resume against the toto session
+	mu         sync.Mutex // serializes Toto's own --resume against the toto session
+	lastActive time.Time  // last reply time; drives idle session rotation (guarded by mu)
+}
+
+// rotateIfIdle clears Toto's session if it has gone idle for at least window,
+// mirroring Otto's idle reset. Pet sessions otherwise live forever and answer
+// from stale history (e.g. an old version number). Holding mu means this can
+// never race a live reply; an in-flight Reply just defers the clear to the
+// next tick.
+func (t *Toto) rotateIfIdle(window time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.session.ID() == "" || t.lastActive.IsZero() {
+		return
+	}
+	if idle := time.Since(t.lastActive); idle >= window {
+		if err := t.session.Clear(); err != nil {
+			log.Printf("rotator: clear toto session: %v", err)
+			return
+		}
+		log.Printf("rotator: cleared toto session (idle %s)", idle.Round(time.Second))
+	}
 }
 
 // Name returns "toto" — used by the petRegistry to route messages
@@ -187,6 +208,7 @@ var totoAllowedTools = []string{
 func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage string, busyFallback bool, ottoPrompt, ottoSnippet string, bc *busContext) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.lastActive = time.Now()
 
 	systemPrompt := t.persona
 	if bc != nil {

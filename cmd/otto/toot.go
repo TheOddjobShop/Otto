@@ -19,9 +19,10 @@ import (
 	"otto/internal/telegram"
 )
 
-// tootModel pins Toot to Sonnet — he's smarter than Toto (haiku) on
-// purpose. He thinks before composing changelog summaries.
-const tootModel = "claude-sonnet-4-6"
+// tootModel pins Toot to Haiku. The prompt is small and the announcement
+// task is light, so Haiku composes changelog summaries well at far less cost
+// than Sonnet — matching the Haiku-first hot path.
+const tootModel = "claude-haiku-4-5"
 
 // tootEffort is the reasoning budget passed to Claude Code as --effort.
 // Medium gives Toot a few moments to organize the changelog without
@@ -46,7 +47,7 @@ func pickTootArt() string { return tootCycler.Next() }
 // Toot is the owl character that delivers update notifications. He
 // reads patch notes and explains them in his own voice (nerdy,
 // systematic, dutiful). Mirrors Toto's architecture — own runner,
-// session, persona — but uses a smarter model and a different prompt.
+// session, persona — with a different prompt.
 //
 // Toot's tools are all denied (--disallowedTools "*") so even though
 // he runs through Claude Code, he can't touch the filesystem, MCPs,
@@ -88,7 +89,8 @@ type Toot struct {
 	// this when emitting [CHECK_FOR_UPDATE] in chat.
 	checkNow func(ctx context.Context) *pendingUpdate
 
-	mu sync.Mutex // serializes Toot's own --resume against the toot session
+	mu         sync.Mutex // serializes Toot's own --resume against the toot session
+	lastActive time.Time  // last reply time; drives idle session rotation (guarded by mu)
 }
 
 // tootUpdateMarker is the literal string Toot's LLM is instructed to
@@ -129,6 +131,25 @@ func stripCheckMarker(s string) (string, bool) {
 // addressed to him directly.
 func (t *Toot) Name() string { return "toot" }
 
+// rotateIfIdle clears Toot's session if it has gone idle for at least window,
+// mirroring Otto's idle reset. Without this the pet session lives forever and
+// can answer from stale history (e.g. an old version number). Holding mu means
+// it can never race a live reply.
+func (t *Toot) rotateIfIdle(window time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.session.ID() == "" || t.lastActive.IsZero() {
+		return
+	}
+	if idle := time.Since(t.lastActive); idle >= window {
+		if err := t.session.Clear(); err != nil {
+			log.Printf("rotator: clear toot session: %v", err)
+			return
+		}
+		log.Printf("rotator: cleared toot session (idle %s)", idle.Round(time.Second))
+	}
+}
+
 // Reply runs a chat turn — the user addressed Toot directly. Stays in
 // his nerdy/dutiful voice but engages conversationally rather than
 // reciting changelog. Most tools remain disallowed; Toot can use his
@@ -163,6 +184,7 @@ var tootAllowedTools = []string{
 func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *busContext) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.lastActive = time.Now()
 
 	systemPrompt := t.persona
 	if bc != nil {
@@ -345,6 +367,7 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTag, body string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.lastActive = time.Now()
 
 	systemPrompt := t.persona
 	if systemPrompt != "" {
