@@ -38,7 +38,7 @@ func TestParseModelFromVerdict(t *testing.T) {
 func TestModelLabel(t *testing.T) {
 	cases := map[string]string{
 		ottoCodingModel:  "opus-4.8 (coding)",
-		ottoDefaultModel: "sonnet-4.6 (chat)",
+		ottoDefaultModel: "haiku-4.5 (chat)",
 		"":               "default (inherited)",
 		"claude-x":       "claude-x",
 	}
@@ -84,7 +84,7 @@ func TestHandlerRoutesCodingTurnToOpus(t *testing.T) {
 	}
 }
 
-func TestHandlerRoutesChatTurnToSonnet(t *testing.T) {
+func TestHandlerRoutesChatTurnToDefault(t *testing.T) {
 	bot := &fakeBot{
 		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "what's 10 million won in usd"}}},
 	}
