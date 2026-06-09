@@ -11,6 +11,13 @@ import (
 // rotateCheckInterval is how often the rotator evaluates whether to rotate.
 const rotateCheckInterval = 1 * time.Minute
 
+// petRotator is a pet (Toto/Toot) whose conversational session is cleared
+// after a period of inactivity, mirroring Otto's idle reset. Without this a
+// pet session lives forever and can answer from stale history.
+type petRotator interface {
+	rotateIfIdle(window time.Duration)
+}
+
 // rotateConfig holds the rotation thresholds, resolved from config at startup.
 type rotateConfig struct {
 	ctxTokens  int
@@ -58,6 +65,11 @@ func (h *handler) runRotator(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		h.maybeRotate()
+		// Pets clear their own sessions on the same idle window so they don't
+		// answer from stale history (e.g. an old version number).
+		for _, p := range h.petRotators {
+			p.rotateIfIdle(h.rotate.idleWindow)
+		}
 		select {
 		case <-ctx.Done():
 			return

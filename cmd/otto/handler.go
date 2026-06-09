@@ -42,11 +42,15 @@ type handler struct {
 	updater *updater
 	pets    *petRegistry // routes name-addressed messages to Toto/Toot/etc.
 
-	// classifier picks Otto's per-turn model (Sonnet for chat, Opus for
+	// classifier picks Otto's per-turn model (Haiku for chat, Opus for
 	// coding). Nil disables routing — Otto then inherits Claude Code's
 	// default model. Set in production by main; left nil by tests that
 	// don't exercise routing.
 	classifier modelClassifier
+
+	// petRotators are the pets (Toto/Toot) whose sessions the rotator clears
+	// on the idle window, so they don't accumulate stale conversation state.
+	petRotators []petRotator
 
 	rotate rotateConfig // session-rotation thresholds (zero value disables)
 
@@ -512,6 +516,15 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	// a large session unrotated because shouldRotate ignores a zero count.
 	if gotResult {
 		h.otto.setInputTokens(lastResult.ContextTokens)
+		// Soft guard: a single agentic turn can't be interrupted mid-flight,
+		// so a heavy one (e.g. a long tool-calling task) can balloon the
+		// session far past the rotation budget before the rotator gets a free
+		// tick to clear it. Surface that in the log so a runaway turn is
+		// visible rather than silent; the rotator clears it on the next tick.
+		if h.rotate.ctxTokens > 0 && lastResult.ContextTokens > h.rotate.ctxTokens {
+			log.Printf("warning: turn used %d context tokens — over the %d rotation budget; session will rotate at the next free tick",
+				lastResult.ContextTokens, h.rotate.ctxTokens)
+		}
 	}
 
 	if capturedSessionID != "" && capturedSessionID != h.session.ID() {

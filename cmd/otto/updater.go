@@ -25,7 +25,10 @@ import (
 var errInstallInProgress = errors.New("install: already in progress")
 
 const (
-	updateCheckInterval = 1 * time.Hour
+	// updateCheckInterval: how often to poll GitHub for a new release. 10 min
+	// is ~6 requests/hour — far under GitHub's 60/hour unauthenticated limit —
+	// so updates land quickly without risking rate limits.
+	updateCheckInterval = 10 * time.Minute
 	updateInitialDelay  = 30 * time.Second
 	releasesURLDefault  = "https://api.github.com/repos/TheOddjobShop/Otto/releases/latest"
 	downloadTimeout     = 5 * time.Minute
