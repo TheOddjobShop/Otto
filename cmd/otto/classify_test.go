@@ -38,7 +38,7 @@ func TestParseModelFromVerdict(t *testing.T) {
 func TestModelLabel(t *testing.T) {
 	cases := map[string]string{
 		ottoCodingModel:  "opus-4.8 (coding)",
-		ottoDefaultModel: "haiku-4.5 (chat)",
+		ottoDefaultModel: "sonnet-4.6 (chat)",
 		"":               "default (inherited)",
 		"claude-x":       "claude-x",
 	}

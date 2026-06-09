@@ -8,7 +8,28 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"unicode/utf8"
 )
+
+// maxEmbedInputBytes caps the text sent to the embedding model. Local embedding
+// models have small context windows (~2k tokens); a giant input — e.g. a turn
+// that dumped a full Notion backlog (~700KB) — makes Ollama stall and the
+// request hit its deadline. Truncating keeps embeds fast and is no real loss:
+// one vector for hundreds of KB is a meaningless average, and the leading slice
+// is a fine representative for semantic recall. ~8KB ≈ the models' window.
+const maxEmbedInputBytes = 8 * 1024
+
+// truncateForEmbed clamps text to maxEmbedInputBytes on a UTF-8 rune boundary.
+func truncateForEmbed(text string) string {
+	if len(text) <= maxEmbedInputBytes {
+		return text
+	}
+	cut := maxEmbedInputBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
+}
 
 // Compile-time assertion that *Ollama satisfies Embedder.
 var _ Embedder = (*Ollama)(nil)
@@ -48,6 +69,7 @@ type ollamaEmbedResponse struct {
 // embedding. Errors on transport failure, non-200 status, unparseable body,
 // or an empty embeddings array.
 func (o *Ollama) Embed(ctx context.Context, text string) (Result, error) {
+	text = truncateForEmbed(text)
 	body, err := json.Marshal(ollamaEmbedRequest{Model: o.model, Input: text})
 	if err != nil {
 		return Result{}, fmt.Errorf("embed: marshal: %w", err)
