@@ -77,6 +77,7 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		busy := h.otto.busy
 		inflight := h.otto.currentPrompt
 		lastEvent := h.otto.lastEvent
+		lastModel := h.otto.lastModel
 		h.otto.mu.Unlock()
 
 		state := "idle"
@@ -89,8 +90,8 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 			state = fmt.Sprintf("BUSY (silence=%s) on: %q", silence, preview)
 		}
 		return commandResult{
-			reply: fmt.Sprintf("uptime=%s\nstate=%s\nsession=%s",
-				time.Since(h.startedAt).Round(time.Second), state, sid),
+			reply: fmt.Sprintf("uptime=%s\nstate=%s\nmodel=%s\nsession=%s",
+				time.Since(h.startedAt).Round(time.Second), state, modelLabel(lastModel), sid),
 			handled: true,
 		}
 	}

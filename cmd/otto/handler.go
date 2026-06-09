@@ -42,6 +42,12 @@ type handler struct {
 	updater *updater
 	pets    *petRegistry // routes name-addressed messages to Toto/Toot/etc.
 
+	// classifier picks Otto's per-turn model (Sonnet for chat, Opus for
+	// coding). Nil disables routing — Otto then inherits Claude Code's
+	// default model. Set in production by main; left nil by tests that
+	// don't exercise routing.
+	classifier modelClassifier
+
 	rotate rotateConfig // session-rotation thresholds (zero value disables)
 
 	mem              *memory.Core   // injected into every Otto prompt; nil disables
@@ -84,6 +90,7 @@ type ottoState struct {
 
 	lastInputTokens int       // ContextTokens (input+cache) of the most recent Otto turn
 	lastUserMsg     time.Time // time of the most recent user message (idle calc)
+	lastModel       string    // model id chosen for the most recent Otto turn ("" = inherited)
 }
 
 // snippetCap bounds how many tail bytes of Otto's stream we expose to
@@ -169,6 +176,14 @@ func (s *ottoState) setInputTokens(n int) {
 func (s *ottoState) resetInputTokens() {
 	s.mu.Lock()
 	s.lastInputTokens = 0
+	s.mu.Unlock()
+}
+
+// setModel records the model id chosen for the current Otto turn so /status
+// can report which tier (Sonnet/Opus) the last message ran on.
+func (s *ottoState) setModel(m string) {
+	s.mu.Lock()
+	s.lastModel = m
 	s.mu.Unlock()
 }
 
@@ -428,10 +443,21 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 		imagePaths = append(imagePaths, path)
 	}
 
+	// Route to a model: Sonnet for ordinary chat, Opus for coding tasks.
+	// Empty (no classifier) means inherit Claude Code's default. The classify
+	// call runs while Otto already holds the slot, so a concurrent message
+	// still falls back to Toto rather than waiting on the router.
+	model := ""
+	if h.classifier != nil {
+		model = h.classifier.classify(ctx, u.Text)
+	}
+	h.otto.setModel(model)
+
 	h.runAndReply(callCtx, ctx, u.ChatID, claude.RunArgs{
 		Prompt:             u.Text,
 		SessionID:          h.session.ID(),
 		ImagePaths:         imagePaths,
+		Model:              model,
 		AppendSystemPrompt: composePromptWithTimeAndMemory(h.baseSystemPrompt, h.mem),
 	})
 }

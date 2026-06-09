@@ -179,6 +179,9 @@ func main() {
 		// Pet registry — addressed messages route here before Otto.
 		// Adding a new pet later: implement Pet, append to this list.
 		pets: newPetRegistry(toto, toot),
+		// Per-turn model router: Sonnet for chat, Opus for coding tasks.
+		// A cheap Haiku one-shot decides; failures fall back to Sonnet.
+		classifier: &execClassifier{binary: cfg.ClaudeBinaryPath, workDir: home},
 	}
 
 	h.rotate = rotateConfig{
