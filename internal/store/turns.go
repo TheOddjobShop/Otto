@@ -70,6 +70,36 @@ func (s *Store) SearchFTS(ctx context.Context, query string, limit int) ([]Turn,
 	return out, rows.Err()
 }
 
+// PruneTurns deletes the oldest turns beyond the keep most-recent rows,
+// returning the count of rows removed. A keep value ≤ 0 is a no-op.
+//
+// The DELETE fires the turns_ad trigger (added alongside turns_ai) which
+// removes the corresponding FTS5 entries so keyword search never returns
+// ghost results for pruned turns. The vectors → turns ON DELETE CASCADE
+// foreign key removes the matching embedding rows automatically, so a single
+// PruneTurns call keeps all three tables (turns, turns_fts, vectors) in sync
+// without additional bookkeeping.
+//
+// PruneTurns is safe to call from a background goroutine while the main
+// message loop is running; the WAL journal allows concurrent readers.
+func (s *Store) PruneTurns(ctx context.Context, keep int) (int64, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM turns WHERE id NOT IN (
+			SELECT id FROM turns ORDER BY id DESC LIMIT ?
+		)`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune turns: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune turns: rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // ftsPhrase converts a raw user query into a safe FTS5 MATCH expression.
 // Each whitespace-separated token becomes its own quoted phrase (with embedded
 // double quotes doubled, FTS5's escape), and the tokens are OR-ed together.

@@ -186,23 +186,30 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 	defer t.mu.Unlock()
 	t.lastActive = time.Now()
 
-	systemPrompt := t.persona
+	// Build the per-call system prompt with a strings.Builder to avoid the
+	// quadratic allocation behaviour of repeated += on a growing string.
+	// Each += copies all accumulated bytes so far; with ~40 concatenations
+	// and a ~3 KB result the savings are modest but the pattern is correct.
+	var sp strings.Builder
+	sp.Grow(4096)
+	sp.WriteString(t.persona)
 	if bc != nil {
-		systemPrompt += "\n\n" + busPromptBlock(*bc, "toot")
+		sp.WriteString("\n\n")
+		sp.WriteString(busPromptBlock(*bc, "toot"))
 	}
-	systemPrompt += "\n\n───────────────────────────────────────────────\n"
-	systemPrompt += "THE USER ADDRESSED YOU DIRECTLY (CHAT MODE).\n"
-	systemPrompt += "───────────────────────────────────────────────\n\n"
-	systemPrompt += "This is not a release announcement. They want to talk to YOU. Stay in your voice — dutiful, formal-ish, dryly nerdy — but engage. You may discuss Otto, Toto, releases, your job, whatever they bring up. Decline tool requests politely (you only talk). Keep replies brief; phone-screen friendly."
+	sp.WriteString("\n\n───────────────────────────────────────────────\n")
+	sp.WriteString("THE USER ADDRESSED YOU DIRECTLY (CHAT MODE).\n")
+	sp.WriteString("───────────────────────────────────────────────\n\n")
+	sp.WriteString("This is not a release announcement. They want to talk to YOU. Stay in your voice — dutiful, formal-ish, dryly nerdy — but engage. You may discuss Otto, Toto, releases, your job, whatever they bring up. Decline tool requests politely (you only talk). Keep replies brief; phone-screen friendly.")
 
 	// Running version — so "what version are we on?" gets a real answer
 	// instead of a "check git yourself" deflection.
 	if t.version != "" {
-		systemPrompt += "\n\n───────────────────────────────────────────────\n"
-		systemPrompt += "CURRENT OTTO VERSION (this running build):\n"
-		systemPrompt += "───────────────────────────────────────────────\n\n"
-		systemPrompt += t.version
-		systemPrompt += "\n\nIf asked what version is running, answer with this directly. If the user asks whether they're up to date, compare against the pending-update tag below (if any) or say there's no pending release."
+		sp.WriteString("\n\n───────────────────────────────────────────────\n")
+		sp.WriteString("CURRENT OTTO VERSION (this running build):\n")
+		sp.WriteString("───────────────────────────────────────────────\n\n")
+		sp.WriteString(t.version)
+		sp.WriteString("\n\nIf asked what version is running, answer with this directly. If the user asks whether they're up to date, compare against the pending-update tag below (if any) or say there's no pending release.")
 	}
 
 	// Inject the install_update tool when a release is pending. Framing
@@ -211,51 +218,53 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 	// update", "would you mind installing", etc.) rather than only
 	// matching the literal example wordings.
 	if t.pendingUpdate != nil || t.checkNow != nil {
-		systemPrompt += "\n\n───────────────────────────────────────────────\n"
-		systemPrompt += "TOOLS AVAILABLE TO YOU\n"
-		systemPrompt += "───────────────────────────────────────────────\n\n"
+		sp.WriteString("\n\n───────────────────────────────────────────────\n")
+		sp.WriteString("TOOLS AVAILABLE TO YOU\n")
+		sp.WriteString("───────────────────────────────────────────────\n\n")
 	}
 	if t.pendingUpdate != nil {
 		if p := t.pendingUpdate(); p != nil {
-			systemPrompt += fmt.Sprintf("install_update — installs the pending release (%s).\n\n", p.Tag)
-			systemPrompt += "To call this tool, end your reply with the literal marker on its own line:\n\n  "
-			systemPrompt += tootUpdateMarker
-			systemPrompt += "\n\nThe marker is invisible to the user — the system strips it and starts the install. After install completes, the standard \"Installed v…, restarting\" confirmation appears.\n\n"
-			systemPrompt += "WHEN TO CALL install_update\n\n"
-			systemPrompt += "Use your judgment. If the user's message is *any reasonable form* of asking you to install — direct, polite, colloquial, terse — call the tool. Don't be overly literal:\n\n"
-			systemPrompt += "  - \"do it\" / \"update\" / \"install\" / \"go ahead\"\n"
-			systemPrompt += "  - \"can you update?\" / \"could you install?\" / \"would you mind?\"\n"
-			systemPrompt += "  - \"hey toot can you update\" / \"toot please install\"\n"
-			systemPrompt += "  - \"yeah do it\" / \"fire it up\" / \"ship it\" / \"send it\"\n"
-			systemPrompt += "  - \"yes\" or \"sure\" when you've already brought up the install\n\n"
-			systemPrompt += "Trust your read of the conversation. If it sounds like a yes, it's a yes.\n\n"
-			systemPrompt += "DO NOT call install_update for:\n\n"
-			systemPrompt += "  - questions about what changed (\"what's in this release?\")\n"
-			systemPrompt += "  - status checks (\"is there an update?\", \"do we need one?\")\n"
-			systemPrompt += "  - speculation (\"should I update?\", \"is it worth it?\")\n"
-			systemPrompt += "  - hesitation (\"maybe later\", \"idk\")\n\n"
-			systemPrompt += "If you're genuinely uncertain whether they're asking, reply with one short clarifying question (\"Confirm: install " + p.Tag + " now, sir?\") and DON'T call the tool. The user will need to address you again with their answer.\n\n"
-			systemPrompt += "When you DO call the tool, phrase your reply as though you're personally seeing the install through (\"Initiating install of " + p.Tag + ", sir. Stand by.\"). Stay in your voice.\n\n"
+			fmt.Fprintf(&sp, "install_update — installs the pending release (%s).\n\n", p.Tag)
+			sp.WriteString("To call this tool, end your reply with the literal marker on its own line:\n\n  ")
+			sp.WriteString(tootUpdateMarker)
+			sp.WriteString("\n\nThe marker is invisible to the user — the system strips it and starts the install. After install completes, the standard \"Installed v…, restarting\" confirmation appears.\n\n")
+			sp.WriteString("WHEN TO CALL install_update\n\n")
+			sp.WriteString("Use your judgment. If the user's message is *any reasonable form* of asking you to install — direct, polite, colloquial, terse — call the tool. Don't be overly literal:\n\n")
+			sp.WriteString("  - \"do it\" / \"update\" / \"install\" / \"go ahead\"\n")
+			sp.WriteString("  - \"can you update?\" / \"could you install?\" / \"would you mind?\"\n")
+			sp.WriteString("  - \"hey toot can you update\" / \"toot please install\"\n")
+			sp.WriteString("  - \"yeah do it\" / \"fire it up\" / \"ship it\" / \"send it\"\n")
+			sp.WriteString("  - \"yes\" or \"sure\" when you've already brought up the install\n\n")
+			sp.WriteString("Trust your read of the conversation. If it sounds like a yes, it's a yes.\n\n")
+			sp.WriteString("DO NOT call install_update for:\n\n")
+			sp.WriteString("  - questions about what changed (\"what's in this release?\")\n")
+			sp.WriteString("  - status checks (\"is there an update?\", \"do we need one?\")\n")
+			sp.WriteString("  - speculation (\"should I update?\", \"is it worth it?\")\n")
+			sp.WriteString("  - hesitation (\"maybe later\", \"idk\")\n\n")
+			fmt.Fprintf(&sp, "If you're genuinely uncertain whether they're asking, reply with one short clarifying question (\"Confirm: install %s now, sir?\") and DON'T call the tool. The user will need to address you again with their answer.\n\n", p.Tag)
+			fmt.Fprintf(&sp, "When you DO call the tool, phrase your reply as though you're personally seeing the install through (\"Initiating install of %s, sir. Stand by.\"). Stay in your voice.\n\n", p.Tag)
 		} else if t.checkNow == nil {
 			// No pending update AND no on-demand check tool available — the
 			// user has no install path to offer. Tell Toot to deflect.
-			systemPrompt += "(no tools available right now — there's no pending update.)\n\nIf the user asks you to install something, explain politely that there's nothing to install — Otto is on the latest version.\n\n"
+			sp.WriteString("(no tools available right now — there's no pending update.)\n\nIf the user asks you to install something, explain politely that there's nothing to install — Otto is on the latest version.\n\n")
 		}
 	}
 	if t.checkNow != nil {
-		systemPrompt += "check_for_update — runs an immediate release poll right now.\n\n"
-		systemPrompt += "To call this tool, end your reply with the literal marker on its own line:\n\n  "
-		systemPrompt += tootCheckMarker
-		systemPrompt += "\n\nThe marker is invisible to the user — the system polls GitHub and appends a one-line result to your message (\"Update found: vX.Y.Z.\" or \"Up to date as of HH:MM.\").\n\n"
-		systemPrompt += "WHEN TO CALL check_for_update\n\n"
-		systemPrompt += "  - User asks any form of \"check for updates\", \"is there a new release\", \"anything new on github\", \"see if there's a patch\".\n"
-		systemPrompt += "  - User pings you out of curiosity (\"yo what's the latest\", \"any new version?\") — call it.\n\n"
-		systemPrompt += "If the user ALSO wants you to install whatever comes back (\"check and install\", \"if there's one, do it\", \"yes and update if found\"), end your reply with BOTH markers, each on its own line:\n\n  "
-		systemPrompt += tootCheckMarker + "\n  " + tootUpdateMarker
-		systemPrompt += "\n\nIf the check returns nothing, " + tootUpdateMarker + " safely no-ops."
+		sp.WriteString("check_for_update — runs an immediate release poll right now.\n\n")
+		sp.WriteString("To call this tool, end your reply with the literal marker on its own line:\n\n  ")
+		sp.WriteString(tootCheckMarker)
+		sp.WriteString("\n\nThe marker is invisible to the user — the system polls GitHub and appends a one-line result to your message (\"Update found: vX.Y.Z.\" or \"Up to date as of HH:MM.\").\n\n")
+		sp.WriteString("WHEN TO CALL check_for_update\n\n")
+		sp.WriteString("  - User asks any form of \"check for updates\", \"is there a new release\", \"anything new on github\", \"see if there's a patch\".\n")
+		sp.WriteString("  - User pings you out of curiosity (\"yo what's the latest\", \"any new version?\") — call it.\n\n")
+		sp.WriteString("If the user ALSO wants you to install whatever comes back (\"check and install\", \"if there's one, do it\", \"yes and update if found\"), end your reply with BOTH markers, each on its own line:\n\n  ")
+		sp.WriteString(tootCheckMarker)
+		sp.WriteString("\n  ")
+		sp.WriteString(tootUpdateMarker)
+		fmt.Fprintf(&sp, "\n\nIf the check returns nothing, %s safely no-ops.", tootUpdateMarker)
 	}
 
-	systemPrompt = composePromptWithTimeAndMemory(systemPrompt, t.mem)
+	systemPrompt := composePromptWithTimeAndMemory(sp.String(), t.mem)
 
 	prompt := userMessage
 	if prompt == "" {

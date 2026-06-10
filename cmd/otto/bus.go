@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"otto/internal/claude"
 	"otto/internal/store"
 	"otto/internal/telegram"
 )
@@ -46,7 +47,16 @@ func (h *handler) runBusDrain(ctx context.Context) {
 			continue
 		}
 		for _, m := range msgs {
-			h.dispatchBusMessage(ctx, m)
+			// Track each bus dispatch in dispatchWG so WaitDispatches()
+			// covers both the Telegram-path goroutines and bus-sourced
+			// turns. Without this, main()'s shutdown sequence can exit
+			// while a bus turn is inside runAndReply — after runner.Run()
+			// returns but before session.Set and logTurn complete.
+			h.dispatchWG.Add(1)
+			go func(m store.InboxMsg) {
+				defer h.dispatchWG.Done()
+				h.dispatchBusMessage(ctx, m)
+			}(m)
 		}
 	}
 }
@@ -136,19 +146,47 @@ func (h *handler) dispatchBusToOtto(ctx context.Context, chatID int64, m store.I
 // correctly, and it composes a per-call system prompt that includes
 // BUS CONTEXT + HOPS REMAINING so Otto knows to call message_<sender>
 // to keep the loop alive (or to wind down when hops remaining hits 0).
+//
+// The scoped runner and composed system prompt are built locally and
+// passed explicitly to handleBusMessage so no shared handler fields are
+// mutated. Mutating h.runner / h.baseSystemPrompt via a save/restore
+// defer would work today (both readers go through the otto slot), but
+// the implicit happens-before is fragile: any future code path that
+// reads those fields outside the slot-protected region would silently
+// introduce a data race that the Go race detector cannot catch.
 func (h *handler) handleBusOttoMessage(ctx context.Context, u telegram.Update, bc busContext) {
-	prevRunner := h.runner
 	// "otto" is the receiver; for outbound enqueues by Otto's tools the
 	// sender is Otto.
-	scoped := prevRunner.WithEnv(busEnv(bc.Hop, "otto"))
-	h.runner = scoped
-	defer func() { h.runner = prevRunner }()
+	scopedRunner := h.runner.WithEnv(busEnv(bc.Hop, "otto"))
+	extraPrompt := "\n\n" + busPromptBlock(bc, "otto")
+	h.handleBusMessage(ctx, u, scopedRunner, extraPrompt)
+}
 
-	prevPrompt := h.baseSystemPrompt
-	h.baseSystemPrompt = prevPrompt + "\n\n" + busPromptBlock(bc, "otto")
-	defer func() { h.baseSystemPrompt = prevPrompt }()
+// handleBusMessage is the concrete Otto-turn runner used by the agent-
+// bus path. It accepts a scoped runner and an extra system-prompt suffix
+// so the bus-OttoMessage path can inject per-hop context without
+// touching the shared h.runner or h.baseSystemPrompt fields.
+func (h *handler) handleBusMessage(ctx context.Context, u telegram.Update, scopedRunner claude.Runner, extraPrompt string) {
+	callCtx, cancel := context.WithCancel(ctx)
+	h.otto.setCancel(cancel)
+	defer cancel()
 
-	h.handleMessage(ctx, u)
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	go h.runWatchdog(ctx, u.ChatID, watchdogDone)
+
+	model := ""
+	if h.classifier != nil {
+		model = h.classifier.classify(ctx, u.Text)
+	}
+	h.otto.setModel(model)
+
+	h.runAndReply(callCtx, ctx, u.ChatID, claude.RunArgs{
+		Prompt:             u.Text,
+		SessionID:          h.session.ID(),
+		Model:              model,
+		AppendSystemPrompt: composePromptWithTimeAndMemory(h.baseSystemPrompt+extraPrompt, h.mem),
+	}, scopedRunner)
 }
 
 // busContext is the immutable view of a bus row that the per-call prompt

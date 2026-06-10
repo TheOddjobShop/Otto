@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -123,8 +124,9 @@ func main() {
 	}
 
 	// Toot mirrors Toto's wiring: own runner with no MCP, own session,
-	// own persona file. Per-call --model and --effort and
-	// --disallowedTools are set inside Toot.Announce.
+	// own persona file. Per-call --model, --effort, and --allowedTools
+	// are set inside Toot.reply (chat mode); --disallowedTools "*" is
+	// set inside Toot.Announce (announcement mode, all tools blocked).
 	tootPersona, err := readTootPersona(cfg.TootPersonaPath)
 	if err != nil {
 		log.Fatalf("toot persona: %v", err)
@@ -216,13 +218,25 @@ func main() {
 	toot.checkNow = h.updater.CheckNow
 
 	go h.updater.Run(ctx)
-	// Bus drain reads inbox rows and dispatches them. Otto's
-	// message_toto / message_toot tools (in otto-memory) rely on Otto's
-	// mcp.json already exposing the "otto-memory" server entry — setup.sh
-	// writes that entry, so no wiring is needed here. If a user's mcp.json
-	// somehow lacks it, that's a config issue (the tools simply won't
-	// appear in Otto's tool list); no code change makes them work.
-	go h.runBusDrain(ctx)
+
+	// busDrainWG tracks the runBusDrain goroutine so the shutdown sequence
+	// can wait for it to exit before memStore.Close() fires. runBusDrain
+	// calls store.DequeueAll and (via dispatchBusMessage → logTurn) also
+	// store.AppendTurn; closing the store while the goroutine is mid-call
+	// would corrupt in-flight writes. runRotator and runUpdater do NOT
+	// touch memStore directly, so they do not need the same tracking.
+	var busDrainWG sync.WaitGroup
+	busDrainWG.Add(1)
+	go func() {
+		defer busDrainWG.Done()
+		// Bus drain reads inbox rows and dispatches them. Otto's
+		// message_toto / message_toot tools (in otto-memory) rely on Otto's
+		// mcp.json already exposing the "otto-memory" server entry — setup.sh
+		// writes that entry, so no wiring is needed here. If a user's mcp.json
+		// somehow lacks it, that's a config issue (the tools simply won't
+		// appear in Otto's tool list); no code change makes them work.
+		h.runBusDrain(ctx)
+	}()
 	go h.runRotator(ctx)
 
 	sigs := make(chan os.Signal, 1)
@@ -241,37 +255,40 @@ func main() {
 	// Drain in-flight dispatches so Otto/Toto goroutines get a chance to
 	// finish their Telegram replies before the process exits.
 	h.WaitDispatches()
+	// Cancel the context if the signal handler has not already done so,
+	// then wait for runBusDrain to exit before memStore.Close() fires.
+	// runBusDrain calls DequeueAll and (via logTurn) AppendTurn; closing
+	// the store while it is mid-call would corrupt in-flight writes.
+	cancel()
+	busDrainWG.Wait()
+	// runBusDrain's final iteration may have spawned dispatch goroutines
+	// after the WaitDispatches above returned; wait again so no bus turn
+	// is still writing to the store when the deferred Close fires.
+	h.WaitDispatches()
 	log.Printf("otto: stopped")
 }
 
-// readTotoPersona returns the contents of the Toto persona file, or empty
-// string if the path is empty (Toto runs with Claude Code's defaults).
+// readPersonaFile returns the contents of a persona file, or empty string
+// if the path is empty (the persona runs with Claude Code's defaults).
 // A missing-but-configured file is a hard error so misconfiguration is
-// noisy at startup rather than silently disabling Toto's character.
-func readTotoPersona(path string) (string, error) {
+// noisy at startup rather than silently disabling the character. name is
+// used only in the error message (e.g. "toto", "toot").
+func readPersonaFile(path, name string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read toto persona %s: %w", path, err)
+		return "", fmt.Errorf("read %s persona %s: %w", name, path, err)
 	}
 	return strings.TrimRight(string(body), "\n"), nil
 }
 
-// readTootPersona is the Toot equivalent of readTotoPersona. Empty path
-// means run without an appended persona; missing-but-configured is a
-// hard error.
-func readTootPersona(path string) (string, error) {
-	if path == "" {
-		return "", nil
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read toot persona %s: %w", path, err)
-	}
-	return strings.TrimRight(string(body), "\n"), nil
-}
+// readTotoPersona wraps readPersonaFile for the Toto character.
+func readTotoPersona(path string) (string, error) { return readPersonaFile(path, "toto") }
+
+// readTootPersona wraps readPersonaFile for the Toot character.
+func readTootPersona(path string) (string, error) { return readPersonaFile(path, "toot") }
 
 func defaultConfigPath() string {
 	home, err := os.UserHomeDir()

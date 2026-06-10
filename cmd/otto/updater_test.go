@@ -254,12 +254,13 @@ func TestInstallSuccess(t *testing.T) {
 	bot := &fakeBot{}
 	toot, _ := newTestToot(t, bot, "TEST")
 	u := &updater{
-		httpClient:     server.Client(),
-		toot:           toot,
-		chatID:         42,
-		currentVersion: "v1.0.0",
-		exePath:        func() (string, error) { return exePath, nil },
-		exitFunc:       func() {},
+		httpClient:        server.Client(),
+		toot:              toot,
+		chatID:            42,
+		currentVersion:    "v1.0.0",
+		exePath:           func() (string, error) { return exePath, nil },
+		exitFunc:          func() {},
+		allowAllAssetURLs: true, // httptest server URL; skip GitHub-origin check
 	}
 	u.pending = &pendingUpdate{
 		Tag:       "v1.0.1",
@@ -305,10 +306,11 @@ func TestInstallDownloadFailure(t *testing.T) {
 
 	toot, _ := newTestToot(t, &fakeBot{}, "TEST")
 	u := &updater{
-		httpClient: server.Client(),
-		toot:       toot,
-		exePath:    func() (string, error) { return exePath, nil },
-		exitFunc:   func() {},
+		httpClient:        server.Client(),
+		toot:              toot,
+		exePath:           func() (string, error) { return exePath, nil },
+		exitFunc:          func() {},
+		allowAllAssetURLs: true, // httptest server URL; skip GitHub-origin check
 	}
 	u.pending = &pendingUpdate{Tag: "v1.0.1", AssetURL: server.URL}
 
@@ -472,11 +474,12 @@ func TestInstallConcurrentReturnsBusy(t *testing.T) {
 	bot := &fakeBot{}
 	toot, _ := newTestToot(t, bot, "TEST")
 	u := &updater{
-		httpClient: server.Client(),
-		toot:       toot,
-		chatID:     42,
-		exePath:    func() (string, error) { return exePath, nil },
-		exitFunc:   func() {},
+		httpClient:        server.Client(),
+		toot:              toot,
+		chatID:            42,
+		exePath:           func() (string, error) { return exePath, nil },
+		exitFunc:          func() {},
+		allowAllAssetURLs: true, // httptest server URL; skip GitHub-origin check
 	}
 	u.pending = &pendingUpdate{Tag: "v1.0.1", AssetURL: server.URL}
 

@@ -30,12 +30,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts
 CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
 	INSERT INTO turns_fts(rowid, content) VALUES (new.id, new.content);
 END;
+CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
+	INSERT INTO turns_fts(turns_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS turns_au AFTER UPDATE ON turns BEGIN
+	INSERT INTO turns_fts(turns_fts, rowid, content) VALUES ('delete', old.id, old.content);
+	INSERT INTO turns_fts(rowid, content) VALUES (new.id, new.content);
+END;
 CREATE TABLE IF NOT EXISTS vectors (
 	turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
 	model   TEXT    NOT NULL,
 	dim     INTEGER NOT NULL,
 	vec     BLOB    NOT NULL
 );
+CREATE INDEX IF NOT EXISTS vectors_dim ON vectors(dim);
 CREATE TABLE IF NOT EXISTS inbox (
 	id        INTEGER PRIMARY KEY AUTOINCREMENT,
 	ts        TEXT    NOT NULL,

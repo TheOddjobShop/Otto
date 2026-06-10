@@ -18,7 +18,13 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`ssh-(rsa|ed25519) AAAA[0-9A-Za-z+/]+`),
 }
 
-// injectionPatterns match common prompt-injection phrasings.
+// injectionPatterns match a small, illustrative sample of prompt-injection
+// phrasings. This blocklist is intentionally incomplete — it is trivially
+// bypassed by alternative wording (e.g. "forget your earlier instructions") or
+// Unicode homoglyphs. For this single-owner bot the practical threat is low
+// (only the trusted owner's Claude session writes memory), but callers should
+// not treat a clean scan as a security guarantee. A future improvement could
+// use an embedding-based classifier or a more comprehensive pattern set.
 var injectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)ignore (all )?previous instructions`),
 	regexp.MustCompile(`(?i)disregard (the )?(system )?prompt`),

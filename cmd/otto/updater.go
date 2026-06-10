@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -91,6 +92,10 @@ type updater struct {
 	exePath       func() (string, error)
 	exitFunc      func()
 	forceExitFunc func(int)
+
+	// allowAllAssetURLs disables the GitHub CDN origin allowlist. Set only
+	// in tests that use local httptest servers; production leaves it false.
+	allowAllAssetURLs bool
 }
 
 // forceExitGrace bounds how long Exit waits after sending SIGTERM before
@@ -137,7 +142,10 @@ func (u *updater) fetchLatest(ctx context.Context) (release, error) {
 func assetForPlatform(assets []releaseAsset, goos, goarch string) (releaseAsset, bool) {
 	suffix := "-" + goos + "-" + goarch
 	for _, a := range assets {
-		if len(a.Name) > len(suffix) && a.Name[len(a.Name)-len(suffix):] == suffix {
+		// strings.HasSuffix for readable intent; the len guard requires a
+		// non-empty prefix (e.g. "otto-") so a bare suffix like
+		// "-darwin-arm64" is not accidentally matched.
+		if strings.HasSuffix(a.Name, suffix) && len(a.Name) > len(suffix) {
 			return a, true
 		}
 	}
@@ -303,12 +311,14 @@ func (u *updater) Install(ctx context.Context) error {
 		u.mu.Unlock()
 	}()
 
-	body, err := u.download(ctx, p.AssetURL)
-	if err != nil {
-		return fmt.Errorf("install: download: %w", err)
-	}
-	if len(body) == 0 {
-		return fmt.Errorf("install: empty asset")
+	// Validate the asset URL before fetching it. GitHub's browser_download_url
+	// values always start with one of these two prefixes. Rejecting anything
+	// else stops redirect-based attacks and spoofed JSON responses from
+	// causing the bot to fetch and execute a binary from an arbitrary server.
+	// allowAllAssetURLs is only true in tests that substitute a local
+	// httptest server; production always runs with it false.
+	if !u.allowAllAssetURLs && !isAllowedAssetURL(p.AssetURL) {
+		return fmt.Errorf("install: asset URL %q does not start with an allowed GitHub prefix", p.AssetURL)
 	}
 
 	exe, err := u.resolveExePath()
@@ -326,10 +336,38 @@ func (u *updater) Install(ctx context.Context) error {
 	}
 
 	// tmp lives in the same directory as exe so os.Rename is atomic
-	// (same filesystem). Don't move this to /tmp without revisiting.
-	tmp := exe + ".new"
-	if err := os.WriteFile(tmp, body, mode); err != nil {
-		return fmt.Errorf("install: write %s: %w", tmp, err)
+	// (same filesystem). os.CreateTemp gives an unpredictable name,
+	// eliminating the TOCTOU window that a fixed ".new" suffix leaves
+	// open on a multi-user system where another process could substitute
+	// a different binary in the gap between WriteFile and Rename.
+	//
+	// The temp file is created before the download so we can stream
+	// the response body directly into it rather than buffering the
+	// entire binary (~10 MB) as a []byte. This keeps the transient
+	// RSS spike near zero regardless of binary size.
+	f, err := os.CreateTemp(filepath.Dir(exe), ".otto-update-*.new")
+	if err != nil {
+		return fmt.Errorf("install: create temp: %w", err)
+	}
+	tmp := f.Name()
+	written, err := u.download(ctx, p.AssetURL, f)
+	if err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("install: download: %w", err)
+	}
+	if written == 0 {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("install: empty asset")
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("install: close %s: %w", tmp, err)
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("install: chmod %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, exe); err != nil {
 		os.Remove(tmp)
@@ -361,24 +399,46 @@ func (u *updater) Install(ctx context.Context) error {
 	return nil
 }
 
-// download fetches a binary asset into memory. 5-minute timeout. The
-// 100MB cap is paranoia — Otto binaries are ~10MB.
-func (u *updater) download(ctx context.Context, url string) ([]byte, error) {
+// allowedAssetPrefixes is the exhaustive list of URL origins we will fetch
+// a binary from. GitHub's browser_download_url field always starts with one
+// of these; rejecting anything else prevents a compromised or spoofed JSON
+// response from redirecting the download to an attacker-controlled server.
+var allowedAssetPrefixes = []string{
+	"https://github.com/",
+	"https://objects.githubusercontent.com/",
+}
+
+// isAllowedAssetURL reports whether url begins with a known GitHub CDN
+// prefix. Called before every download to enforce the origin allowlist.
+func isAllowedAssetURL(url string) bool {
+	for _, prefix := range allowedAssetPrefixes {
+		if strings.HasPrefix(url, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// download streams a binary asset from url into dst. 5-minute timeout.
+// The 100 MB cap on LimitReader is paranoia — Otto binaries are ~10 MB.
+// Returns the number of bytes written; a non-nil error means the download
+// or write failed and dst should be discarded.
+func (u *updater) download(ctx context.Context, url string, dst io.Writer) (int64, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		return 0, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 100*1024*1024))
+	return io.Copy(dst, io.LimitReader(resp.Body, 100<<20))
 }
 
 // resolveExePath returns the absolute, symlink-resolved path of the

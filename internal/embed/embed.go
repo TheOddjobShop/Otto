@@ -44,5 +44,5 @@ func Cosine(a, b []float32) float64 {
 	if na == 0 || nb == 0 {
 		return 0
 	}
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+	return dot / math.Sqrt(na*nb)
 }

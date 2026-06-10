@@ -52,6 +52,22 @@ func TestSchemaHasVectorsTable(t *testing.T) {
 	}
 }
 
+// TestSchemaHasVectorsDimIndex confirms the vectors_dim index is present so
+// SearchSemantic's WHERE v.dim = ? predicate hits an index rather than doing
+// a full table scan.
+func TestSchemaHasVectorsDimIndex(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	var name string
+	err = s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name = 'vectors_dim'`).Scan(&name)
+	if err != nil {
+		t.Fatalf("vectors_dim index missing: %v", err)
+	}
+}
+
 func seedTurnWithVector(t *testing.T, s *Store, ctx context.Context, content string, vec []float32) {
 	t.Helper()
 	id, err := s.AppendTurn(ctx, "otto", "assistant", content)

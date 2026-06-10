@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,5 +211,61 @@ func TestLogTurnWithEmbedderStillLogsTurn(t *testing.T) {
 	logTurn(ctx, st, fakeEmbedder{vec: []float32{1, 0}}, "otto", "user", "hello tokyo")
 	if got, _ := st.SearchFTS(ctx, "tokyo", 5); len(got) == 0 {
 		t.Fatal("turn not logged")
+	}
+}
+
+// serialEmbedder records whether two Embed calls overlapped in time, which
+// would indicate the embedSem serialization is broken.
+type serialEmbedder struct {
+	mu      sync.Mutex
+	active  atomic.Int32 // count of goroutines currently inside Embed
+	overlap bool         // set if >1 was ever active simultaneously
+	vec     []float32
+}
+
+func (s *serialEmbedder) Embed(ctx context.Context, text string) (embed.Result, error) {
+	if s.active.Add(1) > 1 {
+		s.mu.Lock()
+		s.overlap = true
+		s.mu.Unlock()
+	}
+	time.Sleep(10 * time.Millisecond) // hold long enough for a concurrent call to enter
+	s.active.Add(-1)
+	return embed.Result{Vector: s.vec, Model: "serial"}, nil
+}
+func (s *serialEmbedder) Name() string { return "serial" }
+
+// TestEmbedAndStoreSerializesCallers verifies that two concurrent embedAndStore
+// invocations do not overlap inside the embedder: the semaphore channel ensures
+// only one embed runs at a time, preventing request pile-ups onto Ollama during
+// a cold model load (which is exactly when the machine is busiest).
+//
+// The test uses embedAndStoreWithSem with a freshly-allocated semaphore so it
+// is isolated from the package-level embedSem and from goroutines spawned by
+// other tests (e.g. logTurn's detached goroutines).
+func TestEmbedAndStoreSerializesCallers(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	id1, _ := st.AppendTurn(ctx, "otto", "user", "turn one")
+	id2, _ := st.AppendTurn(ctx, "otto", "assistant", "turn two")
+
+	emb := &serialEmbedder{vec: []float32{1, 0}}
+	// A fresh sem guarantees this test is not affected by (or affecting) any
+	// goroutine that holds the package-level embedSem.
+	sem := make(chan struct{}, 1)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); embedAndStoreWithSem(st, emb, id1, "turn one", sem) }()
+	go func() { defer wg.Done(); embedAndStoreWithSem(st, emb, id2, "turn two", sem) }()
+	wg.Wait()
+
+	if emb.overlap {
+		t.Error("embedAndStore calls overlapped inside the embedder — semaphore serialization is broken")
 	}
 }

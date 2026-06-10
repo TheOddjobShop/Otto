@@ -41,6 +41,30 @@ func TestOllamaEmbedParsesVector(t *testing.T) {
 	}
 }
 
+// TestOllamaEmbedSendsKeepAlive verifies that every embed request includes
+// keep_alive so Ollama retains the model in memory between turns, avoiding
+// the ~1–14s cold-load penalty after the default 5-minute idle eviction.
+func TestOllamaEmbedSendsKeepAlive(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		io.WriteString(w, `{"model":"m","embeddings":[[0.1]]}`)
+	}))
+	defer srv.Close()
+
+	o := NewOllama(srv.URL, "m")
+	if _, err := o.Embed(context.Background(), "hello"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if !strings.Contains(gotBody, `"keep_alive"`) {
+		t.Errorf("request body missing keep_alive field: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"2h"`) {
+		t.Errorf("keep_alive value should be \"2h\": %s", gotBody)
+	}
+}
+
 func TestTruncateForEmbed(t *testing.T) {
 	if got := truncateForEmbed("short"); got != "short" {
 		t.Errorf("short input changed: %q", got)

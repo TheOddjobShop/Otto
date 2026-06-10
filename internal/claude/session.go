@@ -47,9 +47,6 @@ func (s *Session) ID() string {
 	return s.id
 }
 
-// Path returns the on-disk location of the session ID file.
-func (s *Session) Path() string { return s.path }
-
 // Set persists a session ID. No-op if id matches the current value.
 func (s *Session) Set(id string) error {
 	s.mu.Lock()

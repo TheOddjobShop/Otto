@@ -144,7 +144,7 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 	}
 
 	var out []InboxMsg
-	var ids []int64
+	var maxID int64
 	for rows.Next() {
 		var m InboxMsg
 		var ts string
@@ -159,7 +159,9 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 			m.TS = parsed
 		}
 		out = append(out, m)
-		ids = append(ids, m.ID)
+		if m.ID > maxID {
+			maxID = m.ID
+		}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -167,21 +169,19 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 	}
 	rows.Close()
 
-	if len(ids) == 0 {
+	if len(out) == 0 {
 		return nil, tx.Commit()
 	}
 
-	// Mark exactly the rows we read as delivered. Using an IN(...) over the
-	// ids we just scanned (rather than a blanket delivered=0 update) avoids
-	// silently flipping rows that arrived between the SELECT and the UPDATE.
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
+	// Mark exactly the rows we read as delivered. The SELECT above fetches
+	// rows in ascending id order with LIMIT, so maxID is the largest id in
+	// this batch and all delivered=0 rows with id <= maxID are exactly the
+	// rows we just scanned. Using an id-range predicate instead of a
+	// variable-length IN(...) list avoids SQLITE_LIMIT_VARIABLE_NUMBER
+	// (999 on older SQLite builds); should inboxDequeueCap ever be raised
+	// above that limit the range form remains correct and safe.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE inbox SET delivered = 1 WHERE id IN (`+placeholders+`)`, args...,
+		`UPDATE inbox SET delivered = 1 WHERE delivered = 0 AND id <= ?`, maxID,
 	); err != nil {
 		return nil, fmt.Errorf("store: inbox dequeue: mark: %w", err)
 	}
@@ -189,4 +189,45 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 		return nil, fmt.Errorf("store: inbox dequeue: commit: %w", err)
 	}
 	return out, nil
+}
+
+// PruneInbox deletes delivered inbox rows whose id is more than keep rows
+// behind the current maximum id, returning the count of rows removed.
+// A keep value ≤ 0 is a no-op.
+//
+// Delivered rows (delivered=1) are functionally dead once the dispatcher has
+// processed them, but without periodic removal they accumulate indefinitely
+// and inflate disk usage and the cost of full-table scans on older SQLite
+// query plans. Undelivered rows (delivered=0) are never touched by this call
+// so in-flight messages are always safe.
+//
+// PruneInbox is safe to call from a background goroutine alongside normal
+// message dispatch; the WAL journal allows concurrent readers and writers.
+func (s *Store) PruneInbox(ctx context.Context, keep int) (int64, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	// Keep the keep most-recent delivered rows; delete the rest. The inner
+	// query uses OFFSET keep-1 to find the id of the oldest row we want to
+	// keep (the keep-th newest in descending order). Every delivered row
+	// with a smaller id is older and can be removed. If there are fewer than
+	// keep delivered rows the sub-select returns no row, the outer DELETE
+	// finds no match, and nothing is deleted.
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM inbox
+		 WHERE delivered = 1
+		   AND id < (
+			   SELECT id FROM inbox
+			   WHERE delivered = 1
+			   ORDER BY id DESC
+			   LIMIT 1 OFFSET ?
+		   )`, keep-1)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune inbox: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune inbox: rows affected: %w", err)
+	}
+	return n, nil
 }

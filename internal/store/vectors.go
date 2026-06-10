@@ -50,6 +50,12 @@ func (s *Store) PutVector(ctx context.Context, turnID int64, model string, vec [
 // vectors with the same dimension as query are considered, so a model swap
 // silently ignores stale-dimension rows until they are re-embedded. A
 // zero-length query returns no rows.
+//
+// To bound memory use the SQL query pre-filters to the most recent
+// limit*10 rows (using the vectors_dim index so the scan is O(matching-dim)
+// rather than O(all vectors)). Oldest rows are excluded from the candidate
+// set; if the corpus grows very large a periodic pruning job (PruneTurns)
+// should be run to keep N bounded and recall quality high.
 func (s *Store) SearchSemantic(ctx context.Context, query []float32, limit int) ([]Turn, error) {
 	if len(query) == 0 {
 		return nil, nil
@@ -57,11 +63,23 @@ func (s *Store) SearchSemantic(ctx context.Context, query []float32, limit int) 
 	if limit <= 0 {
 		limit = 10
 	}
+	// Fetch at most limit*10 candidates ordered by recency. This prevents
+	// unbounded BLOB allocation as the vectors table grows: each BLOB is
+	// 4*dim bytes (~3 KB at 768-dim), and without a cap every search call
+	// would load the entire table into Go memory just to return limit rows.
+	// The 10× multiplier keeps the candidate pool representative enough
+	// that cosine ranking over recent turns remains accurate. Older turns
+	// beyond the window are only excluded if the table has grown large; a
+	// properly-scheduled PruneTurns call keeps N small and removes the
+	// trade-off entirely.
+	candidate := limit * 10
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.persona, t.role, t.content, t.ts, v.vec
 		FROM vectors v
 		JOIN turns t ON t.id = v.turn_id
-		WHERE v.dim = ?`, len(query))
+		WHERE v.dim = ?
+		ORDER BY t.id DESC
+		LIMIT ?`, len(query), candidate)
 	if err != nil {
 		return nil, fmt.Errorf("store: semantic query: %w", err)
 	}

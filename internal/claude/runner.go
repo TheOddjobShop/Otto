@@ -33,7 +33,13 @@ func (t *tailBuf) Write(p []byte) (int, error) {
 	defer t.mu.Unlock()
 	t.buf = append(t.buf, p...)
 	if len(t.buf) > t.cap {
-		t.buf = t.buf[len(t.buf)-t.cap:]
+		// Trim in-place: copy the tail we want to keep to the front of the
+		// slice and reslice to cap. This reuses the existing backing array
+		// rather than letting the sub-slice expression retain a larger
+		// allocation; otherwise every write that crosses the boundary would
+		// hold a backing array up to 2× cap until GC collects it.
+		copy(t.buf, t.buf[len(t.buf)-t.cap:])
+		t.buf = t.buf[:t.cap]
 	}
 	return len(p), nil
 }
@@ -49,14 +55,12 @@ type RunArgs struct {
 	Prompt     string
 	SessionID  string
 	ImagePaths []string // optional; appended to prompt as path references
-	// AllowedTools is forwarded as --allowedTools <csv>. Used by the
-	// permission-button replay path: passing the just-approved tool
-	// pattern here ensures the retry succeeds even if claude hasn't
-	// re-read settings.json.
+	// AllowedTools is forwarded as --allowedTools <csv>. Used by Toto and
+	// Toot to restrict which MCP tools each pet persona may call.
 	AllowedTools []string
-	// DisallowedTools is forwarded as --disallowedTools <csv>. Used by the
-	// Toto fallback to deny everything ("*") so the lightweight assistant
-	// can talk but can't act on the filesystem or call MCP servers.
+	// DisallowedTools is forwarded as --disallowedTools <csv>. Used by
+	// Toot.Announce to deny all tools so the announcement compose call
+	// cannot touch the filesystem or call MCP servers.
 	DisallowedTools []string
 	// Model overrides Claude Code's default model selection (e.g.
 	// "claude-haiku-4-5" for the Toto fallback). Empty = inherit default.
@@ -133,10 +137,6 @@ func (r *execRunner) WithEnv(extra map[string]string) Runner {
 // which runs without any MCP servers).
 func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model, effort string, imagePaths, allowedTools, disallowedTools []string) []string {
 	for _, p := range imagePaths {
-		// Verify exact CLI syntax against the installed Claude Code version
-		// during integration testing; this @path form is the documented
-		// reference syntax at the time of writing.
-		//
 		// The @path syntax is whitespace-delimited, so any space inside
 		// the path would be parsed by claude as a separate token. Skip
 		// such paths defensively — os.MkdirTemp paths shouldn't contain
