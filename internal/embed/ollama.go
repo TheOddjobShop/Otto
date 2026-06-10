@@ -42,13 +42,15 @@ type Ollama struct {
 }
 
 // NewOllama returns an Ollama backend for the given server base URL (e.g.
-// "http://localhost:11434") and model (e.g. "embeddinggemma"). A 30s timeout
-// bounds a hung server so the chain can fall through.
+// "http://localhost:11434") and model (e.g. "embeddinggemma"). The http.Client
+// timeout is set to 90s — comfortably above the per-backend context budget
+// (60s) assigned by Chain.Embed — so the context cancel wins rather than a
+// racing transport-level deadline.
 func NewOllama(baseURL, model string) *Ollama {
 	return &Ollama{
 		baseURL: baseURL,
 		model:   model,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  &http.Client{Timeout: 90 * time.Second},
 	}
 }
 
@@ -56,8 +58,9 @@ func NewOllama(baseURL, model string) *Ollama {
 func (o *Ollama) Name() string { return "ollama:" + o.model }
 
 type ollamaEmbedRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
+	Model     string `json:"model"`
+	Input     string `json:"input"`
+	KeepAlive string `json:"keep_alive"` // e.g. "2h" — prevents cold-load on every turn
 }
 
 type ollamaEmbedResponse struct {
@@ -65,12 +68,15 @@ type ollamaEmbedResponse struct {
 	Embeddings [][]float32 `json:"embeddings"`
 }
 
-// Embed POSTs {model, input} to <baseURL>/api/embed and returns the first
-// embedding. Errors on transport failure, non-200 status, unparseable body,
-// or an empty embeddings array.
+// Embed POSTs {model, input, keep_alive} to <baseURL>/api/embed and returns
+// the first embedding. The keep_alive field tells Ollama to hold the model in
+// memory for 2 hours, avoiding the cold-load (~1–14s) that would otherwise
+// happen after Ollama's default 5-minute idle eviction.
+// Errors on transport failure, non-200 status, unparseable body, or an empty
+// embeddings array.
 func (o *Ollama) Embed(ctx context.Context, text string) (Result, error) {
 	text = truncateForEmbed(text)
-	body, err := json.Marshal(ollamaEmbedRequest{Model: o.model, Input: text})
+	body, err := json.Marshal(ollamaEmbedRequest{Model: o.model, Input: text, KeepAlive: "2h"})
 	if err != nil {
 		return Result{}, fmt.Errorf("embed: marshal: %w", err)
 	}
@@ -88,12 +94,11 @@ func (o *Ollama) Embed(ctx context.Context, text string) (Result, error) {
 	if resp.StatusCode != http.StatusOK {
 		return Result{}, fmt.Errorf("embed: %s: status %d", o.Name(), resp.StatusCode)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
-	if err != nil {
-		return Result{}, fmt.Errorf("embed: read: %w", err)
-	}
+	// Decode the response body as it streams rather than buffering up to 8 MB
+	// into an intermediate []byte — a single embedding vector is a few KB, so
+	// the buffer was never needed. The LimitReader preserves the size guard.
 	var parsed ollamaEmbedResponse
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8*1024*1024)).Decode(&parsed); err != nil {
 		return Result{}, fmt.Errorf("embed: parse: %w", err)
 	}
 	if len(parsed.Embeddings) == 0 || len(parsed.Embeddings[0]) == 0 {

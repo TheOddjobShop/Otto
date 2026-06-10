@@ -1,6 +1,6 @@
 # Otto
 
-Single-user Telegram bot wrapping Claude Code with MCP tools (Notion + Gmail + Google Drive + Google Calendar) **plus a local persistent-memory system** (curated core + semantic recall over conversation history). Runs perpetually as a `systemd --user` service on an Arch Linux home server. Conversation memory survives messages, restarts, and `/new`.
+Single-user Telegram bot wrapping Claude Code with MCP tools (Notion + Gmail + Google Drive + Google Calendar) **plus a local persistent-memory system** (curated core + semantic recall over conversation history). Runs as a `systemd --user` service (Arch Linux) or launchd user agent (macOS). Conversation memory survives messages, restarts, and `/new`.
 
 Design specs:
 
@@ -126,7 +126,7 @@ Otto embeds each turn asynchronously after sending the reply (best-effort, 30 s-
 
 **Semantic embeddings.** Local-only via Ollama at `http://localhost:11434`, ordered chain `embeddinggemma → nomic-embed-text → keyword floor`. Zero per-token cost, fully private. Vectors are tagged with `model` + `dim`, so a model swap silently ignores stale-dimension rows until they get re-embedded.
 
-**Idle-gated session rotation.** Otto tracks `usage.input_tokens` per turn. When the session crosses **50 %** of the model's context window AND you've been quiet for **15 minutes**, a long-lived rotator goroutine claims Otto's slot and clears the session — your next message starts fresh, seeded by the always-injected memory core + retrieved memories. A **85 %** hard cap rotates at the next free moment regardless of idle. Continuity comes from the core (durable facts you've taught Otto) + `session_search` (any past turn). You should rarely need `/new` again.
+**Idle-gated session rotation.** Otto tracks `usage.input_tokens` per turn. A long-lived rotator goroutine clears the session when either of two conditions is met: (a) you have been quiet for **15 minutes** (idle reset — fires regardless of session size), or (b) `input_tokens` has crossed **85 %** of the model's context window AND you have paused for at least 5 minutes (hard cap with active grace, so the cap never wipes context mid-conversation). Your next message then starts fresh, seeded by the always-injected memory core + retrieved memories. Continuity comes from the core (durable facts you've taught Otto) + `session_search` (any past turn). You should rarely need `/new` again.
 
 All four memory tools are exposed via the local `otto-memory` MCP server registered in `mcp.json`. Toto and Toot share read access to the core (so they know your prefs too); Otto is the only one that writes.
 
@@ -165,7 +165,7 @@ For options 1 and 2, no systemd config is needed — `~/.claude/` lives under th
 - `gdrive` — `mcp-gdrive-workspace` via `npx`.
 - `gmail-<label>` (one per Gmail account) — `@gongrzhe/server-gmail-autoauth-mcp` via `npx`.
 
-Adding/removing servers: edit `mcp.json` and `systemctl --user restart otto`.
+Adding/removing servers: edit `mcp.json` and `systemctl --user restart otto`. On macOS use `launchctl kickstart -k gui/$(id -u)/com.otto.bot` instead.
 
 ## Config keys (`~/.config/otto/config.toml`)
 
@@ -186,9 +186,8 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 | `embed_ollama_url` | `http://localhost:11434` | local Ollama |
 | `embed_models` | `["embeddinggemma","nomic-embed-text"]` | ordered fallthrough |
 | `model_context_tokens` | `200000` | denominator for rotation thresholds |
-| `rotate_soft_pct` | `0.50` | eligible to rotate once idle |
-| `rotate_hard_pct` | `0.85` | rotate at next idle tick regardless |
-| `rotate_idle_minutes` | `15` | quiet window required for a soft rotation |
+| `rotate_hard_pct` | `0.85` | rotate when tokens ≥ this fraction of context and user has paused ≥ 5 min |
+| `rotate_idle_minutes` | `15` | minutes of silence after which the session clears regardless of size |
 
 ### Caveman skill (or other SessionStart prose-changers)
 
@@ -209,7 +208,7 @@ backstop, so this hook patch is optional but cleaner.
 - **Google auth expired:** re-run `setup.sh`; it will re-prompt for whichever credential is missing.
 - **Memory not persisting facts:** confirm `otto-memory` is in `mcp.json` (`grep otto-memory ~/.config/otto/mcp.json`) and that `~/.local/state/otto/memory/` is writable. Logs print `turn log` / `embed turn` errors at the `otto` journal.
 - **Semantic search not working:** check Ollama (`systemctl --user status ollama` on Linux, `brew services list` on macOS) and `ollama list`. Without a pulled embedding model, `session_search` falls back to keyword (FTS5) and logs `session_search: embed unavailable, keyword-only`. To enable semantic recall after a fresh install: `ollama pull embeddinggemma`.
-- **Session never rotates:** the rotator only fires when (a) the tracked `input_tokens` from Claude's `result` events crosses the soft threshold, (b) you've been idle ≥ `rotate_idle_minutes`, and (c) Otto isn't busy. The journal logs `rotator: rotated session ...` on success. Disable by setting `model_context_tokens = 0`.
+- **Session never rotates:** the rotator fires when idle ≥ `rotate_idle_minutes` (regardless of session size), OR when `input_tokens` ≥ `rotate_hard_pct × model_context_tokens` AND you have paused for at least 5 minutes — whichever comes first. Otto must also be free (not mid-turn). The journal logs `rotator: rotated session ...` on success. Disable by setting `model_context_tokens = 0`.
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.
 - **`/update` seems to hang:** after `/update`, the bot exits within ~10s and systemd brings up the new binary on the next tick. Toot pings you back from the fresh process once it's settled. If you don't see that ping within ~30s, check `systemctl --user status otto` and `journalctl --user -u otto -n 50`.
 - **macOS: `/update` leaves Otto offline:** check `launchctl print gui/$(id -u)/com.otto.bot` and confirm `KeepAlive = true`. Older hand-written plists may be missing it (or have the default `ThrottleInterval = 10` that swallows back-to-back `kickstart` calls) — re-run `./setup.sh` to install the canonical one.

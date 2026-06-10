@@ -1,7 +1,7 @@
 // Command otto-memory is an MCP stdio server exposing Otto's persistent
 // memory: the bounded curated core (USER.md/MEMORY.md) and FTS5 keyword
 // search over the conversation turn log. It is launched by Claude Code via
-// Otto's mcp.json (wired in a later plan); it is not part of the otto binary.
+// Otto's mcp.json; it is not part of the otto binary.
 package main
 
 import (
@@ -157,6 +157,11 @@ func (s *memoryServer) handleRemove(ctx context.Context, req *mcp.CallToolReques
 // caller does not specify a limit.
 const defaultSearchLimit = 8
 
+// maxSearchLimit caps the caller-supplied limit so a model passing an
+// arbitrarily large value cannot cause a full-table FTS scan or exhaust
+// memory building the result set in a long-running deployment.
+const maxSearchLimit = 50
+
 // queryEmbedTimeout caps how long session_search waits on the embedder before
 // falling back to keyword-only search. Short so a cold/missing Ollama model
 // can't stall the tool call the model is waiting on.
@@ -169,7 +174,13 @@ const maxTurnContentChars = 280
 
 // truncateContent shortens s to maxTurnContentChars runes, appending an
 // ellipsis when truncated. Rune-based so it never splits a multi-byte char.
+// A byte-length guard is checked first (byte length >= rune count, so if
+// len(s) <= maxTurnContentChars the string is definitely within the rune
+// limit) to avoid the []rune allocation for the common short-string case.
 func truncateContent(s string) string {
+	if len(s) <= maxTurnContentChars {
+		return s
+	}
 	r := []rune(s)
 	if len(r) <= maxTurnContentChars {
 		return s
@@ -186,6 +197,9 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 	limit := args.Limit
 	if limit <= 0 {
 		limit = defaultSearchLimit
+	}
+	if limit > maxSearchLimit {
+		limit = maxSearchLimit
 	}
 
 	var semantic []store.Turn

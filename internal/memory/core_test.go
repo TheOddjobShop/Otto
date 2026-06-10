@@ -175,6 +175,42 @@ func TestRemoveMissingErrors(t *testing.T) {
 	}
 }
 
+func TestReplaceErrorsAtCap(t *testing.T) {
+	// Replace must reject a replacement whose resulting body exceeds the hard cap
+	// (100% of file cap). Without this check the file can silently grow beyond
+	// the token-budget ceiling that the cap is designed to enforce.
+	c := NewCore(t.TempDir(), 50, 50)
+	if err := c.Add(TargetMemory, "short fact"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// "short fact" is 10 chars. Replacing with a 45-char string produces a
+	// 45-char body which is exactly at the 50-char cap — should succeed.
+	ok45 := strings.Repeat("x", 45)
+	if err := c.Replace(TargetMemory, "short fact", ok45); err != nil {
+		t.Fatalf("Replace within cap should succeed: %v", err)
+	}
+	// Now replace with 51 chars, which exceeds the hard cap — must error.
+	big := strings.Repeat("y", 51)
+	if err := c.Replace(TargetMemory, ok45, big); err == nil {
+		t.Fatal("Replace exceeding hard cap should error")
+	}
+}
+
+func TestAddCapUsesRuneCount(t *testing.T) {
+	// Cap comparisons must use rune count, not byte count. A string of N
+	// multi-byte characters should consume N cap units, not N*bytes-per-char.
+	// We create a core with a cap of 100 runes and write exactly 80 CJK
+	// characters (each 3 bytes in UTF-8), which is exactly at the 80% threshold
+	// (80 runes == 80% of 100). It must succeed; byte counting would fire at
+	// only 27 ASCII characters worth of bytes.
+	c := NewCore(t.TempDir(), 100, 100)
+	// 80 CJK characters = 80 runes = exactly 80% of 100-rune cap. Should succeed.
+	cjk80 := strings.Repeat("中", 80)
+	if err := c.Add(TargetMemory, cjk80); err != nil {
+		t.Fatalf("Add of 80 CJK runes into 100-rune cap should succeed: %v", err)
+	}
+}
+
 func TestAddConcurrentNoLostUpdates(t *testing.T) {
 	c := NewCore(t.TempDir(), 1_000_000, 1_000_000) // huge caps so no capacity errors
 	const n = 20

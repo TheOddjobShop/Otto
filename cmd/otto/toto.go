@@ -202,6 +202,12 @@ var totoAllowedTools = []string{
 // (busy/idle/working-on-X) is injected in BOTH modes so Toto always
 // knows what's going on.
 //
+// bc non-nil means this call originated from the agent bus, not a real
+// user message. Bus-relay turns are NOT logged: the turn store is the
+// source-of-truth for session_search, and writing agent-to-agent payloads
+// there under the "toto/user" persona would cause semantic search to surface
+// relay bodies as if they were user-authored messages.
+//
 // Toto runs with a Toto-scoped mcp.json (only otto-memory) plus an
 // explicit --allowedTools allowlist of forward_to_otto + session_search.
 // He can't reach gmail/notion/etc., and he can't call any built-in tool.
@@ -330,8 +336,14 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 	out = stripMarkdown(out)
 	t.send(ctx, chatID, out)
 
-	logTurn(ctx, t.store, t.embedder, "toto", "user", userMessage)
-	logTurn(ctx, t.store, t.embedder, "toto", "assistant", out)
+	// Skip logging for bus-relay turns (bc != nil): the turn store is the
+	// source-of-truth for session_search. Storing agent relay payloads
+	// under "toto/user" would mix them with real user turns and cause
+	// session_search to surface them as user-authored messages.
+	if bc == nil {
+		logTurn(ctx, t.store, t.embedder, "toto", "user", userMessage)
+		logTurn(ctx, t.store, t.embedder, "toto", "assistant", out)
+	}
 }
 
 // SystemMessage delivers an out-of-band Toto reply (e.g. the watchdog's

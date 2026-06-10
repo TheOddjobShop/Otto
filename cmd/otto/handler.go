@@ -219,7 +219,15 @@ func (s *ottoState) appendSnippet(text string) {
 	defer s.mu.Unlock()
 	s.lastSnippet += text
 	if len(s.lastSnippet) > snippetCap {
-		s.lastSnippet = "…" + s.lastSnippet[len(s.lastSnippet)-snippetCap:]
+		tail := s.lastSnippet[len(s.lastSnippet)-snippetCap:]
+		// The byte slice above can land inside a multi-byte UTF-8 sequence.
+		// Advance past any leading continuation bytes (0x80–0xBF) so the
+		// result is valid UTF-8 before it reaches Toto's system prompt or
+		// the Claude API. ASCII and valid lead-bytes are unaffected.
+		for len(tail) > 0 && tail[0]&0xC0 == 0x80 {
+			tail = tail[1:]
+		}
+		s.lastSnippet = "…" + tail
 	}
 }
 
@@ -286,10 +294,15 @@ func (h *handler) runPollingLoop(ctx context.Context) error {
 				return ctx.Err()
 			}
 			log.Printf("polling error: %v (retry in %s)", err, backoff)
+			// Use time.NewTimer + Stop() instead of time.After so that the
+			// internal timer goroutine is freed immediately when ctx.Done()
+			// wins rather than leaking until the backoff fires (up to 1 min).
+			backoffTimer := time.NewTimer(backoff)
 			select {
 			case <-ctx.Done():
+				backoffTimer.Stop()
 				return ctx.Err()
-			case <-time.After(backoff):
+			case <-backoffTimer.C:
 			}
 			backoff *= 2
 			if backoff > pollErrorMaxBackoff {
@@ -311,9 +324,13 @@ func (h *handler) runPollingLoop(ctx context.Context) error {
 			// 150ms is plenty for tryAcquire to win its mutex; single-
 			// message batches (the common case) are unaffected.
 			if i > 0 {
+				// Same pattern as the backoff timer: NewTimer+Stop ensures no
+				// goroutine leak when ctx.Done() wins, even at 150ms.
+				spacingTimer := time.NewTimer(dispatchBatchSpacing)
 				select {
-				case <-time.After(dispatchBatchSpacing):
+				case <-spacingTimer.C:
 				case <-ctx.Done():
+					spacingTimer.Stop()
 					return ctx.Err()
 				}
 			}
@@ -368,14 +385,25 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 	previewIn := truncate(u.Text, 60)
 	previewOut := truncate(snap.CurrentPrompt, 60)
 	log.Printf("otto busy → toto (silence=%s) msg=%q inflight=%q", snap.Silence.Round(time.Second), previewIn, previewOut)
-	h.toto.BusyReply(ctx, u.ChatID, u.Text, snap.CurrentPrompt, snap.Snippet)
+	// Guard against a nil Toto (possible in test configurations or partial
+	// wiring). In production main.go always wires Toto before constructing
+	// the handler, but omitting the check would panic on the first busy
+	// message in any setup that leaves the field nil.
+	if h.toto != nil {
+		h.toto.BusyReply(ctx, u.ChatID, u.Text, snap.CurrentPrompt, snap.Snippet)
+	}
 }
 
+// truncate shortens s to at most n runes, appending "…" when it cuts.
+// Rune-aware so that multi-byte characters (CJK, emoji, accented Latin)
+// are never split mid-sequence, which would produce invalid UTF-8 in
+// log lines, Toto's system prompt, and Telegram API payloads.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(runes[:n]) + "…"
 }
 
 // surfaceDenials sends one plain-text message per unique denied-tool pattern
@@ -463,7 +491,7 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 		ImagePaths:         imagePaths,
 		Model:              model,
 		AppendSystemPrompt: composePromptWithTimeAndMemory(h.baseSystemPrompt, h.mem),
-	})
+	}, h.runner)
 }
 
 // runAndReply drives a Claude subprocess: it streams args.Events, parses
@@ -471,12 +499,18 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 // over Telegram, and surfaces any permission denials as plain-text
 // instructions for editing settings.json.
 //
+// runner is the claude.Runner to use for this turn. The normal Telegram
+// path passes h.runner; the agent-bus path passes a scoped runner (with
+// hop-env vars added via WithEnv). Accepting it as an explicit parameter
+// avoids mutating shared handler fields, which would require an implicit
+// happens-before via the otto slot for safety rather than an explicit lock.
+//
 // Side effect: every event consumed bumps h.otto.lastEvent, which the
 // watchdog uses to detect hangs. If callCtx was cancelled by the watchdog,
 // h.otto.suppressError is set, and we drop the resulting "context canceled"
 // error rather than echoing it as a Claude error (Toto already informed
 // the user about the reboot).
-func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, args claude.RunArgs) {
+func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, args claude.RunArgs, runner claude.Runner) {
 	events := make(chan claude.Event, 64)
 	args.Events = events
 
@@ -503,7 +537,7 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 		}
 	}()
 
-	err := h.runner.Run(callCtx, args)
+	err := runner.Run(callCtx, args)
 	close(events)
 	<-doneParsing
 

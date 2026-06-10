@@ -106,3 +106,152 @@ func TestSearchEmptyQueryReturnsNothing(t *testing.T) {
 		t.Fatalf("blank query should return no rows, got %d", len(got))
 	}
 }
+
+// TestPruneTurnsKeepsNewest verifies that PruneTurns deletes the oldest rows
+// while preserving exactly the keep most-recent ones.
+func TestPruneTurnsKeepsNewest(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	var lastID int64
+	for i := 0; i < 5; i++ {
+		id, err := s.AppendTurn(ctx, "otto", "user", "msg")
+		if err != nil {
+			t.Fatalf("AppendTurn %d: %v", i, err)
+		}
+		lastID = id
+	}
+
+	n, err := s.PruneTurns(ctx, 3)
+	if err != nil {
+		t.Fatalf("PruneTurns: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 rows deleted, got %d", n)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 turns remaining, got %d", count)
+	}
+
+	// The last inserted id must still be present (newest rows are kept).
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE id = ?`, lastID).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists != 1 {
+		t.Fatalf("newest turn id=%d should survive pruning", lastID)
+	}
+}
+
+// TestPruneTurnsCascadesToVectors confirms the ON DELETE CASCADE keeps the
+// vectors table in sync: pruned turns must not leave orphaned vector rows.
+func TestPruneTurnsCascadesToVectors(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	// Seed 4 turns each with a vector.
+	for i := 0; i < 4; i++ {
+		id, err := s.AppendTurn(ctx, "otto", "user", "msg")
+		if err != nil {
+			t.Fatalf("AppendTurn: %v", err)
+		}
+		if err := s.PutVector(ctx, id, "m", []float32{float32(i), 0}); err != nil {
+			t.Fatalf("PutVector: %v", err)
+		}
+	}
+
+	if _, err := s.PruneTurns(ctx, 2); err != nil {
+		t.Fatalf("PruneTurns: %v", err)
+	}
+
+	var vecCount, turnCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns`).Scan(&turnCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vectors`).Scan(&vecCount); err != nil {
+		t.Fatal(err)
+	}
+	if turnCount != 2 {
+		t.Fatalf("expected 2 turns, got %d", turnCount)
+	}
+	if vecCount != 2 {
+		t.Fatalf("expected 2 vectors after cascade, got %d", vecCount)
+	}
+}
+
+// TestPruneTurnsCleansUpFTS confirms the turns_ad trigger removes pruned rows
+// from the FTS5 index so keyword search never returns ghost results.
+func TestPruneTurnsCleansUpFTS(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	if _, err := s.AppendTurn(ctx, "otto", "user", "unique keyword canary"); err != nil {
+		t.Fatalf("AppendTurn: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.AppendTurn(ctx, "otto", "user", "other content"); err != nil {
+			t.Fatalf("AppendTurn: %v", err)
+		}
+	}
+
+	// Prune keeping only the 3 newest; the canary is the oldest and must vanish.
+	if _, err := s.PruneTurns(ctx, 3); err != nil {
+		t.Fatalf("PruneTurns: %v", err)
+	}
+
+	got, err := s.SearchFTS(ctx, "canary", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS after prune: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("pruned turn should not appear in FTS results, got %d", len(got))
+	}
+}
+
+// TestPruneTurnsNoOpOnZeroKeep ensures a keep ≤ 0 leaves the table untouched.
+func TestPruneTurnsNoOpOnZeroKeep(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.AppendTurn(ctx, "otto", "user", "msg"); err != nil {
+			t.Fatalf("AppendTurn: %v", err)
+		}
+	}
+
+	n, err := s.PruneTurns(ctx, 0)
+	if err != nil {
+		t.Fatalf("PruneTurns(keep=0): %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 rows deleted for keep=0, got %d", n)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 turns intact, got %d", count)
+	}
+}

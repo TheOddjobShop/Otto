@@ -1,6 +1,6 @@
 # Binaries
 /otto
-/google-mcp
+/otto-memory
 *.exe
 *.test
 *.out

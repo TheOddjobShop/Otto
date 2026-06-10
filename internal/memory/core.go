@@ -109,6 +109,9 @@ func (c *Core) Inject() (string, error) {
 // content (see scanContent), exact-duplicate entries, and any write that would
 // push the file past 80% of its cap — the over-capacity error includes the
 // current contents so the caller (the model) can consolidate via Replace.
+// Cap comparisons use rune count (Unicode characters) to match the documented
+// "character ceiling" semantics; byte-counting would fire far too early for
+// non-ASCII content such as CJK or emoji.
 func (c *Core) Add(t Target, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -128,10 +131,10 @@ func (c *Core) Add(t Target, content string) error {
 	if existing != "" {
 		next = existing + "\n" + content
 	}
-	if threshold := c.cap(t) * 80 / 100; len(next) > threshold {
+	if threshold := c.cap(t) * 80 / 100; len([]rune(next)) > threshold {
 		return fmt.Errorf(
 			"memory: at capacity (%d/%d chars over 80%% threshold) — consolidate existing entries with replace before adding. Current contents:\n%s",
-			len(next), c.cap(t), existing,
+			len([]rune(next)), c.cap(t), existing,
 		)
 	}
 	return c.write(t, next)
@@ -179,9 +182,11 @@ func entryExists(body, content string) bool {
 
 // Replace swaps the unique occurrence of oldText for content. It errors if
 // oldText is absent or appears more than once (ambiguous), and scans the new
-// content for unsafe material. Capacity is not re-checked because a replace
-// that shrinks or holds size steady is always safe; a growing replace that
-// breaches the cap is caught on the next Add.
+// content for unsafe material. A hard cap (100% of file cap) is enforced on
+// the resulting body because Replace is given the full replacement text and
+// there is no subsequent consolidation step that would catch an oversize write.
+// Unlike Add, the 80% soft threshold is not used here — the caller is already
+// performing a targeted edit, so the full cap is the appropriate ceiling.
 // Matching is raw substring over the whole file; pass a distinctive snippet.
 func (c *Core) Replace(t Target, oldText, content string) error {
 	c.mu.Lock()
@@ -201,7 +206,14 @@ func (c *Core) Replace(t Target, oldText, content string) error {
 	if n > 1 {
 		return fmt.Errorf("memory: replace target %q is ambiguous (%d matches)", oldText, n)
 	}
-	return c.write(t, strings.Replace(body, oldText, content, 1))
+	newBody := strings.Replace(body, oldText, content, 1)
+	if len([]rune(newBody)) > c.cap(t) {
+		return fmt.Errorf(
+			"memory: replacement would exceed file cap (%d/%d chars) — shorten the new content",
+			len([]rune(newBody)), c.cap(t),
+		)
+	}
+	return c.write(t, newBody)
 }
 
 // Remove deletes the unique occurrence of oldText. Errors if absent or

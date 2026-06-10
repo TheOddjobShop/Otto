@@ -14,6 +14,12 @@ import (
 	"otto/internal/store"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=<tag>" in
+// setup.sh.  It is surfaced in the MCP Implementation.Version field so that
+// tooling and log output can show which build is running.  Falls back to
+// "dev" for local builds that skip the ldflags.
+var version = "dev"
+
 // Memory core character caps (rough token proxies). Promote to config in a
 // later plan if they need to be tunable per deployment.
 const (
@@ -57,7 +63,7 @@ func run() error {
 	}
 	srv.embedder = embed.NewOllamaChain(*embedURL, models)
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "otto-memory", Version: "v1"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "otto-memory", Version: version}, nil)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "memory_add",
 		Description: "Save a durable fact to long-term memory. Use for corrections, discovered preferences, environment facts, project conventions, and lessons — not ephemera. target is \"user\" (about the person) or \"memory\" (everything else).",

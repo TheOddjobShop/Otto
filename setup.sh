@@ -161,7 +161,13 @@ case "$PKG_MGR" in
     ;;
 esac
 
-# Claude Code CLI via npm (global)
+# Claude Code CLI via npm (global).
+# Security note: this installs the latest published version from the npm
+# registry without a version pin or integrity check.  To lock a specific
+# release, replace `@anthropic-ai/claude-code` with
+# `@anthropic-ai/claude-code@<version>` and verify the dist-tag or checksum
+# from a trusted source before re-pinning.  On Arch Linux the install runs
+# under sudo, so a supply-chain compromise would execute as root.
 if ! command -v claude &>/dev/null; then
   echo "  Installing Claude Code CLI..."
   if [ "$PKG_MGR" = pacman ]; then
@@ -258,6 +264,9 @@ if ! $HAS_GCAL_OAUTH; then
 STEP
   read -p "  Drag the downloaded JSON file here: " GCAL_JSON
   GCAL_JSON=$(echo "$GCAL_JSON" | tr -d "'\"" | sed 's/^ *//;s/ *$//')
+  # Expand a leading ~ to $HOME so paths typed as ~/… work correctly.
+  # Double-quotes suppress shell tilde expansion, so we do it explicitly.
+  GCAL_JSON="${GCAL_JSON/#\~/$HOME}"
   if [ ! -f "$GCAL_JSON" ]; then
     echo "  Can't find that file."; exit 1
   fi
@@ -279,6 +288,13 @@ if ! $HAS_GMAIL_OAUTH; then
   HAS_GMAIL_OAUTH=true
 fi
 
+# Extract the Desktop OAuth client credentials for the Drive and Calendar MCP
+# servers.  These values are written verbatim into mcp.json (chmod 600) as
+# environment variables passed to the npx processes.  This is a pragmatic
+# tradeoff for a single-user personal bot: the file is owner-readable only.
+# A more hardened approach would reference CLIENT_SECRET_FILE directly in
+# each MCP server config (so the secret never lands in mcp.json) or store the
+# values in macOS Keychain and inject them via launchd EnvironmentVariables.
 DESKTOP_CLIENT_ID=$(python3 -c "import json; print(json.load(open('$CLIENT_SECRET_FILE'))['installed']['client_id'])")
 DESKTOP_CLIENT_SECRET=$(python3 -c "import json; print(json.load(open('$CLIENT_SECRET_FILE'))['installed']['client_secret'])")
 
@@ -293,7 +309,15 @@ if ! $HAS_GCAL_AUTHED; then
   echo "  A browser will open. Sign in and click Allow."
   echo ""
   read -p "  Press Enter..."
-  GOOGLE_OAUTH_CREDENTIALS="$CLIENT_SECRET_FILE" npx -y @cocal/google-calendar-mcp auth
+  GOOGLE_OAUTH_CREDENTIALS="$CLIENT_SECRET_FILE" npx --ignore-scripts -y @cocal/google-calendar-mcp auth
+  # Verify the OAuth dance completed — the MCP package writes a tokens file on
+  # success.  Some CLI auth helpers exit 0 even when the browser flow was
+  # cancelled, so we check the artifact rather than the exit code.
+  if [ ! -f "$GCAL_TOKENS_PATH" ]; then
+    echo "  [!] Calendar token not found — auth may have failed."
+    echo "      Rerun ./setup.sh to retry."
+    exit 1
+  fi
   HAS_GCAL_AUTHED=true
   echo "  [ok] Calendar connected"
 fi
@@ -315,7 +339,7 @@ if ! $HAS_GDRIVE_AUTHED; then
   : > "$AUTH_LOG"; chmod 600 "$AUTH_LOG"
   GOOGLE_CLIENT_ID="$DESKTOP_CLIENT_ID" \
     GOOGLE_CLIENT_SECRET="$DESKTOP_CLIENT_SECRET" \
-    npx -y mcp-gdrive-workspace > "$AUTH_LOG" 2>&1 &
+    npx --ignore-scripts -y mcp-gdrive-workspace > "$AUTH_LOG" 2>&1 &
   GDRIVE_PID=$!
   for i in $(seq 1 180); do
     [ -f "$GDRIVE_CREDS_PATH" ] && { HAS_GDRIVE_AUTHED=true; break; }
@@ -440,7 +464,7 @@ for label in "${GMAIL_LABELS[@]}"; do
   read -p "  Press Enter to start..."
   GMAIL_OAUTH_PATH="$GMAIL_OAUTH_PATH" \
     GMAIL_CREDENTIALS_PATH="$CRED_PATH" \
-    npx -y @gongrzhe/server-gmail-autoauth-mcp auth
+    npx --ignore-scripts -y @gongrzhe/server-gmail-autoauth-mcp auth
   echo "  [ok] gmail-${label} authorized"
 done
 
@@ -619,17 +643,20 @@ config["mcpServers"]["otto-memory"] = {
 }
 config["mcpServers"]["notion"] = {
     "command": "npx",
-    "args": ["-y", "@notionhq/notion-mcp-server"],
+    # --ignore-scripts prevents npm lifecycle hooks from running on install,
+    # reducing the risk of malicious code in an unpinned package executing at
+    # bot startup with access to injected OAuth credentials.
+    "args": ["--ignore-scripts", "-y", "@notionhq/notion-mcp-server"],
     "env": {"NOTION_TOKEN": os.environ.get('NOTION_TOKEN_VAL', '')},
 }
 config["mcpServers"]["google-calendar"] = {
     "command": "npx",
-    "args": ["-y", "@cocal/google-calendar-mcp"],
+    "args": ["--ignore-scripts", "-y", "@cocal/google-calendar-mcp"],
     "env": {"GOOGLE_OAUTH_CREDENTIALS": os.environ['CLIENT_SECRET_FILE']},
 }
 config["mcpServers"]["gdrive"] = {
     "command": "npx",
-    "args": ["-y", "mcp-gdrive-workspace"],
+    "args": ["--ignore-scripts", "-y", "mcp-gdrive-workspace"],
     "env": {
         "GOOGLE_CLIENT_ID": os.environ['DESKTOP_CLIENT_ID'],
         "GOOGLE_CLIENT_SECRET": os.environ['DESKTOP_CLIENT_SECRET'],
@@ -638,7 +665,7 @@ config["mcpServers"]["gdrive"] = {
 for label in labels:
     config["mcpServers"][f"gmail-{label}"] = {
         "command": "npx",
-        "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
+        "args": ["--ignore-scripts", "-y", "@gongrzhe/server-gmail-autoauth-mcp"],
         "env": {
             "GMAIL_OAUTH_PATH": os.environ['GMAIL_OAUTH_PATH'],
             "GMAIL_CREDENTIALS_PATH": f"{home}/.gmail-mcp/credentials-{label}.json",
@@ -698,8 +725,11 @@ else
   launchctl kickstart -k "$LAUNCHD_TARGET"
 
   # Smoke test: wait briefly, then check status.
+  # `launchctl print` exits 0 even for registered-but-crashed jobs, so we
+  # parse the state field directly — the same way systemctl --user is-active
+  # distinguishes running from stopped on the Linux path.
   sleep 3
-  if launchctl print "$LAUNCHD_TARGET" >/dev/null 2>&1; then
+  if launchctl print "$LAUNCHD_TARGET" 2>/dev/null | grep -q 'state = running'; then
     echo ""
     echo "  [ok] otto is running."
     echo "       Logs:    tail -f ~/Library/Logs/otto.log"

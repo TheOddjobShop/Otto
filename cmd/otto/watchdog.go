@@ -60,16 +60,23 @@ func (h *handler) runWatchdog(ctx context.Context, chatID int64, done <-chan str
 			if silence >= watchdogCancelAfter {
 				log.Printf("watchdog: otto silent for %s — cancelling subprocess", silence.Round(time.Second))
 				h.otto.cancelInflight()
-				h.toto.SystemMessage(ctx, chatID,
-					"otto wedged. i rebooted him. try sending your original message again whenever — he'll pick up where he left off.")
+				// Guard against a nil Toto — same defensive pattern as
+				// dispatch(). Production always wires Toto, but omitting
+				// the check would silently panic on any config that doesn't.
+				if h.toto != nil {
+					h.toto.SystemMessage(ctx, chatID,
+						"otto wedged. i rebooted him. try sending your original message again whenever — he'll pick up where he left off.")
+				}
 				return
 			}
 
 			if !warned && silence >= watchdogWarnAfter {
 				warned = true
 				log.Printf("watchdog: otto silent for %s — sending warning via toto", silence.Round(time.Second))
-				h.toto.SystemMessage(ctx, chatID,
-					"otto's been zoning out for five minutes. i'm watching him. if he doesn't move in another five i'll boot him and you can try again.")
+				if h.toto != nil {
+					h.toto.SystemMessage(ctx, chatID,
+						"otto's been zoning out for five minutes. i'm watching him. if he doesn't move in another five i'll boot him and you can try again.")
+				}
 			}
 		}
 	}

@@ -5,7 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
+
+// perBackendTimeout is the deadline given to each backend call in a Chain.
+// Using a fresh context per backend (rather than a shared one) ensures a
+// slow or cold-loading first backend does not starve the fallback: even if
+// backend A consumes its full 60 s, backend B still gets an independent 60 s
+// budget derived from the original (outer) ctx.
+const perBackendTimeout = 60 * time.Second
 
 // Compile-time assertion that *Chain satisfies Embedder.
 var _ Embedder = (*Chain)(nil)
@@ -48,6 +56,10 @@ func (c *Chain) Name() string {
 }
 
 // Embed tries each backend in order, returning the first successful Result.
+// Each backend receives its own context.WithTimeout(ctx, perBackendTimeout)
+// derived from the caller's ctx. This prevents a slow (e.g. cold-loading)
+// first backend from exhausting a shared deadline and leaving the fallback
+// with an already-expired context.
 // Returns an aggregated error if the chain is empty or all backends fail.
 func (c *Chain) Embed(ctx context.Context, text string) (Result, error) {
 	if len(c.backends) == 0 {
@@ -55,7 +67,9 @@ func (c *Chain) Embed(ctx context.Context, text string) (Result, error) {
 	}
 	var errs []error
 	for _, b := range c.backends {
-		res, err := b.Embed(ctx, text)
+		bctx, cancel := context.WithTimeout(ctx, perBackendTimeout)
+		res, err := b.Embed(bctx, text)
+		cancel()
 		if err == nil {
 			return res, nil
 		}

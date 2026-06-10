@@ -26,10 +26,21 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 	parts := strings.Fields(text)
 	switch parts[0] {
 	case "/new":
-		if err := h.session.Clear(); err != nil {
+		// Acquire the otto slot before clearing, mirroring the rotator's
+		// tryAcquire → Clear → resetInputTokens → release pattern. Without
+		// the slot, a concurrent Otto turn that has already read a session ID
+		// from the subprocess would restore it in runAndReply's Set call,
+		// silently undoing the clear. The slot serialises the two operations
+		// so /new has no lasting effect only when it truly wins the race.
+		if !h.otto.tryAcquire("(/new)") {
+			return commandResult{reply: "⏳ Otto is mid-turn — session will be cleared once he finishes.", handled: true}
+		}
+		err := h.session.Clear()
+		h.otto.resetInputTokens()
+		h.otto.release()
+		if err != nil {
 			return commandResult{reply: fmt.Sprintf("⚠️ clear failed: %v", err), handled: true}
 		}
-		h.otto.resetInputTokens()
 		return commandResult{reply: "✨ Started new session — your next message will start a fresh conversation.", handled: true}
 	case "/whoami":
 		sid := h.session.ID()
@@ -53,10 +64,9 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 			return commandResult{reply: "🔄 Otto isn't busy. Nothing to interrupt.", handled: true}
 		}
 		h.otto.cancelInflight()
-		preview := inflight
-		if len(preview) > 80 {
-			preview = preview[:80] + "…"
-		}
+		// truncate() is rune-aware (handler.go) — safe for multi-byte
+		// characters in the user's original prompt (e.g. emoji, CJK).
+		preview := truncate(inflight, 80)
 		return commandResult{
 			reply:   fmt.Sprintf("🛑 Interrupted Otto. He was on: %q\nSession is preserved — re-send if you want him to resume.", preview),
 			handled: true,
@@ -82,10 +92,9 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 
 		state := "idle"
 		if busy {
-			preview := inflight
-			if len(preview) > 60 {
-				preview = preview[:60] + "…"
-			}
+			// truncate() is rune-aware (handler.go) — safe for multi-byte
+			// characters sent by the user (e.g. emoji, CJK, Arabic).
+			preview := truncate(inflight, 60)
 			silence := time.Since(lastEvent).Round(time.Second)
 			state = fmt.Sprintf("BUSY (silence=%s) on: %q", silence, preview)
 		}
@@ -123,10 +132,9 @@ func (h *handler) handleUpdateCommand() commandResult {
 		p.Tag, runtime.GOOS, runtime.GOARCH,
 	)
 	if busy {
-		preview := inflight
-		if len(preview) > 60 {
-			preview = preview[:60] + "…"
-		}
+		// truncate() is rune-aware (handler.go) — safe for multi-byte
+		// characters in the inflight prompt.
+		preview := truncate(inflight, 60)
 		reply += fmt.Sprintf(" (Otto is mid-task on %q — that work will be interrupted.)", preview)
 	}
 

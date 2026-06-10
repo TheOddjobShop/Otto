@@ -183,3 +183,75 @@ func TestLegacyAgentHopStillTripsCap(t *testing.T) {
 		t.Fatalf("expected ErrBusLoopGuard from legacy hop ctx, got %v", err)
 	}
 }
+
+// TestPruneInboxRemovesDelivered verifies that PruneInbox deletes old
+// delivered rows while leaving undelivered ones untouched.
+func TestPruneInboxRemovesDelivered(t *testing.T) {
+	s := newInboxStore(t)
+	ctx := context.Background()
+
+	// Enqueue and dequeue 5 rows so they become delivered=1.
+	for i := 0; i < 5; i++ {
+		if _, err := s.Enqueue(ctx, "otto", "user", "", "msg", 0); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+	if _, err := s.DequeueAll(ctx); err != nil {
+		t.Fatalf("DequeueAll: %v", err)
+	}
+
+	// Enqueue 2 more undelivered rows.
+	for i := 0; i < 2; i++ {
+		if _, err := s.Enqueue(ctx, "otto", "user", "", "undelivered", 0); err != nil {
+			t.Fatalf("Enqueue undelivered %d: %v", i, err)
+		}
+	}
+
+	// Prune keeping the newest 2 delivered rows (so 3 old delivered rows go).
+	n, err := s.PruneInbox(ctx, 2)
+	if err != nil {
+		t.Fatalf("PruneInbox: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("expected 3 rows pruned, got %d", n)
+	}
+
+	// Undelivered rows must still be present.
+	var undelivered int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM inbox WHERE delivered = 0`).Scan(&undelivered); err != nil {
+		t.Fatal(err)
+	}
+	if undelivered != 2 {
+		t.Fatalf("expected 2 undelivered rows intact, got %d", undelivered)
+	}
+}
+
+// TestPruneInboxNoOpOnZeroKeep ensures keep ≤ 0 leaves the table untouched.
+func TestPruneInboxNoOpOnZeroKeep(t *testing.T) {
+	s := newInboxStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Enqueue(ctx, "otto", "user", "", "msg", 0); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+	if _, err := s.DequeueAll(ctx); err != nil {
+		t.Fatalf("DequeueAll: %v", err)
+	}
+
+	n, err := s.PruneInbox(ctx, 0)
+	if err != nil {
+		t.Fatalf("PruneInbox(keep=0): %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 rows deleted for keep=0, got %d", n)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM inbox WHERE delivered = 1`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 delivered rows intact, got %d", count)
+	}
+}
