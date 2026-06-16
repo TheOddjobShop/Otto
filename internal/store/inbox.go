@@ -105,6 +105,15 @@ func (s *Store) Enqueue(ctx context.Context, target, source, sender, body string
 	if _, ok := validSources[source]; !ok {
 		return 0, fmt.Errorf("store: inbox enqueue: invalid source %q", source)
 	}
+	if source == "user" {
+		if sender != "" {
+			return 0, fmt.Errorf("store: inbox enqueue: user-sourced row must have empty sender, got %q", sender)
+		}
+	} else { // source == "agent" (only remaining valid source)
+		if _, ok := validTargets[sender]; !ok {
+			return 0, fmt.Errorf("store: inbox enqueue: invalid agent sender %q", sender)
+		}
+	}
 	if strings.TrimSpace(body) == "" {
 		return 0, fmt.Errorf("store: inbox enqueue: empty body")
 	}
@@ -126,6 +135,14 @@ func (s *Store) Enqueue(ctx context.Context, target, source, sender, body string
 // and marks them delivered in the same transaction so a crashed dispatcher
 // can't re-deliver them on the next boot. A second call with no new rows
 // returns an empty slice.
+//
+// Delivery semantics are at-most-once: rows are committed as delivered=1
+// here, before the dispatcher (cmd/otto.dispatchBusMessage) processes the
+// returned batch. A crash after this commit but before dispatch completes
+// permanently drops that in-flight batch rather than retrying it. This
+// trades the risk of duplicate delivery for the risk of loss; if
+// at-least-once is ever required, mark rows delivered only after a
+// successful dispatch instead of within this call.
 func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -202,7 +219,11 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 // so in-flight messages are always safe.
 //
 // PruneInbox is safe to call from a background goroutine alongside normal
-// message dispatch; the WAL journal allows concurrent readers and writers.
+// message dispatch. PruneInbox is a writer (it issues a DELETE), and SQLite
+// WAL permits only one writer at a time; concurrent writes are serialized by
+// the busy_timeout(5000) pragma (see Open), so this background prune may
+// briefly block, or be blocked by, the dispatch path's writes, but will not
+// return "database is locked", corrupt data, or deadlock.
 func (s *Store) PruneInbox(ctx context.Context, keep int) (int64, error) {
 	if keep <= 0 {
 		return 0, nil

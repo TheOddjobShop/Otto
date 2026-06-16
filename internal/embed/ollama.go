@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 	"unicode/utf8"
@@ -27,6 +28,13 @@ func truncateForEmbed(text string) string {
 	cut := maxEmbedInputBytes
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
+	}
+	// If the whole prefix was continuation bytes (malformed UTF-8), cut==0 would
+	// drop everything and trigger a downstream 'empty embeddings' failure. Fall
+	// back to the byte-capped prefix instead; JSON marshalling will sanitize the
+	// invalid bytes, keeping the input non-empty and the size guard intact.
+	if cut == 0 {
+		return text[:maxEmbedInputBytes]
 	}
 	return text[:cut]
 }
@@ -104,9 +112,15 @@ func (o *Ollama) Embed(ctx context.Context, text string) (Result, error) {
 	if len(parsed.Embeddings) == 0 || len(parsed.Embeddings[0]) == 0 {
 		return Result{}, fmt.Errorf("embed: %s: empty embeddings", o.Name())
 	}
+	vec := parsed.Embeddings[0]
+	for _, v := range vec {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return Result{}, fmt.Errorf("embed: %s: non-finite embedding component", o.Name())
+		}
+	}
 	model := parsed.Model
 	if model == "" {
 		model = o.model
 	}
-	return Result{Vector: parsed.Embeddings[0], Model: model}, nil
+	return Result{Vector: vec, Model: model}, nil
 }

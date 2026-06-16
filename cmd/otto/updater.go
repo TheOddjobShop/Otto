@@ -17,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // errInstallInProgress is returned by Install when another install is
@@ -33,6 +35,7 @@ const (
 	updateInitialDelay  = 30 * time.Second
 	releasesURLDefault  = "https://api.github.com/repos/TheOddjobShop/Otto/releases/latest"
 	downloadTimeout     = 5 * time.Minute
+	fetchTimeout        = 30 * time.Second
 )
 
 // releaseAsset is one entry from a GitHub Release's assets list. The
@@ -110,7 +113,9 @@ var forceExitGrace = 10 * time.Second
 // fetchLatest hits the releases/latest endpoint and parses the response.
 // Returns an error on non-200 status or unparseable JSON.
 func (u *updater) fetchLatest(ctx context.Context) (release, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.releasesURL, nil)
+	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(fctx, http.MethodGet, u.releasesURL, nil)
 	if err != nil {
 		return release{}, err
 	}
@@ -140,12 +145,13 @@ func (u *updater) fetchLatest(ctx context.Context) (release, error) {
 // this convention; mismatch means the platform isn't supported by this
 // release.
 func assetForPlatform(assets []releaseAsset, goos, goarch string) (releaseAsset, bool) {
-	suffix := "-" + goos + "-" + goarch
+	// Match exactly "otto-<goos>-<goarch>". Releases now also ship
+	// "otto-memory-<goos>-<goarch>", which shares the platform suffix; an
+	// open HasSuffix match could pick that MCP-server binary instead of the
+	// main otto binary depending on asset ordering, so require the exact name.
+	want := fmt.Sprintf("otto-%s-%s", goos, goarch)
 	for _, a := range assets {
-		// strings.HasSuffix for readable intent; the len guard requires a
-		// non-empty prefix (e.g. "otto-") so a bare suffix like
-		// "-darwin-arm64" is not accidentally matched.
-		if strings.HasSuffix(a.Name, suffix) && len(a.Name) > len(suffix) {
+		if a.Name == want {
 			return a, true
 		}
 	}
@@ -169,7 +175,16 @@ func (u *updater) refreshPending(ctx context.Context) (release, bool) {
 		log.Printf("updater: %v", err)
 		return release{}, false
 	}
-	if rel.TagName == u.currentVersion {
+	// Only treat the fetched tag as an update when it is strictly newer
+	// than what we're running. Guards against a re-tagged or manually
+	// published older release on releases/latest causing a silent
+	// downgrade. If either tag isn't valid semver (semver requires a
+	// leading 'v'), fall back to exact-string behavior so well-formed
+	// vX.Y.Z builds are unaffected.
+	cur, got := u.currentVersion, rel.TagName
+	bothValid := semver.IsValid(cur) && semver.IsValid(got)
+	upToDate := (bothValid && semver.Compare(got, cur) <= 0) || (!bothValid && got == cur)
+	if upToDate {
 		u.mu.Lock()
 		u.pending = nil
 		u.mu.Unlock()
@@ -248,7 +263,7 @@ func (u *updater) CheckNow(ctx context.Context) *pendingUpdate {
 // poll at all.
 func newUpdater(toot *Toot, chatID int64, currentVersion, stateDBPath string) *updater {
 	return &updater{
-		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		httpClient:     &http.Client{Timeout: 0}, // per-call context deadlines bound each request (download/fetch); a client-wide Timeout would cap the 5-min download budget
 		releasesURL:    releasesURLDefault,
 		currentVersion: currentVersion,
 		toot:           toot,
@@ -332,7 +347,7 @@ func (u *updater) Install(ctx context.Context) error {
 	// lets the binary run while keeping permissions tight.
 	mode := os.FileMode(0700)
 	if info, err := os.Stat(exe); err == nil {
-		mode = info.Mode().Perm() | 0100 // ensure user-execute survives
+		mode = (info.Mode().Perm() &^ 0022) | 0100 // ensure user-execute survives; never carry group/other write
 	}
 
 	// tmp lives in the same directory as exe so os.Rename is atomic

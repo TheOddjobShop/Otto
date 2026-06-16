@@ -57,6 +57,11 @@ func NewBotClient(token, apiURLTemplate string) (BotClient, error) {
 		return nil, fmt.Errorf("telegram: %w", err)
 	}
 	api.Debug = false
+	// tgbotapi's default http.Client has no timeout and its requests carry
+	// no context, so a hung Telegram connection would block the GetUpdates
+	// goroutine (and its connection) forever. Bound it with a client-side
+	// timeout comfortably larger than the 5s long-poll window.
+	api.Client = &http.Client{Timeout: 30 * time.Second}
 	return &realClient{api: api}, nil
 }
 
@@ -103,6 +108,9 @@ func (c *realClient) GetUpdates(ctx context.Context, offset int) ([]Update, erro
 }
 
 func (c *realClient) SendMessage(ctx context.Context, chatID int64, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	msg := tgbotapi.NewMessage(chatID, text)
 	if _, err := c.api.Send(msg); err != nil {
 		return fmt.Errorf("telegram: send: %w", err)
@@ -111,6 +119,9 @@ func (c *realClient) SendMessage(ctx context.Context, chatID int64, text string)
 }
 
 func (c *realClient) SendMessageHTML(ctx context.Context, chatID int64, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
 	if _, err := c.api.Send(msg); err != nil {
@@ -161,9 +172,15 @@ func downloadURL(ctx context.Context, url string) ([]byte, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("telegram: download status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes))
+	// Read one byte past the cap so we can distinguish "exactly at cap" from
+	// "exceeds cap" and return an explicit error instead of silently
+	// truncating into a corrupt image.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if len(body) > maxPhotoBytes {
+		return nil, "", fmt.Errorf("telegram: download exceeds %d bytes", maxPhotoBytes)
 	}
 	return body, resp.Header.Get("Content-Type"), nil
 }

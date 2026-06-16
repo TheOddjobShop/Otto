@@ -164,7 +164,12 @@ const maxSearchLimit = 50
 
 // queryEmbedTimeout caps how long session_search waits on the embedder before
 // falling back to keyword-only search. Short so a cold/missing Ollama model
-// can't stall the tool call the model is waiting on.
+// can't stall the tool call the model is waiting on. NOTE: this bounds the
+// entire embed Chain, not each backend — it is layered over the chain's
+// per-backend budget, so if the first model consumes the full 6s, later
+// fallback models in -embed-models get an already-expired context and we fall
+// through to keyword search rather than trying them. Within session_search the
+// chain is therefore effectively single-attempt by design (fail fast).
 const queryEmbedTimeout = 6 * time.Second
 
 // maxTurnContentChars bounds how much of each matched turn's content
@@ -202,10 +207,15 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 		limit = maxSearchLimit
 	}
 
+	q := strings.TrimSpace(args.Query)
+	if q == "" {
+		return textResult("No matching past conversation turns."), nil, nil
+	}
+
 	var semantic []store.Turn
 	if s.embedder != nil {
 		ectx, ecancel := context.WithTimeout(ctx, queryEmbedTimeout)
-		r, err := s.embedder.Embed(ectx, args.Query)
+		r, err := s.embedder.Embed(ectx, q)
 		ecancel()
 		if err == nil {
 			if sem, serr := s.store.SearchSemantic(ctx, r.Vector, limit); serr == nil {
@@ -218,9 +228,12 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 		}
 	}
 
-	fts, ferr := s.store.SearchFTS(ctx, args.Query, limit)
-	if ferr != nil && len(semantic) == 0 {
-		return errResult(fmt.Sprintf("search failed: %v", ferr)), nil, nil
+	fts, ferr := s.store.SearchFTS(ctx, q, limit)
+	if ferr != nil {
+		log.Printf("session_search: fts: %v", ferr)
+		if len(semantic) == 0 {
+			return errResult(fmt.Sprintf("search failed: %v", ferr)), nil, nil
+		}
 	}
 
 	turns := mergeTurns(semantic, fts, limit)

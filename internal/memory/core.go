@@ -158,6 +158,10 @@ func (c *Core) write(t Target, body string) error {
 		tmp.Close()
 		return fmt.Errorf("memory: write %s: %w", tmpName, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("memory: sync %s: %w", tmpName, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("memory: close %s: %w", tmpName, err)
 	}
@@ -166,6 +170,10 @@ func (c *Core) write(t Target, body string) error {
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("memory: rename %s: %w", path, err)
+	}
+	if dir, derr := os.Open(c.dir); derr == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return nil
 }
@@ -191,6 +199,9 @@ func entryExists(body, content string) bool {
 func (c *Core) Replace(t Target, oldText, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if strings.TrimSpace(oldText) == "" {
+		return fmt.Errorf("memory: replace target must not be empty")
+	}
 	content = strings.TrimSpace(content)
 	if err := scanContent(content); err != nil {
 		return err
@@ -222,6 +233,9 @@ func (c *Core) Replace(t Target, oldText, content string) error {
 func (c *Core) Remove(t Target, oldText string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if strings.TrimSpace(oldText) == "" {
+		return fmt.Errorf("memory: remove target must be non-empty")
+	}
 	body, err := c.read(t)
 	if err != nil {
 		return err

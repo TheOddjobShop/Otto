@@ -77,6 +77,9 @@ func Load(path string) (*Config, error) {
 	if cfg.StateDBPath == "" {
 		cfg.StateDBPath = filepath.Join(base, "state.db")
 	}
+	if cfg.TootSessionIDPath == "" {
+		cfg.TootSessionIDPath = cfg.SessionIDPath + "_toot"
+	}
 	if cfg.EmbedOllamaURL == "" {
 		cfg.EmbedOllamaURL = "http://localhost:11434"
 	}

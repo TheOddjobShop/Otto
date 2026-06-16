@@ -16,6 +16,10 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                   // AWS access key id
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`), // PEM private keys
 	regexp.MustCompile(`ssh-(rsa|ed25519) AAAA[0-9A-Za-z+/]+`),
+	regexp.MustCompile(`gh[posru]_[A-Za-z0-9]{20,}`),   // GitHub PAT/OAuth/server/refresh tokens
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`), // GitHub fine-grained PAT
+	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`), // Slack tokens
+	regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`),       // Google API keys
 }
 
 // injectionPatterns match a small, illustrative sample of prompt-injection

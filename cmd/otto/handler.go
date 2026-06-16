@@ -350,10 +350,10 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 		log.Printf("dropping message from non-allowlisted user %d", u.UserID)
 		return
 	}
-	h.otto.markUserMessage()
 	if strings.TrimSpace(u.Text) == "" && len(u.PhotoIDs) == 0 {
 		return
 	}
+	h.otto.markUserMessage()
 	// Commands are read-only or session-only — they don't acquire the Otto
 	// slot, so /whoami / /status etc. work even while Otto is busy.
 	if cmd := h.tryCommand(ctx, u); cmd.handled {

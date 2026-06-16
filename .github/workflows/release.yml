@@ -35,10 +35,14 @@ jobs:
         run: |
           go build -ldflags "-X main.version=${{ github.ref_name }}" \
             -o otto-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/otto
+          go build -ldflags "-X main.version=${{ github.ref_name }}" \
+            -o otto-memory-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/otto-memory
       - uses: actions/upload-artifact@v4
         with:
           name: otto-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: otto-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            otto-${{ matrix.goos }}-${{ matrix.goarch }}
+            otto-memory-${{ matrix.goos }}-${{ matrix.goarch }}
 
   release:
     needs: build
