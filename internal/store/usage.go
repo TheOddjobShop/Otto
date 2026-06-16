@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -22,8 +23,8 @@ type SourceTotals struct {
 // RecordUsage appends one token-usage row. It stamps ts with the current unix
 // time, mirroring AppendTurn. Best-effort callers may ignore the error after
 // logging — a failed usage write must never break a reply.
-func (s *Store) RecordUsage(source, model string, in, out, cacheCreation, cacheRead int) error {
-	_, err := s.db.Exec(
+func (s *Store) RecordUsage(ctx context.Context, source, model string, in, out, cacheCreation, cacheRead int) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO token_usage(source, model, input_tokens, output_tokens, cache_creation, cache_read, ts)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		source, model, in, out, cacheCreation, cacheRead, time.Now().Unix(),
@@ -36,9 +37,9 @@ func (s *Store) RecordUsage(source, model string, in, out, cacheCreation, cacheR
 
 // UsageTotals returns the grand total across all rows. Zero values on an empty
 // table (COALESCE turns the NULL SUM of no rows into 0).
-func (s *Store) UsageTotals() (Totals, error) {
+func (s *Store) UsageTotals(ctx context.Context) (Totals, error) {
 	var t Totals
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 		       COALESCE(SUM(cache_creation), 0), COALESCE(SUM(cache_read), 0)
 		FROM token_usage`).
@@ -51,8 +52,8 @@ func (s *Store) UsageTotals() (Totals, error) {
 
 // UsageBySource returns one aggregate row per source, ordered by source name
 // for stable rendering.
-func (s *Store) UsageBySource() ([]SourceTotals, error) {
-	rows, err := s.db.Query(`
+func (s *Store) UsageBySource(ctx context.Context) ([]SourceTotals, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT source, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 		       COALESCE(SUM(cache_creation), 0), COALESCE(SUM(cache_read), 0)
 		FROM token_usage

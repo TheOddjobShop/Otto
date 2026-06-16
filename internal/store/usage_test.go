@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -18,9 +19,10 @@ func openTestStore(t *testing.T) *Store {
 func TestRecordUsageAndAggregate(t *testing.T) {
 	s := openTestStore(t)
 
+	ctx := context.Background()
 	rows := []struct {
-		source              string
-		model               string
+		source          string
+		model           string
 		in, out, cc, cr int
 	}{
 		{"main", "claude-opus-4-8", 100, 20, 5, 1000},
@@ -28,12 +30,12 @@ func TestRecordUsageAndAggregate(t *testing.T) {
 		{"toto", "claude-haiku-4-5", 30, 5, 0, 200},
 	}
 	for _, r := range rows {
-		if err := s.RecordUsage(r.source, r.model, r.in, r.out, r.cc, r.cr); err != nil {
+		if err := s.RecordUsage(ctx, r.source, r.model, r.in, r.out, r.cc, r.cr); err != nil {
 			t.Fatalf("RecordUsage: %v", err)
 		}
 	}
 
-	totals, err := s.UsageTotals()
+	totals, err := s.UsageTotals(ctx)
 	if err != nil {
 		t.Fatalf("UsageTotals: %v", err)
 	}
@@ -44,7 +46,7 @@ func TestRecordUsageAndAggregate(t *testing.T) {
 		t.Errorf("totals cache = %+v, want cc 5 cr 1700", totals)
 	}
 
-	bySrc, err := s.UsageBySource()
+	bySrc, err := s.UsageBySource(ctx)
 	if err != nil {
 		t.Fatalf("UsageBySource: %v", err)
 	}
@@ -61,7 +63,7 @@ func TestRecordUsageAndAggregate(t *testing.T) {
 
 func TestUsageTotalsEmpty(t *testing.T) {
 	s := openTestStore(t)
-	totals, err := s.UsageTotals()
+	totals, err := s.UsageTotals(context.Background())
 	if err != nil {
 		t.Fatalf("UsageTotals: %v", err)
 	}
