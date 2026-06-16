@@ -55,6 +55,17 @@ CREATE TABLE IF NOT EXISTS inbox (
 	hop       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS inbox_undelivered ON inbox(delivered, id);
+CREATE TABLE IF NOT EXISTS token_usage (
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
+	source          TEXT    NOT NULL,
+	model           TEXT    NOT NULL,
+	input_tokens    INTEGER NOT NULL,
+	output_tokens   INTEGER NOT NULL,
+	cache_creation  INTEGER NOT NULL,
+	cache_read      INTEGER NOT NULL,
+	ts              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS token_usage_source ON token_usage(source);
 `
 
 // Open opens (creating if needed) the SQLite database at path and ensures the
