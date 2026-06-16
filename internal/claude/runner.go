@@ -69,6 +69,10 @@ type RunArgs struct {
 	// "medium", "high", "xhigh", "max". Empty = inherit default. Used by
 	// Toot so the announcement composer thinks before writing.
 	Effort string
+	// Source labels which Otto subsystem made this call (e.g. "main", "bus",
+	// "toto", "toot") for the token tracker. Metadata only — buildCmdArgs
+	// ignores it, so the spawned command is unaffected.
+	Source string
 	// AppendSystemPrompt, when non-empty, replaces the runner's configured
 	// systemPrompt for this single call. Used by Toto so a dynamic per-
 	// call prompt (cat persona + Otto's in-flight prompt as context) can
