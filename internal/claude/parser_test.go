@@ -126,11 +126,44 @@ func TestParseStreamSurfacesPermissionDenials(t *testing.T) {
 	}
 }
 
-func TestParseStreamMalformedLineReturnsError(t *testing.T) {
-	in := strings.NewReader(`{not valid json`)
-	events := make(chan Event, 1)
-	if err := ParseStream(context.Background(), in, events); err == nil {
-		t.Fatal("expected error, got nil")
+// A single malformed/non-JSON line (e.g. stray stdout) must be skipped rather
+// than aborting the whole stream and dropping the final result event.
+func TestParseStreamMalformedLineSkipped(t *testing.T) {
+	in := strings.NewReader("{not valid json\n" +
+		`{"type":"result","subtype":"success"}` + "\n")
+	events := make(chan Event, 4)
+	if err := ParseStream(context.Background(), in, events); err != nil {
+		t.Fatalf("ParseStream: %v", err)
+	}
+	close(events)
+	sawResult := false
+	for ev := range events {
+		if _, ok := ev.(ResultEvent); ok {
+			sawResult = true
+		}
+	}
+	if !sawResult {
+		t.Fatal("expected ResultEvent after skipping malformed line")
+	}
+}
+
+// On a non-success result frame with no top-level "error" field, the result
+// body ("result") is surfaced as ResultEvent.Error so the diagnostic isn't lost.
+func TestParseStreamResultErrorFallback(t *testing.T) {
+	in := strings.NewReader(`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"tool execution failed"}` + "\n")
+	events := make(chan Event, 4)
+	if err := ParseStream(context.Background(), in, events); err != nil {
+		t.Fatalf("ParseStream: %v", err)
+	}
+	close(events)
+	var got ResultEvent
+	for ev := range events {
+		if r, ok := ev.(ResultEvent); ok {
+			got = r
+		}
+	}
+	if got.Error != "tool execution failed" {
+		t.Fatalf("ResultEvent.Error = %q, want %q", got.Error, "tool execution failed")
 	}
 }
 
