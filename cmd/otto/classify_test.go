@@ -35,6 +35,26 @@ func TestParseModelFromVerdict(t *testing.T) {
 	}
 }
 
+func TestParseClassifyJSON(t *testing.T) {
+	out := `{"type":"result","subtype":"success","result":"CODE","usage":{"input_tokens":12,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":900}}`
+	verdict, u, ok := parseClassifyJSON([]byte(out))
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if verdict != "CODE" {
+		t.Errorf("verdict = %q, want CODE", verdict)
+	}
+	if u.InputTokens != 12 || u.OutputTokens != 3 || u.CacheReadTokens != 900 {
+		t.Errorf("usage = %+v, want in12 out3 cr900", u)
+	}
+}
+
+func TestParseClassifyJSONMalformed(t *testing.T) {
+	if _, _, ok := parseClassifyJSON([]byte("not json")); ok {
+		t.Error("ok = true on malformed input, want false")
+	}
+}
+
 func TestModelLabel(t *testing.T) {
 	cases := map[string]string{
 		ottoCodingModel:  "opus-4.8 (coding)",

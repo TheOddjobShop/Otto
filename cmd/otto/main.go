@@ -183,7 +183,7 @@ func main() {
 		pets: newPetRegistry(toto, toot),
 		// Per-turn model router: Haiku for chat, Opus for coding tasks.
 		// A cheap Haiku one-shot decides; failures fall back to Haiku.
-		classifier: &execClassifier{binary: cfg.ClaudeBinaryPath, workDir: home},
+		classifier: &execClassifier{binary: cfg.ClaudeBinaryPath, workDir: home, store: memStore},
 		// Pets rotate their own sessions on the idle window too.
 		petRotators: []petRotator{toto, toot},
 	}

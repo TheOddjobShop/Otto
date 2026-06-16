@@ -4,12 +4,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"otto/internal/claude"
+	"otto/internal/store"
 )
 
 // Otto's per-turn model routing. Otto defaults to a fast, cheap model for
@@ -71,6 +75,40 @@ func parseModelFromVerdict(raw string) string {
 	return ottoDefaultModel
 }
 
+// classifyUsage is the token accounting parsed out of the classifier's JSON
+// envelope. Field names mirror claude.ResultEvent so recordUsage consumes it.
+type classifyUsage struct {
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+}
+
+// parseClassifyJSON extracts the verdict text and token usage from the single
+// JSON object `claude -p --output-format json` returns. Returns ok=false on any
+// JSON error so the caller can fall back to the default model.
+func parseClassifyJSON(b []byte) (verdict string, u classifyUsage, ok bool) {
+	var env struct {
+		Result string `json:"result"`
+		Usage  struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(b, &env); err != nil {
+		return "", classifyUsage{}, false
+	}
+	u = classifyUsage{
+		InputTokens:         env.Usage.InputTokens,
+		OutputTokens:        env.Usage.OutputTokens,
+		CacheCreationTokens: env.Usage.CacheCreationInputTokens,
+		CacheReadTokens:     env.Usage.CacheReadInputTokens,
+	}
+	return env.Result, u, true
+}
+
 // modelLabel renders a model id for human-facing surfaces like /status.
 func modelLabel(model string) string {
 	switch model {
@@ -91,8 +129,9 @@ func modelLabel(model string) string {
 // tools. --no-session-persistence keeps it from littering the disk with a new
 // session per message, mirroring the proven prayer-checkin scripts.
 type execClassifier struct {
-	binary  string // path to the claude binary
-	workDir string // cwd for the subprocess (Otto pins this to $HOME)
+	binary  string       // path to the claude binary
+	workDir string       // cwd for the subprocess (Otto pins this to $HOME)
+	store   *store.Store // optional; nil disables usage recording
 }
 
 // classify returns the model Otto should use for this turn. Any failure
@@ -113,7 +152,7 @@ func (c *execClassifier) classify(ctx context.Context, message string) string {
 		"--no-session-persistence",
 		"--dangerously-skip-permissions",
 		"--disallowedTools", "*",
-		"--output-format", "text",
+		"--output-format", "json",
 	)
 	if c.workDir != "" {
 		cmd.Dir = c.workDir
@@ -125,7 +164,18 @@ func (c *execClassifier) classify(ctx context.Context, message string) string {
 		log.Printf("model router failed (%v) — defaulting to %s", err, ottoDefaultModel)
 		return ottoDefaultModel
 	}
-	model := parseModelFromVerdict(string(out))
+	verdict, usage, ok := parseClassifyJSON(out)
+	if !ok {
+		log.Printf("model router: unparseable JSON — defaulting to %s", ottoDefaultModel)
+		return ottoDefaultModel
+	}
+	recordUsage(ctx, c.store, "classify", classifierModel, claude.ResultEvent{
+		InputTokens:         usage.InputTokens,
+		OutputTokens:        usage.OutputTokens,
+		CacheCreationTokens: usage.CacheCreationTokens,
+		CacheReadTokens:     usage.CacheReadTokens,
+	})
+	model := parseModelFromVerdict(verdict)
 	log.Printf("model router: %q → %s", truncate(message, 60), modelLabel(model))
 	return model
 }
