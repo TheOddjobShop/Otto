@@ -155,7 +155,7 @@ case "$PKG_MGR" in
       echo "  [!] Homebrew not installed. Get it from https://brew.sh and rerun."
       exit 1
     fi
-    for pkg in go node jq; do
+    for pkg in go node jq python3; do
       if ! command -v "$pkg" &>/dev/null; then brew install "$pkg"; fi
     done
     ;;
@@ -262,7 +262,7 @@ if ! $HAS_GCAL_OAUTH; then
        Application type: Desktop application → Create → Download JSON.
 
 STEP
-  read -p "  Drag the downloaded JSON file here: " GCAL_JSON
+  read -r -p "  Drag the downloaded JSON file here: " GCAL_JSON
   GCAL_JSON=$(echo "$GCAL_JSON" | tr -d "'\"" | sed 's/^ *//;s/ *$//')
   # Expand a leading ~ to $HOME so paths typed as ~/… work correctly.
   # Double-quotes suppress shell tilde expansion, so we do it explicitly.
@@ -381,7 +381,7 @@ else
   echo "  Press Enter for a single account named 'personal'."
 fi
 echo ""
-read -p "  > " GMAIL_INPUT
+read -r -p "  > " GMAIL_INPUT
 
 # Build the final label set from existing accounts, then apply +adds and
 # -removes from the input. Bare LABEL is treated as +LABEL for backwards
@@ -484,7 +484,7 @@ if ! $HAS_NOTION; then
        ⋯ menu → Connections → add your integration
 
 STEP
-  read -p "  Paste your Notion token: " NOTION_TOKEN
+  read -r -p "  Paste your Notion token: " NOTION_TOKEN
   if [ -z "$NOTION_TOKEN" ]; then echo "  No token entered."; exit 1; fi
 fi
 
@@ -504,8 +504,8 @@ if ! $HAS_TELEGRAM; then
   2. Message @userinfobot to get your numeric user ID.
 
 STEP
-  read -p "  Paste bot token: " TELEGRAM_BOT_TOKEN
-  read -p "  Paste your user ID: " TELEGRAM_USER_ID
+  read -r -p "  Paste bot token: " TELEGRAM_BOT_TOKEN
+  read -r -p "  Paste your user ID: " TELEGRAM_USER_ID
   if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_USER_ID" ]; then
     echo "  Both required."; exit 1
   fi
@@ -613,7 +613,22 @@ write_toml_field toot_session_id_path "$OTTO_STATE_DIR/toot_session_id" "$CONFIG
 # ── Write mcp.json ──────────────────────────────────────────────────────────
 # If notion_api_key was set in a previous run, read it back so we can write
 # mcp.json without prompting again.
-EXISTING_NOTION="$(grep -E '^notion_api_key *=' "$CONFIG_FILE" 2>/dev/null | sed -E 's/^notion_api_key *= *"(.*)"$/\1/')"
+EXISTING_NOTION="$(CONFIG_FILE="$CONFIG_FILE" python3 - <<'PYEOF'
+import json, os, re
+try:
+    with open(os.environ["CONFIG_FILE"]) as f:
+        data = f.read()
+except FileNotFoundError:
+    data = ""
+m = re.search(r'^notion_api_key *= *(.*)$', data, re.MULTILINE)
+if m:
+    raw = m.group(1).strip()
+    try:
+        print(json.loads(raw), end="")
+    except Exception:
+        print(raw.strip('"'), end="")
+PYEOF
+)"
 [ -z "$NOTION_TOKEN" ] && NOTION_TOKEN="$EXISTING_NOTION"
 
 NOTION_TOKEN_VAL="$NOTION_TOKEN" \

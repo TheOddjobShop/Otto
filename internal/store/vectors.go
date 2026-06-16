@@ -35,6 +35,12 @@ func decodeVec(b []byte) []float32 {
 // PutVector stores (or replaces) the embedding for a turn. dim is recorded so
 // SearchSemantic can skip vectors from a different-dimensioned model.
 func (s *Store) PutVector(ctx context.Context, turnID int64, model string, vec []float32) error {
+	if len(vec) == 0 {
+		// An empty vector would create a dim=0 row that SearchSemantic can
+		// never match (it requires len(query)==dim with a non-empty query),
+		// i.e. permanent dead weight. Skip it; callers are best-effort.
+		return nil
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO vectors(turn_id, model, dim, vec) VALUES (?, ?, ?, ?)`,
 		turnID, model, len(vec), encodeVec(vec),
@@ -45,17 +51,21 @@ func (s *Store) PutVector(ctx context.Context, turnID int64, model string, vec [
 	return nil
 }
 
-// SearchSemantic returns the turns whose stored embeddings are most cosine-
+// SearchSemantic returns, from the most recent limit*10 turns (by id) whose
+// stored embeddings have the same dimension as query, the ones most cosine-
 // similar to query, most-similar first, capped at limit (default 10). Only
 // vectors with the same dimension as query are considered, so a model swap
 // silently ignores stale-dimension rows until they are re-embedded. A
 // zero-length query returns no rows.
 //
-// To bound memory use the SQL query pre-filters to the most recent
-// limit*10 rows (using the vectors_dim index so the scan is O(matching-dim)
-// rather than O(all vectors)). Oldest rows are excluded from the candidate
-// set; if the corpus grows very large a periodic pruning job (PruneTurns)
-// should be run to keep N bounded and recall quality high.
+// NOTE: results are NOT a global top-k. To bound memory the SQL query
+// pre-filters to the most recent limit*10 rows (using the vectors_dim index so
+// the scan is O(matching-dim) rather than O(all vectors)) and cosine-ranks only
+// within that window. A more-similar but older turn outside the window is
+// excluded regardless of its score, so recall over the full corpus degrades as
+// the table grows past limit*10 rows. Run PruneTurns periodically to keep N
+// bounded; for true global top-k, scan all matching-dim rows (scoring while
+// streaming to bound memory) or adopt an ANN index.
 func (s *Store) SearchSemantic(ctx context.Context, query []float32, limit int) ([]Turn, error) {
 	if len(query) == 0 {
 		return nil, nil
@@ -67,11 +77,11 @@ func (s *Store) SearchSemantic(ctx context.Context, query []float32, limit int) 
 	// unbounded BLOB allocation as the vectors table grows: each BLOB is
 	// 4*dim bytes (~3 KB at 768-dim), and without a cap every search call
 	// would load the entire table into Go memory just to return limit rows.
-	// The 10× multiplier keeps the candidate pool representative enough
-	// that cosine ranking over recent turns remains accurate. Older turns
-	// beyond the window are only excluded if the table has grown large; a
+	// The 10× multiplier ranks over the most recent turns only: a more-
+	// similar but older turn beyond the window is excluded regardless of
+	// score, so this is recency-bounded recall, not a global top-k. A
 	// properly-scheduled PruneTurns call keeps N small and removes the
-	// trade-off entirely.
+	// trade-off in practice.
 	candidate := limit * 10
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.persona, t.role, t.content, t.ts, v.vec

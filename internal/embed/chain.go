@@ -8,11 +8,13 @@ import (
 	"time"
 )
 
-// perBackendTimeout is the deadline given to each backend call in a Chain.
-// Using a fresh context per backend (rather than a shared one) ensures a
-// slow or cold-loading first backend does not starve the fallback: even if
-// backend A consumes its full 60 s, backend B still gets an independent 60 s
-// budget derived from the original (outer) ctx.
+// perBackendTimeout is the per-call deadline applied to each backend in a Chain
+// via context.WithTimeout(outerCtx, perBackendTimeout). Note this is bounded by
+// the outer ctx's own deadline: if the caller's ctx has less than 60 s
+// remaining, a backend gets only that remaining time, not a fresh 60 s. Using a
+// fresh context per backend (rather than a shared one) ensures one backend's
+// cancel does not propagate to the next, so a slow first backend's cancellation
+// does not leave the fallback with an already-cancelled context.
 const perBackendTimeout = 60 * time.Second
 
 // Compile-time assertion that *Chain satisfies Embedder.
@@ -57,9 +59,10 @@ func (c *Chain) Name() string {
 
 // Embed tries each backend in order, returning the first successful Result.
 // Each backend receives its own context.WithTimeout(ctx, perBackendTimeout)
-// derived from the caller's ctx. This prevents a slow (e.g. cold-loading)
-// first backend from exhausting a shared deadline and leaving the fallback
-// with an already-expired context.
+// derived from the caller's ctx. The per-backend budget is capped by the
+// caller's ctx deadline, so a tighter outer timeout shrinks every backend's
+// effective deadline. Using a fresh context per backend prevents one backend's
+// cancellation from propagating to the next.
 // Returns an aggregated error if the chain is empty or all backends fail.
 func (c *Chain) Embed(ctx context.Context, text string) (Result, error) {
 	if len(c.backends) == 0 {

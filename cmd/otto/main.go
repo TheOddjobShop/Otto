@@ -138,9 +138,6 @@ func main() {
 	// message_<sender>.
 	tootRunner := claude.NewExecRunner(cfg.ClaudeBinaryPath, petMCPPath, "", home)
 	tootSessionPath := cfg.TootSessionIDPath
-	if tootSessionPath == "" {
-		tootSessionPath = cfg.SessionIDPath + "_toot"
-	}
 	tootSession, err := claude.LoadSession(tootSessionPath)
 	if err != nil {
 		log.Fatalf("toot session: %v", err)

@@ -81,7 +81,11 @@ func (s *Store) SearchFTS(ctx context.Context, query string, limit int) ([]Turn,
 // without additional bookkeeping.
 //
 // PruneTurns is safe to call from a background goroutine while the main
-// message loop is running; the WAL journal allows concurrent readers.
+// message loop is running. PruneTurns is a writer (it issues a DELETE), and
+// SQLite WAL permits only one writer at a time; concurrent writes are
+// serialized by the busy_timeout(5000) pragma (see Open), so this background
+// prune may briefly block, or be blocked by, the main loop's writes, but will
+// not return "database is locked", corrupt data, or deadlock.
 func (s *Store) PruneTurns(ctx context.Context, keep int) (int64, error) {
 	if keep <= 0 {
 		return 0, nil

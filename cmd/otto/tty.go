@@ -65,6 +65,9 @@ func (t *ttyBot) readStdin() {
 			return
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "\n[tty] stdin read error: %v\n", err)
+	}
 	fmt.Fprintln(os.Stderr, "\n[tty] stdin closed — shutting down")
 	t.once.Do(t.shutdown)
 }

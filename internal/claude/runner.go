@@ -3,7 +3,6 @@
 package claude
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -215,8 +214,8 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 	if err != nil {
 		return err
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := newTailBuf(64 * 1024)
+	cmd.Stderr = stderr
 
 	// Tee stdout into a bounded tail buffer so on a non-zero exit we have
 	// some idea of what claude was emitting before it died. ParseStream
@@ -236,17 +235,26 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 		parseDone <- ParseStream(ctx, teedStdout, args.Events)
 	}()
 
+	// cmd.Wait closes the read end of the StdoutPipe once it sees the process
+	// exit. It is therefore incorrect to let Wait run concurrently with the
+	// ParseStream goroutine still reading that pipe — a close racing an
+	// in-flight read surfaces as a spurious "file already closed" scan error
+	// (see os/exec.Cmd.StdoutPipe). Gate Wait on the reader draining to EOF.
+	// On normal exit the child closes its write end, ParseStream reaches EOF,
+	// and only then do we Wait. On ctx cancellation we SIGKILL the child,
+	// which likewise unblocks the reader before Wait closes the pipe.
 	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
+	go func() {
+		wg.Wait()
+		waitDone <- cmd.Wait()
+	}()
 
 	select {
 	case <-ctx.Done():
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-waitDone
-		wg.Wait()
 		return ctx.Err()
 	case waitErr := <-waitDone:
-		wg.Wait()
 		parseErr := <-parseDone
 		if waitErr != nil {
 			stderrText := strings.TrimSpace(stderr.String())

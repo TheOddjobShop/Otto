@@ -56,7 +56,11 @@ User message:
 >>>`
 
 func classifyPrompt(message string) string {
-	return fmt.Sprintf(classifyPromptTmpl, message)
+	// Defang the closing delimiter so a user message containing ">>>" cannot
+	// break out of the data block and steer the router (prompt injection).
+	// Blast radius is only model selection, but this is a cheap hardening.
+	safe := strings.ReplaceAll(message, ">>>", "> > >")
+	return fmt.Sprintf(classifyPromptTmpl, safe)
 }
 
 // parseModelFromVerdict maps the router's raw text to a concrete model id.
