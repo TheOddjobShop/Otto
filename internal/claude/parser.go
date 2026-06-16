@@ -27,6 +27,7 @@ type rawMessage struct {
 	// rotator blind and the session never cleared.
 	Usage struct {
 		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage"`
@@ -94,7 +95,15 @@ func ParseStream(ctx context.Context, r io.Reader, events chan<- Event) error {
 						if errMsg == "" && raw.Subtype != "success" {
 							errMsg = raw.Result
 						}
-						ev := ResultEvent{Subtype: raw.Subtype, Error: errMsg, ContextTokens: ctxTokens}
+						ev := ResultEvent{
+							Subtype:             raw.Subtype,
+							Error:               errMsg,
+							ContextTokens:       ctxTokens,
+							InputTokens:         raw.Usage.InputTokens,
+							OutputTokens:        raw.Usage.OutputTokens,
+							CacheCreationTokens: raw.Usage.CacheCreationInputTokens,
+							CacheReadTokens:     raw.Usage.CacheReadInputTokens,
+						}
 						for _, d := range raw.PermissionDenials {
 							if d.ToolName == "" {
 								continue

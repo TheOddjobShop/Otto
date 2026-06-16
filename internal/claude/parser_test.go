@@ -167,6 +167,37 @@ func TestParseStreamResultErrorFallback(t *testing.T) {
 	}
 }
 
+func TestParseStreamResultUsageFields(t *testing.T) {
+	line := `{"type":"result","subtype":"success","usage":{"input_tokens":7,"output_tokens":42,"cache_creation_input_tokens":100,"cache_read_input_tokens":2000}}` + "\n"
+
+	events := make(chan Event, 4)
+	if err := ParseStream(context.Background(), strings.NewReader(line), events); err != nil {
+		t.Fatalf("ParseStream: %v", err)
+	}
+	close(events)
+
+	var got ResultEvent
+	var found bool
+	for ev := range events {
+		if r, ok := ev.(ResultEvent); ok {
+			got, found = r, true
+		}
+	}
+	if !found {
+		t.Fatal("no ResultEvent emitted")
+	}
+	if got.InputTokens != 7 || got.OutputTokens != 42 {
+		t.Errorf("in/out = %d/%d, want 7/42", got.InputTokens, got.OutputTokens)
+	}
+	if got.CacheCreationTokens != 100 || got.CacheReadTokens != 2000 {
+		t.Errorf("cache = %d/%d, want 100/2000", got.CacheCreationTokens, got.CacheReadTokens)
+	}
+	// Regression: ContextTokens still sums the three input-side fields.
+	if got.ContextTokens != 7+100+2000 {
+		t.Errorf("ContextTokens = %d, want %d", got.ContextTokens, 7+100+2000)
+	}
+}
+
 func TestParseStreamReturnsOnContextCancel(t *testing.T) {
 	// Unbuffered channel — first send will block until cancellation lands.
 	events := make(chan Event)
