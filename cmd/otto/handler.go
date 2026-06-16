@@ -490,6 +490,7 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 		SessionID:          h.session.ID(),
 		ImagePaths:         imagePaths,
 		Model:              model,
+		Source:             "main",
 		AppendSystemPrompt: composePromptWithTimeAndMemory(h.baseSystemPrompt, h.mem),
 	}, h.runner)
 }
@@ -550,6 +551,7 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	// a large session unrotated because shouldRotate ignores a zero count.
 	if gotResult {
 		h.otto.setInputTokens(lastResult.ContextTokens)
+		recordUsage(sendCtx, h.store, args.Source, args.Model, lastResult)
 		// Soft guard: a single agentic turn can't be interrupted mid-flight,
 		// so a heavy one (e.g. a long tool-calling task) can balloon the
 		// session far past the rotation budget before the rotator gets a free

@@ -275,6 +275,8 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 	doneParsing := make(chan struct{})
 	var assistantText strings.Builder
 	var capturedSessionID string
+	var lastResult claude.ResultEvent
+	var gotResult bool
 
 	go func() {
 		defer close(doneParsing)
@@ -284,6 +286,9 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 				assistantText.WriteString(e.Text)
 			case claude.SessionEvent:
 				capturedSessionID = e.ID
+			case claude.ResultEvent:
+				lastResult = e
+				gotResult = true
 			}
 		}
 	}()
@@ -300,9 +305,14 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 		AllowedTools:       tootAllowedTools,
 		AppendSystemPrompt: systemPrompt,
 		Events:             events,
+		Source:             "toot",
 	})
 	close(events)
 	<-doneParsing
+
+	if gotResult {
+		recordUsage(ctx, t.store, "toot", tootModel, lastResult)
+	}
 
 	if capturedSessionID != "" && capturedSessionID != t.session.ID() {
 		if setErr := t.session.Set(capturedSessionID); setErr != nil {
@@ -406,6 +416,8 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 	doneParsing := make(chan struct{})
 	var assistantText strings.Builder
 	var capturedSessionID string
+	var lastResult claude.ResultEvent
+	var gotResult bool
 
 	go func() {
 		defer close(doneParsing)
@@ -415,6 +427,9 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 				assistantText.WriteString(e.Text)
 			case claude.SessionEvent:
 				capturedSessionID = e.ID
+			case claude.ResultEvent:
+				lastResult = e
+				gotResult = true
 			}
 		}
 	}()
@@ -427,9 +442,14 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 		DisallowedTools:    []string{"*"},
 		AppendSystemPrompt: systemPrompt,
 		Events:             events,
+		Source:             "toot",
 	})
 	close(events)
 	<-doneParsing
+
+	if gotResult {
+		recordUsage(ctx, t.store, "toot", tootModel, lastResult)
+	}
 
 	if capturedSessionID != "" && capturedSessionID != t.session.ID() {
 		if setErr := t.session.Set(capturedSessionID); setErr != nil {

@@ -126,11 +126,75 @@ func TestParseStreamSurfacesPermissionDenials(t *testing.T) {
 	}
 }
 
-func TestParseStreamMalformedLineReturnsError(t *testing.T) {
-	in := strings.NewReader(`{not valid json`)
-	events := make(chan Event, 1)
-	if err := ParseStream(context.Background(), in, events); err == nil {
-		t.Fatal("expected error, got nil")
+// A single malformed/non-JSON line (e.g. stray stdout) must be skipped rather
+// than aborting the whole stream and dropping the final result event.
+func TestParseStreamMalformedLineSkipped(t *testing.T) {
+	in := strings.NewReader("{not valid json\n" +
+		`{"type":"result","subtype":"success"}` + "\n")
+	events := make(chan Event, 4)
+	if err := ParseStream(context.Background(), in, events); err != nil {
+		t.Fatalf("ParseStream: %v", err)
+	}
+	close(events)
+	sawResult := false
+	for ev := range events {
+		if _, ok := ev.(ResultEvent); ok {
+			sawResult = true
+		}
+	}
+	if !sawResult {
+		t.Fatal("expected ResultEvent after skipping malformed line")
+	}
+}
+
+// On a non-success result frame with no top-level "error" field, the result
+// body ("result") is surfaced as ResultEvent.Error so the diagnostic isn't lost.
+func TestParseStreamResultErrorFallback(t *testing.T) {
+	in := strings.NewReader(`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"tool execution failed"}` + "\n")
+	events := make(chan Event, 4)
+	if err := ParseStream(context.Background(), in, events); err != nil {
+		t.Fatalf("ParseStream: %v", err)
+	}
+	close(events)
+	var got ResultEvent
+	for ev := range events {
+		if r, ok := ev.(ResultEvent); ok {
+			got = r
+		}
+	}
+	if got.Error != "tool execution failed" {
+		t.Fatalf("ResultEvent.Error = %q, want %q", got.Error, "tool execution failed")
+	}
+}
+
+func TestParseStreamResultUsageFields(t *testing.T) {
+	line := `{"type":"result","subtype":"success","usage":{"input_tokens":7,"output_tokens":42,"cache_creation_input_tokens":100,"cache_read_input_tokens":2000}}` + "\n"
+
+	events := make(chan Event, 4)
+	if err := ParseStream(context.Background(), strings.NewReader(line), events); err != nil {
+		t.Fatalf("ParseStream: %v", err)
+	}
+	close(events)
+
+	var got ResultEvent
+	var found bool
+	for ev := range events {
+		if r, ok := ev.(ResultEvent); ok {
+			got, found = r, true
+		}
+	}
+	if !found {
+		t.Fatal("no ResultEvent emitted")
+	}
+	if got.InputTokens != 7 || got.OutputTokens != 42 {
+		t.Errorf("in/out = %d/%d, want 7/42", got.InputTokens, got.OutputTokens)
+	}
+	if got.CacheCreationTokens != 100 || got.CacheReadTokens != 2000 {
+		t.Errorf("cache = %d/%d, want 100/2000", got.CacheCreationTokens, got.CacheReadTokens)
+	}
+	// Regression: ContextTokens still sums the three input-side fields.
+	if got.ContextTokens != 7+100+2000 {
+		t.Errorf("ContextTokens = %d, want %d", got.ContextTokens, 7+100+2000)
 	}
 }
 

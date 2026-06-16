@@ -185,6 +185,7 @@ func (h *handler) handleBusMessage(ctx context.Context, u telegram.Update, scope
 		Prompt:             u.Text,
 		SessionID:          h.session.ID(),
 		Model:              model,
+		Source:             "bus",
 		AppendSystemPrompt: composePromptWithTimeAndMemory(h.baseSystemPrompt+extraPrompt, h.mem),
 	}, scopedRunner)
 }

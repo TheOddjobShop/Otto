@@ -272,6 +272,8 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 	doneParsing := make(chan struct{})
 	var assistantText strings.Builder
 	var capturedSessionID string
+	var lastResult claude.ResultEvent
+	var gotResult bool
 
 	go func() {
 		defer close(doneParsing)
@@ -281,6 +283,9 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 				assistantText.WriteString(e.Text)
 			case claude.SessionEvent:
 				capturedSessionID = e.ID
+			case claude.ResultEvent:
+				lastResult = e
+				gotResult = true
 			}
 		}
 	}()
@@ -306,9 +311,14 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		AllowedTools:       totoAllowedTools,
 		AppendSystemPrompt: systemPrompt,
 		Events:             events,
+		Source:             "toto",
 	})
 	close(events)
 	<-doneParsing
+
+	if gotResult {
+		recordUsage(ctx, t.store, "toto", totoModel, lastResult)
+	}
 
 	if capturedSessionID != "" && capturedSessionID != t.session.ID() {
 		if setErr := t.session.Set(capturedSessionID); setErr != nil {

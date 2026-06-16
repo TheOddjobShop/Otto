@@ -51,6 +51,19 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 			reply:   fmt.Sprintf("user=%d session=%s", u.UserID, sid),
 			handled: true,
 		}
+	case "/tokens":
+		if h.store == nil {
+			return commandResult{reply: "📊 Token tracking is disabled (no store configured).", handled: true}
+		}
+		totals, err := h.store.UsageTotals(ctx)
+		if err != nil {
+			return commandResult{reply: fmt.Sprintf("⚠️ token totals failed: %v", err), handled: true}
+		}
+		bySrc, err := h.store.UsageBySource(ctx)
+		if err != nil {
+			return commandResult{reply: fmt.Sprintf("⚠️ token breakdown failed: %v", err), handled: true}
+		}
+		return commandResult{reply: formatUsage(totals, bySrc), handled: true}
 	case "/restart":
 		// Force-cancel an in-flight Otto call. Used when Otto seems wedged,
 		// or when a long task isn't worth waiting for. The watchdog uses

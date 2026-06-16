@@ -20,6 +20,14 @@ type ResultEvent struct {
 	// alone is just the uncached delta, so the session rotator that reads this
 	// would otherwise never see the real context size. 0 if absent.
 	ContextTokens int
+	// Raw per-turn token counts from the result event's usage block, kept
+	// separate from ContextTokens (which sums the input-side fields for the
+	// rotator). These feed the token tracker. OutputTokens is not part of
+	// ContextTokens — it is the generation cost, recorded for accounting only.
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
 }
 
 func (ResultEvent) isEvent() {}

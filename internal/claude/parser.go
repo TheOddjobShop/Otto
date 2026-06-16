@@ -2,10 +2,13 @@ package claude
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 )
 
 // rawMessage matches the subset of stream-json events we use.
@@ -14,6 +17,7 @@ type rawMessage struct {
 	Subtype           string              `json:"subtype"`
 	SessionID         string              `json:"session_id"`
 	Error             string              `json:"error"`
+	Result            string              `json:"result"`
 	PermissionDenials []rawPermissionDeny `json:"permission_denials"`
 	// Usage carries the result event's token accounting. Under prompt
 	// caching, input_tokens is only the uncached delta (often single
@@ -23,6 +27,7 @@ type rawMessage struct {
 	// rotator blind and the session never cleared.
 	Usage struct {
 		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage"`
@@ -40,61 +45,85 @@ type rawPermissionDeny struct {
 }
 
 // ParseStream reads newline-delimited JSON from r and forwards interpreted
-// events to events. Returns on EOF, ctx cancel, or first parse error.
+// events to events. Returns on EOF or ctx cancel, or on a reader-level error.
+// Individual unparseable lines are logged and skipped, not returned as errors.
 func ParseStream(ctx context.Context, r io.Reader, events chan<- Event) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for sc.Scan() {
+	// bufio.Reader (vs bufio.Scanner) imposes no fixed per-line ceiling, so an
+	// oversized-but-valid stream-json frame (large tool result or assistant
+	// text) no longer aborts the turn with bufio.ErrTooLong.
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var raw rawMessage
-		if err := json.Unmarshal(line, &raw); err != nil {
-			return fmt.Errorf("claude: parse stream-json: %w", err)
-		}
-		switch raw.Type {
-		case "system":
-			if raw.Subtype == "init" && raw.SessionID != "" {
-				select {
-				case events <- SessionEvent{ID: raw.SessionID}:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-		case "assistant":
-			for _, c := range raw.Message.Content {
-				if c.Type == "text" && c.Text != "" {
-					select {
-					case events <- AssistantTextEvent{Text: c.Text}:
-					case <-ctx.Done():
-						return ctx.Err()
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			trimmed := bytes.TrimRight(line, "\r\n")
+			if len(trimmed) > 0 {
+				var raw rawMessage
+				if uerr := json.Unmarshal(trimmed, &raw); uerr != nil {
+					// A single malformed/non-JSON line (e.g. stray stdout from
+					// a hook or a partial line) must not abort the whole stream
+					// and drop the final result event. Skip and continue;
+					// reserve hard errors for reader-level failures below.
+					log.Printf("claude: skipping unparseable stream-json line: %v", uerr)
+				} else {
+					switch raw.Type {
+					case "system":
+						if raw.Subtype == "init" && raw.SessionID != "" {
+							select {
+							case events <- SessionEvent{ID: raw.SessionID}:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+						}
+					case "assistant":
+						for _, c := range raw.Message.Content {
+							if c.Type == "text" && c.Text != "" {
+								select {
+								case events <- AssistantTextEvent{Text: c.Text}:
+								case <-ctx.Done():
+									return ctx.Err()
+								}
+							}
+						}
+					case "result":
+						ctxTokens := raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens
+						errMsg := raw.Error
+						if errMsg == "" && raw.Subtype != "success" {
+							errMsg = raw.Result
+						}
+						ev := ResultEvent{
+							Subtype:             raw.Subtype,
+							Error:               errMsg,
+							ContextTokens:       ctxTokens,
+							InputTokens:         raw.Usage.InputTokens,
+							OutputTokens:        raw.Usage.OutputTokens,
+							CacheCreationTokens: raw.Usage.CacheCreationInputTokens,
+							CacheReadTokens:     raw.Usage.CacheReadInputTokens,
+						}
+						for _, d := range raw.PermissionDenials {
+							if d.ToolName == "" {
+								continue
+							}
+							ev.PermissionDenials = append(ev.PermissionDenials, PermissionDenial(d))
+						}
+						select {
+						case events <- ev:
+						case <-ctx.Done():
+							return ctx.Err()
+						}
 					}
 				}
 			}
-		case "result":
-			ctxTokens := raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens
-			ev := ResultEvent{Subtype: raw.Subtype, Error: raw.Error, ContextTokens: ctxTokens}
-			for _, d := range raw.PermissionDenials {
-				if d.ToolName == "" {
-					continue
-				}
-				ev.PermissionDenials = append(ev.PermissionDenials, PermissionDenial(d))
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
 			}
-			select {
-			case events <- ev:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+			return fmt.Errorf("claude: scan stream: %w", err)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return fmt.Errorf("claude: scan stream: %w", err)
-	}
-	return nil
 }
