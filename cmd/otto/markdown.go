@@ -13,8 +13,11 @@ var (
 	mdBoldStarRe = regexp.MustCompile(`\*\*([^*\n]+?)\*\*`)
 	// __bold__ allows single underscores inside (e.g. __under_bold__) since
 	// `__` is the explicit bold delimiter; non-greedy, no newlines.
-	mdBoldUnderRe  = regexp.MustCompile(`__(.+?)__`)
-	mdItalStarRe   = regexp.MustCompile(`\*([A-Za-z0-9][^*\n]*?[A-Za-z0-9])\*`)
+	mdBoldUnderRe = regexp.MustCompile(`__(.+?)__`)
+	// *italic* only counts when the opening star sits at the start of the
+	// text or after whitespace/opening punctuation, so unspaced operators
+	// (3*4 + 5*6) and glob-like text (foo*bar) survive untouched.
+	mdItalStarRe   = regexp.MustCompile(`(^|[\s(\[{"'])\*([A-Za-z0-9][^*\n]*?[A-Za-z0-9])\*`)
 	mdItalUnderRe  = regexp.MustCompile(`\b_([A-Za-z0-9][^_\n]*?[A-Za-z0-9])_\b`)
 	mdCodeRe       = regexp.MustCompile("`+([^`\n]+?)`+")
 	mdHeaderLineRe = regexp.MustCompile(`(?m)^#{1,6}[ \t]+`)
@@ -26,19 +29,22 @@ var (
 // actually emits in chat replies:
 //
 //   - **bold** and __bold__ → bold
-//   - *italic* and _italic_ → italic (underscore form respects word
-//     boundaries so identifiers like do_not_strip survive intact)
+//   - *italic* and _italic_ → italic (the star form requires the opening
+//     star to follow start-of-text, whitespace, or opening punctuation;
+//     the underscore form respects word boundaries so identifiers like
+//     do_not_strip survive intact)
 //   - `code` → code (inline only; multi-line ``` blocks pass through)
 //   - # / ## / ### headers → plain text
 //   - [label](url) → label (url)
 //
 // Order: bold before italic so **foo** is consumed first, then code,
-// headers, links. Math expressions like "2 * 3" are not stripped because
-// the italic regex requires alphanumeric boundaries on both sides.
+// headers, links. Math expressions — spaced ("2 * 3") or unspaced
+// ("3*4 + 5*6") — are not stripped: the italic regex requires alphanumeric
+// boundaries inside the stars and a non-word position before the opener.
 func stripMarkdown(s string) string {
 	s = mdBoldStarRe.ReplaceAllString(s, "$1")
 	s = mdBoldUnderRe.ReplaceAllString(s, "$1")
-	s = mdItalStarRe.ReplaceAllString(s, "$1")
+	s = mdItalStarRe.ReplaceAllString(s, "$1$2")
 	s = mdItalUnderRe.ReplaceAllString(s, "$1")
 	s = mdCodeRe.ReplaceAllString(s, "$1")
 	s = mdHeaderLineRe.ReplaceAllString(s, "")

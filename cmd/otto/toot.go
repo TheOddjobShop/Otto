@@ -49,9 +49,11 @@ func pickTootArt() string { return tootCycler.Next() }
 // systematic, dutiful). Mirrors Toto's architecture — own runner,
 // session, persona — with a different prompt.
 //
-// Toot's tools are all denied (--disallowedTools "*") so even though
-// he runs through Claude Code, he can't touch the filesystem, MCPs,
-// or anything else. He talks. That's it.
+// Announce denies all tools (--disallowedTools "*"). Chat/bus mode
+// (reply) instead allows only tootAllowedTools — the otto-memory
+// bus/search tools over the scoped pet MCP config — so Toot can relay
+// messages and search sessions but touch nothing else. Either way he
+// never touches the filesystem or the wider world.
 //
 // Conversational messages (command replies, error messages) stay on
 // the regular bot — Toot exists specifically to mark "this is an
