@@ -72,11 +72,17 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		h.otto.mu.Lock()
 		busy := h.otto.busy
 		inflight := h.otto.currentPrompt
+		// Capture the turn generation with the busy snapshot so the cancel
+		// below can only hit the turn we observed — not a newer turn that
+		// grabs the slot after we unlock.
+		gen := h.otto.gen
 		h.otto.mu.Unlock()
 		if !busy {
 			return commandResult{reply: "🔄 Otto isn't busy. Nothing to interrupt.", handled: true}
 		}
-		h.otto.cancelInflight()
+		if !h.otto.cancelInflight(gen) {
+			return commandResult{reply: "🔄 Otto just finished that task — nothing to interrupt.", handled: true}
+		}
 		// truncate() is rune-aware (handler.go) — safe for multi-byte
 		// characters in the user's original prompt (e.g. emoji, CJK).
 		preview := truncate(inflight, 80)

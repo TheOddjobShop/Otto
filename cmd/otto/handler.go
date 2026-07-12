@@ -42,7 +42,7 @@ type handler struct {
 	updater *updater
 	pets    *petRegistry // routes name-addressed messages to Toto/Toot/etc.
 
-	// classifier picks Otto's per-turn model (Haiku for chat, Opus for
+	// classifier picks Otto's per-turn model (Sonnet for chat, Opus for
 	// coding). Nil disables routing — Otto then inherits Claude Code's
 	// default model. Set in production by main; left nil by tests that
 	// don't exercise routing.
@@ -85,6 +85,12 @@ type ottoState struct {
 	cancel        context.CancelFunc
 	lastEvent     time.Time
 	suppressError bool
+	// gen increments on every slot acquisition. Cancellation paths (the
+	// watchdog, /restart) snapshot it together with busy under mu and pass
+	// it back to cancelInflight, which no-ops if the observed turn has
+	// since ended — so a stale snapshot can never cancel a NEWER turn that
+	// grabbed the slot in the meantime.
+	gen uint64
 	// lastSnippet is the tail of Otto's in-flight assistant text, capped
 	// to snippetCap bytes. Surfaced to Toto so that during Otto's busy
 	// window Toto can ground replies in what Otto is actually saying
@@ -115,6 +121,7 @@ func (s *ottoState) tryAcquire(prompt string) bool {
 		return false
 	}
 	s.busy = true
+	s.gen++
 	s.currentPrompt = prompt
 	s.lastEvent = time.Now()
 	s.suppressError = false
@@ -132,6 +139,7 @@ func (s *ottoState) tryAcquireOrSnapshot(prompt string) (acquired bool, snap ott
 	defer s.mu.Unlock()
 	if !s.busy {
 		s.busy = true
+		s.gen++
 		s.currentPrompt = prompt
 		s.lastEvent = time.Now()
 		s.suppressError = false
@@ -232,17 +240,26 @@ func (s *ottoState) appendSnippet(text string) {
 }
 
 // cancelInflight atomically marks the next error as suppressed and cancels
-// the in-flight Otto call, if any. Holding mu across the suppress+cancel
-// closes the TOCTOU window where release() could nil the cancel func
-// between a separate read and the call (which would otherwise mean a stale
-// or nil cancel). cancel() does not re-enter mu, so this cannot deadlock.
-func (s *ottoState) cancelInflight() {
+// the in-flight Otto call — but only if the turn the caller observed (gen,
+// captured under mu together with the busy snapshot) is still the one
+// holding the slot. If that turn already finished — or a newer turn has
+// since acquired the slot — it does nothing and returns false, so a stale
+// watchdog/restart snapshot can never cancel (and silently swallow) a
+// healthy newer turn. Holding mu across the check+suppress+cancel closes
+// the TOCTOU window where release() could nil the cancel func between a
+// separate read and the call. cancel() does not re-enter mu, so this
+// cannot deadlock.
+func (s *ottoState) cancelInflight(gen uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.busy || s.gen != gen {
+		return false
+	}
 	s.suppressError = true
 	if s.cancel != nil {
 		s.cancel()
 	}
+	return true
 }
 
 // shouldSuppressError reports whether the last cancellation came from the
@@ -454,25 +471,30 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 	defer close(watchdogDone)
 	go h.runWatchdog(ctx, u.ChatID, watchdogDone)
 
-	tmpDir, err := os.MkdirTemp("", "otto-photos-")
-	if err != nil {
-		if sendErr := telegram.SendChunked(ctx, h.bot, u.ChatID, fmt.Sprintf("⚠️ tempdir: %v", err)); sendErr != nil {
-			log.Printf("send error (tempdir failure): %v", sendErr)
-		}
-		return
-	}
-	defer os.RemoveAll(tmpDir)
-
+	// Only create the photo temp dir when the update actually carries
+	// photos: text-only turns (the common case) must never fail — or pay
+	// a create+remove syscall pair — for a directory they'd never use.
 	var imagePaths []string
-	for _, pid := range u.PhotoIDs {
-		path, err := telegram.DownloadPhotoToTemp(ctx, h.bot, pid, tmpDir)
+	if len(u.PhotoIDs) > 0 {
+		tmpDir, err := os.MkdirTemp("", "otto-photos-")
 		if err != nil {
-			if sendErr := telegram.SendChunked(ctx, h.bot, u.ChatID, fmt.Sprintf("⚠️ photo download: %v", err)); sendErr != nil {
-				log.Printf("send error (photo download failure): %v", sendErr)
+			if sendErr := telegram.SendChunked(ctx, h.bot, u.ChatID, fmt.Sprintf("⚠️ tempdir: %v", err)); sendErr != nil {
+				log.Printf("send error (tempdir failure): %v", sendErr)
 			}
 			return
 		}
-		imagePaths = append(imagePaths, path)
+		defer os.RemoveAll(tmpDir)
+
+		for _, pid := range u.PhotoIDs {
+			path, err := telegram.DownloadPhotoToTemp(ctx, h.bot, pid, tmpDir)
+			if err != nil {
+				if sendErr := telegram.SendChunked(ctx, h.bot, u.ChatID, fmt.Sprintf("⚠️ photo download: %v", err)); sendErr != nil {
+					log.Printf("send error (photo download failure): %v", sendErr)
+				}
+				return
+			}
+			imagePaths = append(imagePaths, path)
+		}
 	}
 
 	// Route to a model: Sonnet for ordinary chat, Opus for coding tasks.

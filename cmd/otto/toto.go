@@ -135,11 +135,15 @@ type Toto struct {
 
 // rotateIfIdle clears Toto's session if it has gone idle for at least window,
 // mirroring Otto's idle reset. Pet sessions otherwise live forever and answer
-// from stale history (e.g. an old version number). Holding mu means this can
-// never race a live reply; an in-flight Reply just defers the clear to the
-// next tick.
+// from stale history (e.g. an old version number). TryLock means this can
+// never race a live reply: when a Reply is in flight (it holds mu for the
+// whole Claude subprocess run, often minutes) we skip and genuinely defer
+// the clear to the next tick instead of parking the shared rotator
+// goroutine — which would also stall Otto's own session rotation.
 func (t *Toto) rotateIfIdle(window time.Duration) {
-	t.mu.Lock()
+	if !t.mu.TryLock() {
+		return
+	}
 	defer t.mu.Unlock()
 	if t.session.ID() == "" || t.lastActive.IsZero() {
 		return

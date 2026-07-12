@@ -427,6 +427,60 @@ func TestSuccessfulTurnUpdatesTokenCount(t *testing.T) {
 	}
 }
 
+// TestCancelInflightGuardsAgainstStaleGeneration verifies the TOCTOU fix:
+// a cancel request carrying the generation of an already-finished turn must
+// not cancel (or suppress the error of) a newer turn that has since claimed
+// the slot.
+func TestCancelInflightGuardsAgainstStaleGeneration(t *testing.T) {
+	s := newOttoState()
+
+	// Turn A acquires the slot; capture its generation.
+	if !s.tryAcquire("A") {
+		t.Fatal("tryAcquire A should succeed on a fresh state")
+	}
+	genA := s.gen
+
+	// Turn A finishes and a fresh turn B claims the slot with a live cancel.
+	s.release()
+	if !s.tryAcquire("B") {
+		t.Fatal("tryAcquire B should succeed after release")
+	}
+	cancelled := false
+	s.setCancel(func() { cancelled = true })
+
+	// A stale cancel carrying genA must no-op: B is a different generation.
+	if s.cancelInflight(genA) {
+		t.Error("cancelInflight(genA) should return false for a stale generation")
+	}
+	if cancelled {
+		t.Error("stale cancelInflight must not cancel the newer turn B")
+	}
+	if s.shouldSuppressError() {
+		t.Error("stale cancelInflight must not set suppressError for turn B")
+	}
+
+	// The correct generation cancels B and suppresses its error.
+	if !s.cancelInflight(s.gen) {
+		t.Fatal("cancelInflight with B's own generation should return true")
+	}
+	if !cancelled {
+		t.Error("cancelInflight should have cancelled turn B")
+	}
+	if !s.shouldSuppressError() {
+		t.Error("cancelInflight should have set suppressError for turn B")
+	}
+}
+
+// TestCancelInflightNoopWhenIdle verifies cancelInflight is a no-op (returns
+// false) when Otto isn't busy, so /restart and the watchdog can skip their
+// user-facing "interrupted" messages.
+func TestCancelInflightNoopWhenIdle(t *testing.T) {
+	s := newOttoState()
+	if s.cancelInflight(0) {
+		t.Error("cancelInflight on an idle state should return false")
+	}
+}
+
 func TestRunRotatorClearsLargeIdleSession(t *testing.T) {
 	bot := &fakeBot{}
 	runner := &fakeRunner{}
