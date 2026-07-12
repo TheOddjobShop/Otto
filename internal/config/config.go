@@ -22,8 +22,7 @@ type Config struct {
 	// TotoSessionIDPath is where the secondary "Toto" persona persists its
 	// own conversation session ID. Toto is the lightweight cat-themed
 	// stand-in that replies while Otto is busy on a long-running task.
-	// Required when Toto is enabled (which is the default); empty disables
-	// the Toto fallback entirely.
+	// Defaults to <session_id_path>_toto when empty. Toto is always enabled.
 	TotoSessionIDPath string `toml:"toto_session_id_path"`
 	// TotoPersonaPath optionally points to a Markdown file appended to
 	// Toto's built-in system prompt via --append-system-prompt. Mirrors
@@ -53,9 +52,10 @@ type Config struct {
 	// ModelContextTokens is Otto's model context window, used as the denominator
 	// for rotation thresholds. Default 200000.
 	ModelContextTokens int `toml:"model_context_tokens"`
-	// RotateHardPct: at this fraction of context, a continuously-active session
-	// rotates at the next free tick regardless of how recently the user spoke
-	// (safety cap for sessions that never go idle). Default 0.85.
+	// RotateHardPct: once the session exceeds this fraction of context, it is
+	// cleared at the next free tick — but only after the user has also been
+	// silent for at least 5 minutes (hardRotateActiveGrace in cmd/otto), so
+	// the cap never fires mid-conversation. Default 0.85.
 	RotateHardPct float64 `toml:"rotate_hard_pct"`
 	// RotateIdleMinutes: minutes of user silence after which the session is
 	// cleared regardless of size — the periodic "reset on inactivity". Default 15.
