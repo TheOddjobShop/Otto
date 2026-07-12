@@ -147,6 +147,51 @@ func TestSearchSemanticIgnoresMismatchedDim(t *testing.T) {
 	}
 }
 
+// TestSearchSemanticModelFiltersByModel guards the cross-model bug: two rows
+// share a dimension but were written by different embedding models, whose
+// vector spaces are unrelated. A model-scoped search must return only the
+// row from the queried model, silently ignoring the stale-model row.
+func TestSearchSemanticModelFiltersByModel(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	idA, err := s.AppendTurn(ctx, "otto", "assistant", "from-model-a")
+	if err != nil {
+		t.Fatalf("AppendTurn: %v", err)
+	}
+	if err := s.PutVector(ctx, idA, "model-a", []float32{1, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+	idB, err := s.AppendTurn(ctx, "otto", "assistant", "from-model-b")
+	if err != nil {
+		t.Fatalf("AppendTurn: %v", err)
+	}
+	if err := s.PutVector(ctx, idB, "model-b", []float32{1, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	got, err := s.SearchSemanticModel(ctx, []float32{1, 0}, "model-a", 10)
+	if err != nil {
+		t.Fatalf("SearchSemanticModel: %v", err)
+	}
+	if len(got) != 1 || got[0].Content != "from-model-a" {
+		t.Fatalf("model filter failed: got %+v", got)
+	}
+
+	// An empty model tag disables the filter and considers both rows.
+	all, err := s.SearchSemanticModel(ctx, []float32{1, 0}, "", 10)
+	if err != nil {
+		t.Fatalf("SearchSemanticModel (no model): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("empty model should not filter: got %d, want 2", len(all))
+	}
+}
+
 func TestPutVectorReplaces(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
