@@ -2,9 +2,12 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -32,8 +35,10 @@ type Update struct {
 //
 // Context propagation: tgbotapi/v5 does not pass context into its HTTP layer,
 // so the ctx parameter on GetUpdates and SendMessage is advisory only — those
-// calls will not be cancelled when ctx is. DownloadFile honors ctx because it
-// uses our own http.NewRequestWithContext.
+// calls will not be cancelled when ctx is. DownloadFile honors ctx only for
+// the file-body download (which uses our own http.NewRequestWithContext); the
+// initial GetFile lookup goes through tgbotapi and is bounded only by the
+// client's 30s timeout.
 type BotClient interface {
 	GetUpdates(ctx context.Context, offset int) ([]Update, error)
 	SendMessage(ctx context.Context, chatID int64, text string) error
@@ -45,7 +50,32 @@ type BotClient interface {
 }
 
 type realClient struct {
-	api *tgbotapi.BotAPI
+	api   *tgbotapi.BotAPI
+	token string
+}
+
+// redactToken replaces the bot token in an error's text with "<redacted>".
+// tgbotapi builds every request URL as .../bot<TOKEN>/<method> and Go's
+// http.Client wraps transport failures in *url.Error, whose Error() string
+// includes the full URL — token and all. Left unredacted, a network blip
+// would leak the token into the daemon log and even into Telegram chat
+// replies (e.g. the photo-download failure notice).
+func redactToken(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), token, "<redacted>"))
+}
+
+// stripURLError unwraps a *url.Error to its underlying cause. The download
+// CDN URL embeds the bot token (GetFileDirectURL), so the wrapper's
+// URL-bearing message must never escape into logs or chat replies.
+func stripURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 // NewBotClient returns a real Telegram client. apiURLTemplate is the format
@@ -54,7 +84,9 @@ type realClient struct {
 func NewBotClient(token, apiURLTemplate string) (BotClient, error) {
 	api, err := tgbotapi.NewBotAPIWithAPIEndpoint(token, apiURLTemplate)
 	if err != nil {
-		return nil, fmt.Errorf("telegram: %w", err)
+		// NewBotAPIWithAPIEndpoint calls GetMe, so a network failure here
+		// carries a token-bearing *url.Error.
+		return nil, fmt.Errorf("telegram: %w", redactToken(err, token))
 	}
 	api.Debug = false
 	// tgbotapi's default http.Client has no timeout and its requests carry
@@ -62,7 +94,7 @@ func NewBotClient(token, apiURLTemplate string) (BotClient, error) {
 	// goroutine (and its connection) forever. Bound it with a client-side
 	// timeout comfortably larger than the 5s long-poll window.
 	api.Client = &http.Client{Timeout: 30 * time.Second}
-	return &realClient{api: api}, nil
+	return &realClient{api: api, token: token}, nil
 }
 
 func (c *realClient) GetUpdates(ctx context.Context, offset int) ([]Update, error) {
@@ -98,7 +130,7 @@ func (c *realClient) GetUpdates(ctx context.Context, offset int) ([]Update, erro
 		return nil, ctx.Err()
 	}
 	if r.err != nil {
-		return nil, fmt.Errorf("telegram: get updates: %w", r.err)
+		return nil, fmt.Errorf("telegram: get updates: %w", redactToken(r.err, c.token))
 	}
 	out := make([]Update, 0, len(r.updates))
 	for _, u := range r.updates {
@@ -113,7 +145,7 @@ func (c *realClient) SendMessage(ctx context.Context, chatID int64, text string)
 	}
 	msg := tgbotapi.NewMessage(chatID, text)
 	if _, err := c.api.Send(msg); err != nil {
-		return fmt.Errorf("telegram: send: %w", err)
+		return fmt.Errorf("telegram: send: %w", redactToken(err, c.token))
 	}
 	return nil
 }
@@ -125,15 +157,18 @@ func (c *realClient) SendMessageHTML(ctx context.Context, chatID int64, text str
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
 	if _, err := c.api.Send(msg); err != nil {
-		return fmt.Errorf("telegram: send-html: %w", err)
+		return fmt.Errorf("telegram: send-html: %w", redactToken(err, c.token))
 	}
 	return nil
 }
 
 func (c *realClient) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	url, err := c.api.GetFileDirectURL(fileID)
 	if err != nil {
-		return nil, "", fmt.Errorf("telegram: get file url: %w", err)
+		return nil, "", fmt.Errorf("telegram: get file url: %w", redactToken(err, c.token))
 	}
 	return downloadURL(ctx, url)
 }
@@ -162,11 +197,11 @@ func fromTGUpdate(u tgbotapi.Update) Update {
 func downloadURL(ctx context.Context, url string) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", stripURLError(err)
 	}
 	resp, err := downloadHTTPClient.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, "", stripURLError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
