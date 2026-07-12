@@ -55,11 +55,20 @@ func (h *handler) runWatchdog(ctx context.Context, chatID int64, done <-chan str
 				return
 			}
 			silence := time.Since(h.otto.lastEvent)
+			// Capture the turn generation with the busy snapshot so the
+			// cancel below can only hit the turn we observed silent — not
+			// a newer turn that grabbed the slot after we unlock.
+			gen := h.otto.gen
 			h.otto.mu.Unlock()
 
 			if silence >= watchdogCancelAfter {
+				if !h.otto.cancelInflight(gen) {
+					// The observed turn finished on its own between the
+					// snapshot and now — no reboot happened, so don't
+					// claim one.
+					return
+				}
 				log.Printf("watchdog: otto silent for %s — cancelling subprocess", silence.Round(time.Second))
-				h.otto.cancelInflight()
 				// Guard against a nil Toto — same defensive pattern as
 				// dispatch(). Production always wires Toto, but omitting
 				// the check would silently panic on any config that doesn't.
