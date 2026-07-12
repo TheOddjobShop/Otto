@@ -251,8 +251,16 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 
 	select {
 	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-waitDone
+		// Guard against racing cmd.Wait: if the child already exited and was
+		// reaped, the pid/pgid may be recycled — never raw-kill it then.
+		select {
+		case <-waitDone:
+			// Process exited naturally just as we were cancelled; nothing
+			// to kill.
+		default:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-waitDone
+		}
 		return ctx.Err()
 	case waitErr := <-waitDone:
 		parseErr := <-parseDone
@@ -292,5 +300,9 @@ func buildErrorInfo(stderrText, stdoutTail string, parseErr error) string {
 	if len(pick) > maxLen {
 		pick = "...\n" + pick[len(pick)-maxLen:]
 	}
-	return pick
+	// The byte-oriented truncation above (and tailBuf's byte-cap trimming)
+	// can cut mid-rune, and claude may emit raw binary on stderr. Telegram
+	// rejects non-UTF-8 message text with a 400, which would silently drop
+	// the very error notice this string feeds — so sanitize the result.
+	return strings.ToValidUTF8(pick, "")
 }
