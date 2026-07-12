@@ -67,8 +67,7 @@ tail -f ~/Library/Logs/otto.log                     # logs
 
 ```bash
 make build              # builds ./otto
-make test               # unit tests for all packages
-make test-integration   # integration tests (uses testdata/fake-claude.sh as a stub claude)
+make test               # unit tests for all packages (uses testdata/fake-claude.sh as a stub claude)
 make vet                # go vet + gofmt check
 go test -race ./...
 go build ./cmd/otto-memory   # build the MCP server binary
@@ -95,7 +94,7 @@ go build ./cmd/otto-memory   # build the MCP server binary
 ├── systemd/otto.service  # user-service template (Linux only)
 ├── launchd/com.otto.bot.plist  # user-agent template (macOS only)
 ├── setup.sh              # idempotent installer (Arch + macOS), incl. Ollama + model pull
-├── testdata/             # fake-claude.sh stub for integration tests
+├── testdata/             # fake-claude.sh stub claude used by tests
 ├── docs/superpowers/
 │   ├── specs/            # design specs (original + memory rearchitect)
 │   └── plans/            # implementation plans (one per merged PR)
@@ -123,7 +122,7 @@ Hand-editable. The `otto-memory` MCP server exposes `memory_add` / `memory_repla
 - `turns_fts` — FTS5 keyword mirror, kept in sync by trigger.
 - `vectors` table — one embedding per turn (model + dim + blob).
 
-Otto embeds each turn asynchronously after sending the reply (best-effort, 30 s-bounded, off the reply path). The `session_search` MCP tool embeds the query, runs semantic top-k + FTS5 in parallel, and merges (semantic first, keyword fills). If Ollama is unreachable or no model is pulled, search transparently degrades to FTS5 keyword only — nothing breaks.
+Otto embeds each turn asynchronously after sending the reply (best-effort, 130 s-bounded — 2 × 60 s per embedding backend + 10 s slack — off the reply path). The `session_search` MCP tool embeds the query, runs semantic top-k + FTS5 in parallel, and merges (semantic first, keyword fills). If Ollama is unreachable or no model is pulled, search transparently degrades to FTS5 keyword only — nothing breaks.
 
 **Semantic embeddings.** Local-only via Ollama at `http://localhost:11434`, ordered chain `embeddinggemma → nomic-embed-text → keyword floor`. Zero per-token cost, fully private. Vectors are tagged with `model` + `dim`, so a model swap silently ignores stale-dimension rows until they get re-embedded.
 
@@ -209,7 +208,7 @@ backstop, so this hook patch is optional but cleaner.
 - **Google auth expired:** re-run `setup.sh`; it will re-prompt for whichever credential is missing.
 - **Memory not persisting facts:** confirm `otto-memory` is in `mcp.json` (`grep otto-memory ~/.config/otto/mcp.json`) and that `~/.local/state/otto/memory/` is writable. Logs print `turn log` / `embed turn` errors at the `otto` journal.
 - **Semantic search not working:** check Ollama (`systemctl --user status ollama` on Linux, `brew services list` on macOS) and `ollama list`. Without a pulled embedding model, `session_search` falls back to keyword (FTS5) and logs `session_search: embed unavailable, keyword-only`. To enable semantic recall after a fresh install: `ollama pull embeddinggemma`.
-- **Session never rotates:** the rotator fires when idle ≥ `rotate_idle_minutes` (regardless of session size), OR when `input_tokens` ≥ `rotate_hard_pct × model_context_tokens` AND you have paused for at least 5 minutes — whichever comes first. Otto must also be free (not mid-turn). The journal logs `rotator: rotated session ...` on success. Disable by setting `model_context_tokens = 0`.
+- **Session never rotates:** the rotator fires when idle ≥ `rotate_idle_minutes` (regardless of session size), OR when `input_tokens` ≥ `rotate_hard_pct × model_context_tokens` AND you have paused for at least 5 minutes — whichever comes first. Otto must also be free (not mid-turn). The journal logs `rotator: rotated session ...` on success. Rotation cannot be disabled; to make it fire less often, raise `rotate_idle_minutes` and/or `model_context_tokens` (values ≤ 0 for either are reset to their defaults).
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.
 - **`/update` seems to hang:** after `/update`, the bot exits within ~10s and systemd brings up the new binary on the next tick. Toot pings you back from the fresh process once it's settled. If you don't see that ping within ~30s, check `systemctl --user status otto` and `journalctl --user -u otto -n 50`.
 - **macOS: `/update` leaves Otto offline:** check `launchctl print gui/$(id -u)/com.otto.bot` and confirm `KeepAlive = true`. Older hand-written plists may be missing it (or have the default `ThrottleInterval = 10` that swallows back-to-back `kickstart` calls) — re-run `./setup.sh` to install the canonical one.

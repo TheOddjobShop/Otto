@@ -1,4 +1,4 @@
-.PHONY: build install install-memory test test-integration vet clean
+.PHONY: build install install-memory test vet clean
 
 # Default to git describe so locally-built binaries advertise a real version
 # string; the updater treats literal "dev" as "skip polling," so a missing
@@ -31,9 +31,6 @@ install: install-memory
 
 test:
 	go test ./...
-
-test-integration:
-	INTEGRATION=1 go test ./... -run Integration -v
 
 vet:
 	go vet ./...
