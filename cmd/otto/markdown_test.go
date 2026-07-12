@@ -29,6 +29,11 @@ func TestStripMarkdownItalic(t *testing.T) {
 		{"do_not_strip", "do_not_strip"}, // identifier survives
 		{"2 * 3", "2 * 3"},               // math, not emphasis
 		{"*", "*"},                       // bare asterisk
+		{"the answer is 3*4 + 5*6 = 42", "the answer is 3*4 + 5*6 = 42"}, // unspaced multiplication survives
+		{"2*3", "2*3"}, // unspaced multiplication, minimal
+		{"foo*bar and baz*qux", "foo*bar and baz*qux"}, // glob-like text survives
+		{"(*emphasis*)", "(emphasis)"},                 // opener after punctuation still strips
+		{"line one\n*two*", "line one\ntwo"},           // opener after newline still strips
 	}
 	for _, tc := range cases {
 		got := stripMarkdown(tc.in)
