@@ -82,15 +82,15 @@ func run() error {
 	}, srv.handleSearch)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "forward_to_otto",
-		Description: "Hand off a user message to Otto. Use when the user's request is actual work Otto should handle (running code, sending email, files, calendar, anything beyond chat). message = the user's request in their voice; reason = a one-line \"why I forwarded\" shown to the user in the visible banner. Do NOT forward chitchat or questions about Toto himself. Refused inside a nested agent dispatch.",
+		Description: fmt.Sprintf("Hand off a user message to Otto. Use when the user's request is actual work Otto should handle (running code, sending email, files, calendar, anything beyond chat). message = the user's request in their voice; reason = a one-line \"why I forwarded\" shown to the user in the visible banner. Do NOT forward chitchat or questions about Toto himself. Refused once the agent-to-agent chain reaches its %d-hop cap.", store.MaxBusHop),
 	}, srv.handleForward)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "message_toto",
-		Description: "Ping Toto the cat. Use when the user's request fits a chatty/vibes/cat-flavored answer, or when you just feel like giving Toto a one-liner moment (e.g. finishing a long task and letting him acknowledge it). message = the line you want Toto to deliver, in Otto's voice; reason = a one-line \"why I pinged\" shown to the user in the visible banner. Refused inside a nested agent dispatch.",
+		Description: fmt.Sprintf("Ping Toto the cat. Use when the user's request fits a chatty/vibes/cat-flavored answer, or when you just feel like giving Toto a one-liner moment (e.g. finishing a long task and letting him acknowledge it). message = the line you want Toto to deliver, in Otto's voice; reason = a one-line \"why I pinged\" shown to the user in the visible banner. Refused once the agent-to-agent chain reaches its %d-hop cap.", store.MaxBusHop),
 	}, srv.handleMessageToto)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "message_toot",
-		Description: "Ping Toot the owl. Use when something is structured / list-shaped / release-shaped and his clipboard-owl voice fits, or for fun when the vibe is bureaucratic. message = the line you want Toot to deliver, in Otto's voice; reason = a one-line \"why I pinged\" shown to the user in the visible banner. Refused inside a nested agent dispatch.",
+		Description: fmt.Sprintf("Ping Toot the owl. Use when something is structured / list-shaped / release-shaped and his clipboard-owl voice fits, or for fun when the vibe is bureaucratic. message = the line you want Toot to deliver, in Otto's voice; reason = a one-line \"why I pinged\" shown to the user in the visible banner. Refused once the agent-to-agent chain reaches its %d-hop cap.", store.MaxBusHop),
 	}, srv.handleMessageToot)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

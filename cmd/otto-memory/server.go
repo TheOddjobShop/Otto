@@ -218,7 +218,7 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 		r, err := s.embedder.Embed(ectx, q)
 		ecancel()
 		if err == nil {
-			if sem, serr := s.store.SearchSemantic(ctx, r.Vector, limit); serr == nil {
+			if sem, serr := s.store.SearchSemanticModel(ctx, r.Vector, r.Model, limit); serr == nil {
 				semantic = sem
 			} else {
 				log.Printf("session_search: semantic: %v", serr)
@@ -352,15 +352,20 @@ func defaultSenderFor(target string) string {
 }
 
 // mergeTurns combines semantic and keyword results, semantic first, deduped by
-// turn ID, capped at limit. Semantic hits rank by meaning; keyword hits fill
-// the remainder (catching exact tokens vectors miss).
+// turn ID, capped at limit. Semantic hits rank by meaning; a slice of the slots
+// is reserved for keyword hits so exact-token matches always surface. This
+// matters because SearchSemanticModel is unthresholded — in steady state it
+// returns exactly limit rows regardless of similarity — so without a reservation
+// mediocre semantic hits would permanently starve exact keyword matches. Any
+// reserved slots left unused by keyword hits (dupes or too few) are backfilled
+// with semantic hits so the result is never short-changed.
 func mergeTurns(semantic, fts []store.Turn, limit int) []store.Turn {
 	seen := make(map[int64]bool)
 	out := make([]store.Turn, 0, limit)
-	for _, group := range [][]store.Turn{semantic, fts} {
+	add := func(group []store.Turn, upTo int) {
 		for _, t := range group {
-			if len(out) >= limit {
-				return out
+			if len(out) >= upTo {
+				return
 			}
 			if seen[t.ID] {
 				continue
@@ -369,5 +374,10 @@ func mergeTurns(semantic, fts []store.Turn, limit int) []store.Turn {
 			out = append(out, t)
 		}
 	}
+	// Reserve up to half the slots for keyword hits, then let keyword hits
+	// claim them, then backfill any remainder with semantic hits.
+	add(semantic, limit-min(len(fts), limit/2))
+	add(fts, limit)
+	add(semantic, limit)
 	return out
 }

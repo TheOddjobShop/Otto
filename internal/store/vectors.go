@@ -33,7 +33,9 @@ func decodeVec(b []byte) []float32 {
 }
 
 // PutVector stores (or replaces) the embedding for a turn. dim is recorded so
-// SearchSemantic can skip vectors from a different-dimensioned model.
+// SearchSemantic can skip vectors from a different-dimensioned model, and the
+// model tag lets SearchSemanticModel skip same-dimension vectors from an
+// unrelated embedding model.
 func (s *Store) PutVector(ctx context.Context, turnID int64, model string, vec []float32) error {
 	if len(vec) == 0 {
 		// An empty vector would create a dim=0 row that SearchSemantic can
@@ -51,12 +53,26 @@ func (s *Store) PutVector(ctx context.Context, turnID int64, model string, vec [
 	return nil
 }
 
-// SearchSemantic returns, from the most recent limit*10 turns (by id) whose
-// stored embeddings have the same dimension as query, the ones most cosine-
-// similar to query, most-similar first, capped at limit (default 10). Only
-// vectors with the same dimension as query are considered, so a model swap
-// silently ignores stale-dimension rows until they are re-embedded. A
-// zero-length query returns no rows.
+// SearchSemantic ranks recent same-dimension vectors by cosine similarity to
+// query without filtering on the embedding model. It is retained for callers
+// operating on a single-model corpus (e.g. tests); production search should
+// use SearchSemanticModel so that vectors from an unrelated embedding model
+// that merely shares the dimension are not cosine-compared against.
+func (s *Store) SearchSemantic(ctx context.Context, query []float32, limit int) ([]Turn, error) {
+	return s.SearchSemanticModel(ctx, query, "", limit)
+}
+
+// SearchSemanticModel returns, from the most recent limit*10 turns (by id)
+// whose stored embeddings have the same dimension as query — and, when model
+// is non-empty, were written by that same embedding model — the ones most
+// cosine-similar to query, most-similar first, capped at limit (default 10).
+//
+// The model filter matters because two embedding models can emit identical
+// dimensions while occupying unrelated vector spaces, making cross-model
+// cosine similarity meaningless noise. Passing the query's model tag skips
+// rows written by a different model, so a model swap silently ignores the
+// stale-model (and stale-dimension) rows until they are re-embedded rather
+// than ranking them as bogus matches. A zero-length query returns no rows.
 //
 // NOTE: results are NOT a global top-k. To bound memory the SQL query
 // pre-filters to the most recent limit*10 rows (using the vectors_dim index so
@@ -66,7 +82,7 @@ func (s *Store) PutVector(ctx context.Context, turnID int64, model string, vec [
 // the table grows past limit*10 rows. Run PruneTurns periodically to keep N
 // bounded; for true global top-k, scan all matching-dim rows (scoring while
 // streaming to bound memory) or adopt an ANN index.
-func (s *Store) SearchSemantic(ctx context.Context, query []float32, limit int) ([]Turn, error) {
+func (s *Store) SearchSemanticModel(ctx context.Context, query []float32, model string, limit int) ([]Turn, error) {
 	if len(query) == 0 {
 		return nil, nil
 	}
@@ -83,13 +99,25 @@ func (s *Store) SearchSemantic(ctx context.Context, query []float32, limit int) 
 	// properly-scheduled PruneTurns call keeps N small and removes the
 	// trade-off in practice.
 	candidate := limit * 10
-	rows, err := s.db.QueryContext(ctx, `
+	// The v.dim predicate is kept (and always leads) so the query still hits
+	// the vectors_dim index; the model predicate, when requested, narrows
+	// further within the same-dimension rows.
+	sqlStmt := `
 		SELECT t.id, t.persona, t.role, t.content, t.ts, v.vec
 		FROM vectors v
 		JOIN turns t ON t.id = v.turn_id
-		WHERE v.dim = ?
+		WHERE v.dim = ?`
+	sqlArgs := []any{len(query)}
+	if model != "" {
+		sqlStmt += `
+		AND v.model = ?`
+		sqlArgs = append(sqlArgs, model)
+	}
+	sqlStmt += `
 		ORDER BY t.id DESC
-		LIMIT ?`, len(query), candidate)
+		LIMIT ?`
+	sqlArgs = append(sqlArgs, candidate)
+	rows, err := s.db.QueryContext(ctx, sqlStmt, sqlArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("store: semantic query: %w", err)
 	}
