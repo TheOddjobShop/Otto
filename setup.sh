@@ -74,8 +74,7 @@ shopt -u nullglob
 # saves the user re-downloading the same JSON from GCP Console.
 if [ ! -f "$CLIENT_SECRET_FILE" ] && [ -f "$GMAIL_OAUTH_PATH" ]; then
   if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'installed' in d else 1)" "$GMAIL_OAUTH_PATH" 2>/dev/null; then
-    cp "$GMAIL_OAUTH_PATH" "$CLIENT_SECRET_FILE"
-    chmod 600 "$CLIENT_SECRET_FILE"
+    install -m 600 "$GMAIL_OAUTH_PATH" "$CLIENT_SECRET_FILE"
   fi
 fi
 [ -f "$CLIENT_SECRET_FILE" ] && HAS_GCAL_OAUTH=true
@@ -89,11 +88,19 @@ if [ -f "$CONFIG_FILE" ]; then
   grep -qE '^notion_api_key *= *"[^"]+' "$CONFIG_FILE" 2>/dev/null && HAS_NOTION=true
 fi
 
-# Claude Code stores credentials under ~/.claude/ (interactive `claude /login`
-# or `claude setup-token`). If the user has set ANTHROPIC_API_KEY in their
-# shell env we accept that too — Otto inherits whatever auth claude already
-# has, it doesn't manage Anthropic credentials itself.
-if [ -d "$HOME/.claude" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+# Claude Code stores credentials as an artifact — ~/.claude/.credentials.json
+# (interactive `claude /login` or `claude setup-token` on Linux), the macOS
+# Keychain ("Claude Code-credentials"), or an apiKeyHelper in settings.json.
+# If the user has set ANTHROPIC_API_KEY in their shell env we accept that too.
+# We check for a real credential rather than the mere presence of ~/.claude,
+# which the CLI creates even when the user quits /login without authenticating.
+# Otto inherits whatever auth claude already has, it doesn't manage Anthropic
+# credentials itself.
+if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -f "$HOME/.claude/.credentials.json" ]; then
+  HAS_CLAUDE_AUTHED=true
+elif [ "$OS" = Darwin ] && security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1; then
+  HAS_CLAUDE_AUTHED=true
+elif [ -f "$HOME/.claude/settings.json" ] && grep -q '"apiKeyHelper"' "$HOME/.claude/settings.json" 2>/dev/null; then
   HAS_CLAUDE_AUTHED=true
 fi
 
@@ -264,6 +271,11 @@ if ! $HAS_GCAL_OAUTH; then
 STEP
   read -r -p "  Drag the downloaded JSON file here: " GCAL_JSON
   GCAL_JSON=$(echo "$GCAL_JSON" | tr -d "'\"" | sed 's/^ *//;s/ *$//')
+  # Terminal/iTerm backslash-escape spaces and other specials when a file is
+  # dragged in (e.g. `My\ Downloads`, `client_secret\ \(1\).json`). read -r
+  # keeps those backslashes literally, so strip a backslash before any char to
+  # recover the real path.
+  GCAL_JSON=$(printf '%s' "$GCAL_JSON" | sed 's/\\\(.\)/\1/g')
   # Expand a leading ~ to $HOME so paths typed as ~/… work correctly.
   # Double-quotes suppress shell tilde expansion, so we do it explicitly.
   GCAL_JSON="${GCAL_JSON/#\~/$HOME}"
@@ -274,8 +286,7 @@ STEP
   if [ "$GCAL_TYPE" != installed ]; then
     echo "  Wrong client type ($GCAL_TYPE) — must be Desktop application."; exit 1
   fi
-  cp "$GCAL_JSON" "$CLIENT_SECRET_FILE"
-  chmod 600 "$CLIENT_SECRET_FILE"
+  install -m 600 "$GCAL_JSON" "$CLIENT_SECRET_FILE"
   HAS_GCAL_OAUTH=true
   echo "  [ok] Saved to $CLIENT_SECRET_FILE"
 fi
@@ -465,6 +476,14 @@ for label in "${GMAIL_LABELS[@]}"; do
   GMAIL_OAUTH_PATH="$GMAIL_OAUTH_PATH" \
     GMAIL_CREDENTIALS_PATH="$CRED_PATH" \
     npx --ignore-scripts -y @gongrzhe/server-gmail-autoauth-mcp auth
+  # The auth helper can exit 0 even if the browser flow was cancelled, so we
+  # check the credentials artifact rather than the exit code (mirrors the
+  # calendar/Drive steps).
+  if [ ! -f "$CRED_PATH" ]; then
+    echo "  [!] gmail-${label} credentials not written — auth may have been cancelled."
+    echo "      Rerun ./setup.sh to retry."
+    exit 1
+  fi
   echo "  [ok] gmail-${label} authorized"
 done
 
@@ -484,7 +503,7 @@ if ! $HAS_NOTION; then
        ⋯ menu → Connections → add your integration
 
 STEP
-  read -r -p "  Paste your Notion token: " NOTION_TOKEN
+  read -rs -p "  Paste your Notion token: " NOTION_TOKEN; echo
   if [ -z "$NOTION_TOKEN" ]; then echo "  No token entered."; exit 1; fi
 fi
 
@@ -504,7 +523,7 @@ if ! $HAS_TELEGRAM; then
   2. Message @userinfobot to get your numeric user ID.
 
 STEP
-  read -r -p "  Paste bot token: " TELEGRAM_BOT_TOKEN
+  read -rs -p "  Paste bot token: " TELEGRAM_BOT_TOKEN; echo
   read -r -p "  Paste your user ID: " TELEGRAM_USER_ID
   if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_USER_ID" ]; then
     echo "  Both required."; exit 1
@@ -630,6 +649,11 @@ if m:
 PYEOF
 )"
 [ -z "$NOTION_TOKEN" ] && NOTION_TOKEN="$EXISTING_NOTION"
+
+# Pre-create mcp.json with owner-only perms so the OAuth/Notion secrets are
+# never world-readable during the write window (the > redirect below truncates
+# without changing the mode). Mirrors the config.toml touch+chmod pattern.
+install -m 600 /dev/null "$MCP_FILE"
 
 NOTION_TOKEN_VAL="$NOTION_TOKEN" \
 CLIENT_SECRET_FILE="$CLIENT_SECRET_FILE" \
