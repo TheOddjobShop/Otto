@@ -301,13 +301,18 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		prompt = "(the user pinged you with no content — likely a greeting or attention check)"
 	}
 
-	runner := t.runner
+	// Cross-process: env vars carry the hop counter and self-name to the
+	// MCP server child so its tools enqueue follow-ups at the right depth
+	// and stamp the right sender. Stamp unconditionally — even on a direct
+	// (non-bus) turn Toto may call message_toot, and without the env its
+	// sender would misattribute to "otto" (defaultSenderFor's two-way guess
+	// can't name a third agent). hop is 0 when the turn didn't arrive via
+	// the bus.
+	hop := 0
 	if bc != nil {
-		// Cross-process: env vars carry the hop counter and self-name to
-		// the MCP server child so its tools enqueue follow-ups at the
-		// right depth and stamp the right sender.
-		runner = runner.WithEnv(busEnv(bc.Hop, "toto"))
+		hop = bc.Hop
 	}
+	runner := t.runner.WithEnv(busEnv(hop, "toto"))
 	err := runner.Run(ctx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),

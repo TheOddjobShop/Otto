@@ -123,10 +123,11 @@ func main() {
 		log.Fatalf("toto session: %v", err)
 	}
 
-	// Toot mirrors Toto's wiring: own runner with no MCP, own session,
-	// own persona file. Per-call --model, --effort, and --allowedTools
-	// are set inside Toot.reply (chat mode); --disallowedTools "*" is
-	// set inside Toot.Announce (announcement mode, all tools blocked).
+	// Toot mirrors Toto's wiring: own runner sharing the same scoped pet
+	// MCP config (otto-memory only), own session, own persona file. Per-call
+	// --model, --effort, and --allowedTools are set inside Toot.reply (chat
+	// mode); --disallowedTools "*" is set inside Toot.Announce (announcement
+	// mode, all tools blocked).
 	tootPersona, err := readTootPersona(cfg.TootPersonaPath)
 	if err != nil {
 		log.Fatalf("toot persona: %v", err)

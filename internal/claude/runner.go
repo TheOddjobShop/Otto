@@ -136,8 +136,8 @@ func (r *execRunner) WithEnv(extra map[string]string) Runner {
 // conversation found"), and that --append-system-prompt is only added when
 // a non-empty system prompt is configured.
 //
-// mcpConfigPath empty = no --mcp-config flag (used by the Toto fallback,
-// which runs without any MCP servers).
+// mcpConfigPath empty = no --mcp-config flag. Otto uses the full config;
+// the pets use a scoped config exposing only otto-memory.
 func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model, effort string, imagePaths, allowedTools, disallowedTools []string) []string {
 	for _, p := range imagePaths {
 		// The @path syntax is whitespace-delimited, so any space inside
