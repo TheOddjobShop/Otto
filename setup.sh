@@ -756,10 +756,21 @@ else
       -e "s|__HOME__|$HOME|g" \
       "$DIR/launchd/com.otto.bot.plist" > "$LAUNCHD_PLIST"
 
-  # Bootout any existing instance (ignore failure if not loaded), then
-  # bootstrap the fresh plist and kickstart -k to guarantee a clean
-  # start of the new binary.
+  # Bootout any existing instance (ignore failure if not loaded). bootout is
+  # asynchronous, so poll until the label is really gone before re-bootstrapping
+  # — bootstrapping a label that is still unloading returns EIO (error 5).
   launchctl bootout "$LAUNCHD_TARGET" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    launchctl print "$LAUNCHD_TARGET" >/dev/null 2>&1 || break
+    sleep 1
+  done
+
+  # A label left in launchd's disabled list (e.g. by an older uninstall or a
+  # manual `launchctl bootout`) makes bootstrap fail with the otherwise-cryptic
+  # "Bootstrap failed: 5: Input/output error", even with a valid plist and
+  # binary. Clear that sticky disabled state first; `enable` is a harmless
+  # no-op when the label is already enabled.
+  launchctl enable "$LAUNCHD_TARGET" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST"
   launchctl kickstart -k "$LAUNCHD_TARGET"
 
