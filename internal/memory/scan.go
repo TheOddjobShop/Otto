@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // secretPatterns match credential shapes that must never be persisted into a
@@ -16,10 +17,12 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                   // AWS access key id
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`), // PEM private keys
 	regexp.MustCompile(`ssh-(rsa|ed25519) AAAA[0-9A-Za-z+/]+`),
-	regexp.MustCompile(`gh[posru]_[A-Za-z0-9]{20,}`),   // GitHub PAT/OAuth/server/refresh tokens
-	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`), // GitHub fine-grained PAT
-	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`), // Slack tokens
-	regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`),       // Google API keys
+	regexp.MustCompile(`gh[posru]_[A-Za-z0-9]{20,}`),           // GitHub PAT/OAuth/server/refresh tokens
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),         // GitHub fine-grained PAT
+	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),         // Slack tokens
+	regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`),               // Google API keys
+	regexp.MustCompile(`\b\d{6,}:[A-Za-z0-9_-]{30,}\b`),        // Telegram bot tokens
+	regexp.MustCompile(`\b(?:ntn_|secret_)[A-Za-z0-9]{30,}\b`), // Notion integration tokens
 }
 
 // injectionPatterns match a small, illustrative sample of prompt-injection
@@ -65,24 +68,24 @@ func scanContent(content string) error {
 	return nil
 }
 
-// isInvisibleRune reports whether r is a zero-width, bidi-control, or BOM
-// character that has no place in a plain-text memory entry. Ordinary
-// whitespace (space, tab, newline) is allowed.
+// isInvisibleRune reports whether r is an invisible or format-control
+// character that has no place in a plain-text memory entry: the entire
+// Unicode Cf (format) category — zero-width chars, bidi controls, BOM, soft
+// hyphen, and tag characters (U+E0001..E007F, the classic ASCII-smuggling
+// range) — plus the unassigned remainder of the tag block and the variation
+// selectors (U+FE00..FE0F, U+E0100..E01EF), which can encode hidden payloads.
+// Ordinary whitespace (space, tab, newline) is allowed. Note this also
+// rejects ZWJ and VS-16, so composed emoji sequences are refused alongside
+// other invisible runes; bare emoji still pass.
 func isInvisibleRune(r rune) bool {
 	switch {
-	case r == '\u061c': // Arabic letter mark (RTL injection vector)
+	case unicode.Is(unicode.Cf, r): // all format chars incl. bidi, ZW*, tags
 		return true
-	case r == '\u180e': // Mongolian vowel separator (zero-width)
+	case r >= 0xE0000 && r <= 0xE007F: // full tag block, incl. unassigned gaps
 		return true
-	case r == '\u200b', r == '\u200c', r == '\u200d': // zero-width space / ZWNJ / ZWJ
+	case r >= 0xFE00 && r <= 0xFE0F: // variation selectors
 		return true
-	case r >= '\u200e' && r <= '\u200f': // LRM / RLM
-		return true
-	case r >= '\u202a' && r <= '\u202e': // bidi embeddings / overrides
-		return true
-	case r == '\u2060', r == '\ufeff': // word joiner / BOM
-		return true
-	case r >= '\u2066' && r <= '\u2069': // bidi isolates: LRI / RLI / FSI / PDI
+	case r >= 0xE0100 && r <= 0xE01EF: // variation selectors supplement
 		return true
 	}
 	return false

@@ -256,6 +256,38 @@ func TestMergeTurnsRespectsLimit(t *testing.T) {
 	}
 }
 
+// TestMergeTurnsReservesSlotsForKeywordHits is the regression guard: when a
+// full page of unthresholded semantic hits would otherwise fill every slot, an
+// exact keyword hit must still surface rather than being permanently crowded
+// out. Half the slots are reserved for FTS, so at least one keyword ID appears.
+func TestMergeTurnsReservesSlotsForKeywordHits(t *testing.T) {
+	semantic := []store.Turn{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}}
+	fts := []store.Turn{{ID: 99}}
+	got := mergeTurns(semantic, fts, 4)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 results, got %d: %+v", len(got), got)
+	}
+	var sawKeyword bool
+	for _, tr := range got {
+		if tr.ID == 99 {
+			sawKeyword = true
+		}
+	}
+	if !sawKeyword {
+		t.Errorf("exact keyword hit (ID 99) was crowded out by semantic hits: %+v", got)
+	}
+}
+
+// TestMergeTurnsBackfillsWhenKeywordScarce confirms reserved-but-unused slots
+// are filled with semantic hits so the result is never short of limit.
+func TestMergeTurnsBackfillsWhenKeywordScarce(t *testing.T) {
+	semantic := []store.Turn{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}}
+	got := mergeTurns(semantic, nil, 4)
+	if len(got) != 4 {
+		t.Fatalf("no keyword hits: reserved slots should backfill to 4, got %d: %+v", len(got), got)
+	}
+}
+
 // failEmbedder always errors, simulating Ollama being down.
 type failEmbedder struct{}
 

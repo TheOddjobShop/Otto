@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"otto/internal/claude"
@@ -162,6 +163,24 @@ func (c *execClassifier) classify(ctx context.Context, message string) string {
 		cmd.Dir = c.workDir
 	}
 	cmd.Env = append(os.Environ(), "OTTO_RUNNING=1")
+	// Run claude in its own process group and kill the whole group on
+	// timeout, so children it spawns (hooks, MCP stdio servers) are reaped
+	// too — mirrors internal/claude/runner.go's group-kill.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err == syscall.ESRCH {
+			// Group already gone. Per os/exec, any non-ErrProcessDone
+			// error from Cancel is surfaced by Wait even on a clean
+			// exit, which would misreport this race as a router failure.
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	// Even after the group kill, don't let Output block forever on an
+	// escaped descendant holding the stdout pipe open — a hung classify
+	// would otherwise wedge the otto slot until restart.
+	cmd.WaitDelay = 5 * time.Second
 
 	out, err := cmd.Output()
 	if err != nil {

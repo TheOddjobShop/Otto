@@ -173,14 +173,53 @@ func TestBusHopCtxRoundtrip(t *testing.T) {
 	}
 }
 
-// TestLegacyAgentHopStillTripsCap exercises the back-compat shim so older
-// call sites that used WithAgentHop continue to refuse nested enqueues.
-func TestLegacyAgentHopStillTripsCap(t *testing.T) {
+// TestEnqueueRefusesBeyondHopCap confirms that a ctx carrying a hop counter
+// at MaxBusHop refuses an enqueue at hop+1, so a dispatch already at the cap
+// cannot push a further forward.
+func TestEnqueueRefusesBeyondHopCap(t *testing.T) {
 	s := newInboxStore(t)
-	ctx := WithAgentHop(context.Background())
+	ctx := WithBusHop(context.Background(), MaxBusHop)
 	n, _ := BusHopFromCtx(ctx)
-	if _, err := s.Enqueue(ctx, "toto", "agent", "otto", "ping", n+1); !errors.Is(err, ErrBusLoopGuard) {
-		t.Fatalf("expected ErrBusLoopGuard from legacy hop ctx, got %v", err)
+	if _, err := s.Enqueue(ctx, "toto", "agent", "otto", "ping", n+1); !errors.Is(err, ErrBusHopExceeded) {
+		t.Fatalf("expected ErrBusHopExceeded from hop ctx at cap, got %v", err)
+	}
+}
+
+// TestDequeueAllConcurrentWithEnqueue hammers DequeueAll while a writer
+// goroutine enqueues on other pooled connections. DequeueAll must begin as
+// a write transaction (see the no-op UPDATE it issues first); a deferred
+// transaction would open a read snapshot on its SELECT and the delivered=1
+// UPDATE's upgrade would fail with SQLITE_BUSY_SNAPSHOT whenever a
+// concurrent Enqueue commits in between — an error busy_timeout does not
+// retry.
+func TestDequeueAllConcurrentWithEnqueue(t *testing.T) {
+	s := newInboxStore(t)
+	ctx := context.Background()
+
+	const writes = 500
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < writes; i++ {
+			if _, err := s.Enqueue(ctx, "otto", "user", "", "msg", 0); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	for {
+		if _, err := s.DequeueAll(ctx); err != nil {
+			t.Fatalf("DequeueAll during concurrent enqueues: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("concurrent Enqueue: %v", err)
+			}
+			return
+		default:
+		}
 	}
 }
 

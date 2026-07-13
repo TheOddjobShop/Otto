@@ -135,11 +135,15 @@ type Toto struct {
 
 // rotateIfIdle clears Toto's session if it has gone idle for at least window,
 // mirroring Otto's idle reset. Pet sessions otherwise live forever and answer
-// from stale history (e.g. an old version number). Holding mu means this can
-// never race a live reply; an in-flight Reply just defers the clear to the
-// next tick.
+// from stale history (e.g. an old version number). TryLock means this can
+// never race a live reply: when a Reply is in flight (it holds mu for the
+// whole Claude subprocess run, often minutes) we skip and genuinely defer
+// the clear to the next tick instead of parking the shared rotator
+// goroutine — which would also stall Otto's own session rotation.
 func (t *Toto) rotateIfIdle(window time.Duration) {
-	t.mu.Lock()
+	if !t.mu.TryLock() {
+		return
+	}
 	defer t.mu.Unlock()
 	if t.session.ID() == "" || t.lastActive.IsZero() {
 		return
@@ -297,13 +301,18 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		prompt = "(the user pinged you with no content — likely a greeting or attention check)"
 	}
 
-	runner := t.runner
+	// Cross-process: env vars carry the hop counter and self-name to the
+	// MCP server child so its tools enqueue follow-ups at the right depth
+	// and stamp the right sender. Stamp unconditionally — even on a direct
+	// (non-bus) turn Toto may call message_toot, and without the env its
+	// sender would misattribute to "otto" (defaultSenderFor's two-way guess
+	// can't name a third agent). hop is 0 when the turn didn't arrive via
+	// the bus.
+	hop := 0
 	if bc != nil {
-		// Cross-process: env vars carry the hop counter and self-name to
-		// the MCP server child so its tools enqueue follow-ups at the
-		// right depth and stamp the right sender.
-		runner = runner.WithEnv(busEnv(bc.Hop, "toto"))
+		hop = bc.Hop
 	}
+	runner := t.runner.WithEnv(busEnv(hop, "toto"))
 	err := runner.Run(ctx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),

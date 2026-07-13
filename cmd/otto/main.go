@@ -123,10 +123,11 @@ func main() {
 		log.Fatalf("toto session: %v", err)
 	}
 
-	// Toot mirrors Toto's wiring: own runner with no MCP, own session,
-	// own persona file. Per-call --model, --effort, and --allowedTools
-	// are set inside Toot.reply (chat mode); --disallowedTools "*" is
-	// set inside Toot.Announce (announcement mode, all tools blocked).
+	// Toot mirrors Toto's wiring: own runner sharing the same scoped pet
+	// MCP config (otto-memory only), own session, own persona file. Per-call
+	// --model, --effort, and --allowedTools are set inside Toot.reply (chat
+	// mode); --disallowedTools "*" is set inside Toot.Announce (announcement
+	// mode, all tools blocked).
 	tootPersona, err := readTootPersona(cfg.TootPersonaPath)
 	if err != nil {
 		log.Fatalf("toot persona: %v", err)
@@ -178,8 +179,9 @@ func main() {
 		// Pet registry — addressed messages route here before Otto.
 		// Adding a new pet later: implement Pet, append to this list.
 		pets: newPetRegistry(toto, toot),
-		// Per-turn model router: Haiku for chat, Opus for coding tasks.
-		// A cheap Haiku one-shot decides; failures fall back to Haiku.
+		// Per-turn model router: Sonnet for chat, Opus for coding tasks.
+		// A cheap Haiku one-shot decides; failures fall back to Sonnet
+		// (the default model).
 		classifier: &execClassifier{binary: cfg.ClaudeBinaryPath, workDir: home, store: memStore},
 		// Pets rotate their own sessions on the idle window too.
 		petRotators: []petRotator{toto, toot},
@@ -214,15 +216,19 @@ func main() {
 	toot.triggerUpdate = h.runUpdate
 	toot.checkNow = h.updater.CheckNow
 
-	go h.updater.Run(ctx)
-
-	// busDrainWG tracks the runBusDrain goroutine so the shutdown sequence
-	// can wait for it to exit before memStore.Close() fires. runBusDrain
-	// calls store.DequeueAll and (via dispatchBusMessage → logTurn) also
-	// store.AppendTurn; closing the store while the goroutine is mid-call
-	// would corrupt in-flight writes. runRotator and runUpdater do NOT
-	// touch memStore directly, so they do not need the same tracking.
+	// busDrainWG tracks every goroutine that writes to memStore so the
+	// shutdown sequence can wait for them all to exit before
+	// memStore.Close() fires. runBusDrain calls store.DequeueAll and (via
+	// dispatchBusMessage → logTurn) also store.AppendTurn; the updater
+	// writes via toot.Announce → recordUsage; the pruner issues DELETEs.
+	// Closing the store while any of them is mid-call would corrupt
+	// in-flight writes. Only runRotator is store-free and needs no tracking.
 	var busDrainWG sync.WaitGroup
+	busDrainWG.Add(1)
+	go func() {
+		defer busDrainWG.Done()
+		h.updater.Run(ctx)
+	}()
 	busDrainWG.Add(1)
 	go func() {
 		defer busDrainWG.Done()
@@ -233,6 +239,13 @@ func main() {
 		// somehow lacks it, that's a config issue (the tools simply won't
 		// appear in Otto's tool list); no code change makes them work.
 		h.runBusDrain(ctx)
+	}()
+	// Low-frequency store maintenance: prune old turns and delivered inbox
+	// rows so the DB doesn't grow without bound (see prune.go).
+	busDrainWG.Add(1)
+	go func() {
+		defer busDrainWG.Done()
+		runStorePruner(ctx, memStore)
 	}()
 	go h.runRotator(ctx)
 
@@ -249,18 +262,18 @@ func main() {
 	if err := h.runPollingLoop(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("polling loop: %v", err)
 	}
-	// Drain in-flight dispatches so Otto/Toto goroutines get a chance to
-	// finish their Telegram replies before the process exits.
-	h.WaitDispatches()
 	// Cancel the context if the signal handler has not already done so,
 	// then wait for runBusDrain to exit before memStore.Close() fires.
 	// runBusDrain calls DequeueAll and (via logTurn) AppendTurn; closing
 	// the store while it is mid-call would corrupt in-flight writes.
 	cancel()
 	busDrainWG.Wait()
-	// runBusDrain's final iteration may have spawned dispatch goroutines
-	// after the WaitDispatches above returned; wait again so no bus turn
-	// is still writing to the store when the deferred Close fires.
+	// With the polling loop returned and runBusDrain exited, nothing can
+	// call dispatchWG.Add anymore, so this single Wait is race-free and
+	// drains both Telegram-path and bus-sourced dispatch goroutines before
+	// the deferred memStore.Close() fires. (Waiting earlier — while
+	// runBusDrain could still Add — risked the runtime's "WaitGroup
+	// misuse: Add called concurrently with Wait" panic.)
 	h.WaitDispatches()
 	log.Printf("otto: stopped")
 }

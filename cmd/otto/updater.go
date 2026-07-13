@@ -183,7 +183,23 @@ func (u *updater) refreshPending(ctx context.Context) (release, bool) {
 	// vX.Y.Z builds are unaffected.
 	cur, got := u.currentVersion, rel.TagName
 	bothValid := semver.IsValid(cur) && semver.IsValid(got)
-	upToDate := (bothValid && semver.Compare(got, cur) <= 0) || (!bothValid && got == cur)
+	// Locally-built binaries are stamped by `git describe`, which on any
+	// commit past the last tag (or a dirty tree) yields a prerelease-shaped
+	// version like v1.2.3-5-gabc1234 or v1.2.3-dirty. Semver orders every
+	// prerelease BELOW its release, so comparing directly would treat the
+	// older v1.2.3 GitHub release as an "update" and downgrade the newer
+	// local build. Such a build is at least as new as the tag it describes,
+	// so compare the fetched tag against the prerelease's base version.
+	// Trade-off: a genuinely tagged prerelease (e.g. v1.2.4-rc1) would not
+	// auto-upgrade to its final release — this repo never tags prereleases,
+	// and CI stamps the exact tag, so only git-describe versions hit this.
+	cmpCur := cur
+	if bothValid {
+		if pre := semver.Prerelease(cur); pre != "" {
+			cmpCur = strings.TrimSuffix(cur, pre)
+		}
+	}
+	upToDate := (bothValid && semver.Compare(got, cmpCur) <= 0) || (!bothValid && got == cur)
 	if upToDate {
 		u.mu.Lock()
 		u.pending = nil
@@ -206,7 +222,8 @@ func (u *updater) refreshPending(ctx context.Context) (release, bool) {
 	return rel, ok
 }
 
-// checkOnce is the autonomous (hourly) poll: it refreshes pending state
+// checkOnce is the autonomous periodic poll (every updateCheckInterval):
+// it refreshes pending state
 // and, if a new installable release just appeared that we haven't already
 // announced, sends a Toot announcement. The lastAnnounced guard keeps a
 // flaky network or repeated ticks from re-announcing the same version.
@@ -224,7 +241,7 @@ func (u *updater) checkOnce(ctx context.Context) {
 		return
 	}
 	// Record lastAnnounced BEFORE delivering: a flaky network shouldn't
-	// make us re-announce the same version every hour. Cost is one missed
+	// make us re-announce the same version on every tick. Cost is one missed
 	// announcement until a newer tag ships.
 	u.lastAnnounced = rel.TagName
 	u.mu.Unlock()
@@ -244,7 +261,7 @@ func (u *updater) Pending() *pendingUpdate {
 
 // CheckNow runs a synchronous release poll and returns the new pending
 // state. Used by Toot's [CHECK_FOR_UPDATE] marker so the user can ask
-// "check for updates" in chat instead of waiting for the next hourly tick.
+// "check for updates" in chat instead of waiting for the next periodic tick.
 // Returns whatever Pending() resolves to after the check completes
 // (nil = up to date).
 //
@@ -376,6 +393,15 @@ func (u *updater) Install(ctx context.Context) error {
 		os.Remove(tmp)
 		return fmt.Errorf("install: empty asset")
 	}
+	// Flush the new binary to disk before the rename. Without this, a
+	// power loss inside the write-back window can leave exe pointing at
+	// a zero-length or partial file that systemd then crash-loops on.
+	// Same atomic-write idiom as internal/memory/core.go write().
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("install: sync %s: %w", tmp, err)
+	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("install: close %s: %w", tmp, err)
@@ -387,6 +413,13 @@ func (u *updater) Install(ctx context.Context) error {
 	if err := os.Rename(tmp, exe); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("install: rename %s -> %s: %w", tmp, exe, err)
+	}
+	// Persist the rename itself. Best-effort — the swap already
+	// succeeded, so a failed directory fsync must not report the
+	// completed install as an error.
+	if dir, derr := os.Open(filepath.Dir(exe)); derr == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 
 	// Clear pending so a stuck Exit (or a deferred restart) can't
@@ -434,10 +467,15 @@ func isAllowedAssetURL(url string) bool {
 	return false
 }
 
+// maxAssetBytes caps how large a release asset we'll accept. Paranoia —
+// Otto binaries are ~10 MB. Exceeding it is an explicit error (asset
+// discarded), never a silent truncation.
+const maxAssetBytes = 100 << 20
+
 // download streams a binary asset from url into dst. 5-minute timeout.
-// The 100 MB cap on LimitReader is paranoia — Otto binaries are ~10 MB.
 // Returns the number of bytes written; a non-nil error means the download
-// or write failed and dst should be discarded.
+// or write failed (including an asset over maxAssetBytes) and dst should
+// be discarded.
 func (u *updater) download(ctx context.Context, url string, dst io.Writer) (int64, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
@@ -453,7 +491,17 @@ func (u *updater) download(ctx context.Context, url string, dst io.Writer) (int6
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	return io.Copy(dst, io.LimitReader(resp.Body, 100<<20))
+	// Read one byte past the cap so an oversized asset is detectable:
+	// a bare LimitReader would stop at the cap with a nil error, and the
+	// truncated (corrupt) binary would get installed over the running one.
+	written, err := io.Copy(dst, io.LimitReader(resp.Body, maxAssetBytes+1))
+	if err != nil {
+		return written, err
+	}
+	if written > maxAssetBytes {
+		return written, fmt.Errorf("asset exceeds %d MB cap", maxAssetBytes>>20)
+	}
+	return written, nil
 }
 
 // resolveExePath returns the absolute, symlink-resolved path of the

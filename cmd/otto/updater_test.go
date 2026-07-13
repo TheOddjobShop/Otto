@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -183,6 +184,47 @@ func TestCheckOnceDedupesAnnouncement(t *testing.T) {
 	}
 }
 
+func TestCheckOnceSkipsDowngradeFromPrereleaseBuild(t *testing.T) {
+	// Locally-built binaries are stamped by `git describe`, so a build a
+	// few commits past v1.2.3 runs as v1.2.3-5-gabc1234 — a semver
+	// prerelease. The releases/latest tag v1.2.3 is OLDER than that build;
+	// treating it as an update would announce and install a downgrade.
+	json := fmt.Sprintf(`{
+		"tag_name": "v1.2.3",
+		"assets": [{"name": "otto-%s-%s", "browser_download_url": "https://x/asset"}]
+	}`, runtime.GOOS, runtime.GOARCH)
+	u, bot, cleanup := newTestUpdater(t, json)
+	defer cleanup()
+	u.currentVersion = "v1.2.3-5-gabc1234"
+
+	u.checkOnce(context.Background())
+
+	if len(bot.sent) != 0 {
+		t.Errorf("got %d messages, want 0 (no downgrade announcement)", len(bot.sent))
+	}
+	if u.Pending() != nil {
+		t.Errorf("Pending()=%+v, want nil (v1.2.3 is not newer than a v1.2.3-based local build)", u.Pending())
+	}
+}
+
+func TestCheckOncePrereleaseBuildStillUpgradesToNewerTag(t *testing.T) {
+	// A git-describe build off v1.2.3 must still see v1.2.4 as an update.
+	json := fmt.Sprintf(`{
+		"tag_name": "v1.2.4",
+		"assets": [{"name": "otto-%s-%s", "browser_download_url": "https://x/asset"}]
+	}`, runtime.GOOS, runtime.GOARCH)
+	u, _, cleanup := newTestUpdater(t, json)
+	defer cleanup()
+	u.currentVersion = "v1.2.3-5-gabc1234"
+
+	u.checkOnce(context.Background())
+
+	p := u.Pending()
+	if p == nil || p.Tag != "v1.2.4" {
+		t.Errorf("Pending()=%+v, want v1.2.4 pending", p)
+	}
+}
+
 func TestCheckOnceSkipsMissingPlatformAsset(t *testing.T) {
 	// Release exists but has no asset for the running platform. Toot
 	// only narrates installable releases — when the platform doesn't
@@ -322,6 +364,30 @@ func TestInstallDownloadFailure(t *testing.T) {
 	got, _ := os.ReadFile(exePath)
 	if string(got) != "OLD" {
 		t.Errorf("original clobbered on failure: %q", got)
+	}
+}
+
+func TestDownloadRejectsOversizedAsset(t *testing.T) {
+	// An asset larger than maxAssetBytes must be rejected with an error,
+	// not silently truncated at the cap — a truncated binary would be
+	// chmod'd and renamed over the running executable.
+	chunk := make([]byte, 1<<20)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for written := int64(0); written <= maxAssetBytes; written += int64(len(chunk)) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	u := &updater{httpClient: server.Client()}
+	_, err := u.download(context.Background(), server.URL, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for asset exceeding maxAssetBytes, got nil")
+	}
+	if !strings.Contains(err.Error(), "cap") {
+		t.Errorf("err=%v, want size-cap error", err)
 	}
 }
 

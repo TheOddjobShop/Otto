@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestTailBufKeepsLastCapBytes(t *testing.T) {
@@ -70,6 +71,23 @@ func TestBuildErrorInfoTruncates(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "...\n") {
 		t.Errorf("expected truncation prefix, got %q...", got[:20])
+	}
+}
+
+func TestBuildErrorInfoTruncatesOnRuneBoundary(t *testing.T) {
+	// A byte-oriented cut into multibyte text must not yield invalid UTF-8:
+	// Telegram rejects non-UTF-8 message text with a 400, silently dropping
+	// the error notice this string feeds.
+	long := strings.Repeat("日", 600) + "\nerror at /home/user/x.go"
+	got := buildErrorInfo("", long, nil)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated output is not valid UTF-8: %q", got[:20])
+	}
+	if !strings.HasSuffix(got, "error at /home/user/x.go") {
+		t.Errorf("tail lost after truncation: %q", got)
+	}
+	if len(got) > 1600 {
+		t.Errorf("len = %d, want <= 1600", len(got))
 	}
 }
 

@@ -49,9 +49,11 @@ func pickTootArt() string { return tootCycler.Next() }
 // systematic, dutiful). Mirrors Toto's architecture — own runner,
 // session, persona — with a different prompt.
 //
-// Toot's tools are all denied (--disallowedTools "*") so even though
-// he runs through Claude Code, he can't touch the filesystem, MCPs,
-// or anything else. He talks. That's it.
+// Announce denies all tools (--disallowedTools "*"). Chat/bus mode
+// (reply) instead allows only tootAllowedTools — the otto-memory
+// bus/search tools over the scoped pet MCP config — so Toot can relay
+// messages and search sessions but touch nothing else. Either way he
+// never touches the filesystem or the wider world.
 //
 // Conversational messages (command replies, error messages) stay on
 // the regular bot — Toot exists specifically to mark "this is an
@@ -132,11 +134,16 @@ func stripCheckMarker(s string) (string, bool) {
 func (t *Toot) Name() string { return "toot" }
 
 // rotateIfIdle clears Toot's session if it has gone idle for at least window,
-// mirroring Otto's idle reset. Without this the pet session lives forever and
-// can answer from stale history (e.g. an old version number). Holding mu means
-// it can never race a live reply.
+// mirroring Otto's idle reset. Pet sessions otherwise live forever and answer
+// from stale history (e.g. an old version number). TryLock means this can
+// never race a live reply: when a reply is in flight (it holds mu for the
+// whole Claude subprocess run, often minutes) we skip and genuinely defer
+// the clear to the next tick instead of parking the shared rotator
+// goroutine — which would also stall Otto's own session rotation.
 func (t *Toot) rotateIfIdle(window time.Duration) {
-	t.mu.Lock()
+	if !t.mu.TryLock() {
+		return
+	}
 	defer t.mu.Unlock()
 	if t.session.ID() == "" || t.lastActive.IsZero() {
 		return
@@ -293,10 +300,15 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 		}
 	}()
 
-	runner := t.runner
+	// Stamp the self-name/hop env unconditionally so message_toto attributes
+	// to "toot" even on a direct (non-bus) turn; without it the MCP child
+	// falls back to defaultSenderFor and misnames the sender "otto". hop is 0
+	// when the turn didn't arrive via the bus.
+	hop := 0
 	if bc != nil {
-		runner = runner.WithEnv(busEnv(bc.Hop, "toot"))
+		hop = bc.Hop
 	}
+	runner := t.runner.WithEnv(busEnv(hop, "toot"))
 	err := runner.Run(ctx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),

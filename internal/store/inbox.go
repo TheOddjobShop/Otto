@@ -46,12 +46,6 @@ type InboxMsg struct {
 // down rather than retry.
 var ErrBusHopExceeded = errors.New("store: inbox enqueue blocked by hop cap")
 
-// ErrBusLoopGuard is retained as an alias of ErrBusHopExceeded for
-// backwards compatibility with callers/tests that referenced the older
-// boolean-flavored loop guard. New code should reference ErrBusHopExceeded
-// directly.
-var ErrBusLoopGuard = ErrBusHopExceeded
-
 // ctxKeyBusHop tags a context with the hop count of the currently
 // dispatching bus message. The dispatcher in cmd/otto wraps each agent-
 // targeted ctx via WithBusHop(n); downstream tool handlers read it via
@@ -74,10 +68,9 @@ func BusHopFromCtx(ctx context.Context) (int, bool) {
 	return v, ok
 }
 
-// WithAgentHop is the pre-hop-counter compatibility shim. It marks ctx as
-// already being inside an agent dispatch so legacy callers that called
-// Enqueue without specifying a hop still trip the cap. Equivalent to
-// WithBusHop(ctx, MaxBusHop).
+// WithAgentHop marks ctx as already being inside an agent dispatch so a
+// caller that enqueues without threading an explicit hop still trips the
+// cap. Equivalent to WithBusHop(ctx, MaxBusHop).
 func WithAgentHop(ctx context.Context) context.Context {
 	return WithBusHop(ctx, MaxBusHop)
 }
@@ -149,6 +142,19 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 		return nil, fmt.Errorf("store: inbox dequeue: begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Force the transaction to begin as a write transaction. database/sql
+	// starts SQLite transactions deferred, so without this the SELECT below
+	// would open a read snapshot and the later delivered=1 UPDATE would have
+	// to upgrade it; if any other connection commits a write in between, that
+	// upgrade fails immediately with SQLITE_BUSY_SNAPSHOT — a failure the
+	// busy_timeout pragma deliberately does not retry, because waiting cannot
+	// revalidate a stale snapshot. A no-op UPDATE as the first statement
+	// acquires the write lock up front (honoring busy_timeout), so this
+	// read-then-write body can never hit the snapshot-upgrade path.
+	if _, err := tx.ExecContext(ctx, `UPDATE inbox SET delivered = delivered WHERE 0`); err != nil {
+		return nil, fmt.Errorf("store: inbox dequeue: acquire write lock: %w", err)
+	}
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, ts, target, source, sender, body, hop
@@ -222,8 +228,9 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 // message dispatch. PruneInbox is a writer (it issues a DELETE), and SQLite
 // WAL permits only one writer at a time; concurrent writes are serialized by
 // the busy_timeout(5000) pragma (see Open), so this background prune may
-// briefly block, or be blocked by, the dispatch path's writes, but will not
-// return "database is locked", corrupt data, or deadlock.
+// briefly block, or be blocked by, the dispatch path's writes. It only fails
+// with "database is locked" if a writer holds the lock beyond that timeout;
+// it cannot corrupt data or deadlock.
 func (s *Store) PruneInbox(ctx context.Context, keep int) (int64, error) {
 	if keep <= 0 {
 		return 0, nil

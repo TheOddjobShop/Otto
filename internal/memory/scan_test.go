@@ -21,6 +21,9 @@ func TestScanRejectsSecrets(t *testing.T) {
 		"AWS: AKIAIOSFODNN7EXAMPLE",
 		"-----BEGIN OPENSSH PRIVATE KEY-----",
 		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB user@host",
+		"bot token 123456789:AAEwoXpQqQ7P8Z1cD2eF3gH4iJ5kL6mN7oP",
+		"notion ntn_123456789012345678901234567890abcdefAB",
+		"notion secret_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abc",
 	}
 	for _, c := range bad {
 		if err := scanContent(c); err == nil {
@@ -51,6 +54,11 @@ func TestScanRejectsInvisibleUnicode(t *testing.T) {
 		"text\u180ewith mongolian vowel separator", // zero-width separator
 		"text\u2066with LRI isolate",               // bidi isolate (LRI)
 		"text\u2069with PDI isolate",               // bidi isolate (PDI)
+		"text\u00adwith soft hyphen",               // soft hyphen
+		"tag\U000E0041smuggled ASCII",              // Unicode tag character (ASCII smuggling)
+		"tag\U000E007Fblock end",                   // tag block terminator
+		"text\ufe0fwith VS-16",                     // variation selector
+		"text\U000E0100with VS supplement",         // variation selector supplement
 	}
 	for _, c := range bad {
 		if err := scanContent(c); err == nil {

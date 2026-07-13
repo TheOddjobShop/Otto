@@ -136,8 +136,8 @@ func (r *execRunner) WithEnv(extra map[string]string) Runner {
 // conversation found"), and that --append-system-prompt is only added when
 // a non-empty system prompt is configured.
 //
-// mcpConfigPath empty = no --mcp-config flag (used by the Toto fallback,
-// which runs without any MCP servers).
+// mcpConfigPath empty = no --mcp-config flag. Otto uses the full config;
+// the pets use a scoped config exposing only otto-memory.
 func buildCmdArgs(prompt, sessionID, mcpConfigPath, systemPrompt, model, effort string, imagePaths, allowedTools, disallowedTools []string) []string {
 	for _, p := range imagePaths {
 		// The @path syntax is whitespace-delimited, so any space inside
@@ -251,8 +251,16 @@ func (r *execRunner) Run(ctx context.Context, args RunArgs) error {
 
 	select {
 	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-waitDone
+		// Guard against racing cmd.Wait: if the child already exited and was
+		// reaped, the pid/pgid may be recycled — never raw-kill it then.
+		select {
+		case <-waitDone:
+			// Process exited naturally just as we were cancelled; nothing
+			// to kill.
+		default:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-waitDone
+		}
 		return ctx.Err()
 	case waitErr := <-waitDone:
 		parseErr := <-parseDone
@@ -292,5 +300,9 @@ func buildErrorInfo(stderrText, stdoutTail string, parseErr error) string {
 	if len(pick) > maxLen {
 		pick = "...\n" + pick[len(pick)-maxLen:]
 	}
-	return pick
+	// The byte-oriented truncation above (and tailBuf's byte-cap trimming)
+	// can cut mid-rune, and claude may emit raw binary on stderr. Telegram
+	// rejects non-UTF-8 message text with a 400, which would silently drop
+	// the very error notice this string feeds — so sanitize the result.
+	return strings.ToValidUTF8(pick, "")
 }
