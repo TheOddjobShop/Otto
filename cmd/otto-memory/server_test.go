@@ -387,7 +387,7 @@ func TestHandleForwardEmptyReasonIsError(t *testing.T) {
 
 func TestHandleForwardRefusesInsideAgentHop(t *testing.T) {
 	s := newTestServer(t)
-	ctx := store.WithAgentHop(context.Background())
+	ctx := store.WithBusHop(context.Background(), store.MaxBusHop)
 
 	res, _, err := s.handleForward(ctx, nil, forwardArgs{
 		Message: "do the thing",
@@ -480,7 +480,7 @@ func TestHandleMessageTotoEmptyReasonIsError(t *testing.T) {
 
 func TestHandleMessageTotoRefusesInsideAgentHop(t *testing.T) {
 	s := newTestServer(t)
-	ctx := store.WithAgentHop(context.Background())
+	ctx := store.WithBusHop(context.Background(), store.MaxBusHop)
 
 	res, _, err := s.handleMessageToto(ctx, nil, messageArgs{
 		Message: "say hi",
@@ -573,7 +573,7 @@ func TestHandleMessageTootEmptyReasonIsError(t *testing.T) {
 
 func TestHandleMessageTootRefusesInsideAgentHop(t *testing.T) {
 	s := newTestServer(t)
-	ctx := store.WithAgentHop(context.Background())
+	ctx := store.WithBusHop(context.Background(), store.MaxBusHop)
 
 	res, _, err := s.handleMessageToot(ctx, nil, messageArgs{
 		Message: "filing one",

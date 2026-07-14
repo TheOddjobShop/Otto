@@ -68,13 +68,6 @@ func BusHopFromCtx(ctx context.Context) (int, bool) {
 	return v, ok
 }
 
-// WithAgentHop marks ctx as already being inside an agent dispatch so a
-// caller that enqueues without threading an explicit hop still trips the
-// cap. Equivalent to WithBusHop(ctx, MaxBusHop).
-func WithAgentHop(ctx context.Context) context.Context {
-	return WithBusHop(ctx, MaxBusHop)
-}
-
 // Enqueue inserts one row into the inbox and returns its id.
 //
 // target ∈ {otto,toto,toot}, source ∈ {user,agent}. body must be non-empty
