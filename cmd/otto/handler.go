@@ -252,13 +252,19 @@ func (s *ottoState) appendSnippet(text string) {
 func (s *ottoState) cancelInflight(gen uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.busy || s.gen != gen {
+	// Require a live cancel func before claiming success. Between tryAcquire
+	// (busy=true, gen++) and setCancel there is a sub-microsecond window where
+	// busy && cancel==nil for the current turn. Without this guard, a /restart
+	// or watchdog cancelInflight landing in that window would set suppressError
+	// and return true without actually cancelling — falsely telling the user
+	// the turn was interrupted and poisoning it so a later genuine error is
+	// silently swallowed. Returning false here leaves the turn untouched; a
+	// moment later setCancel registers the func and a retry works correctly.
+	if !s.busy || s.gen != gen || s.cancel == nil {
 		return false
 	}
 	s.suppressError = true
-	if s.cancel != nil {
-		s.cancel()
-	}
+	s.cancel()
 	return true
 }
 

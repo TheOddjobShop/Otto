@@ -471,6 +471,33 @@ func TestCancelInflightGuardsAgainstStaleGeneration(t *testing.T) {
 	}
 }
 
+// TestCancelInflightNoopWhenCancelNotYetRegistered verifies that during the
+// acquire→setCancel window (busy=true, gen set, but cancel==nil) cancelInflight
+// reports failure and leaves suppressError untouched, rather than falsely
+// claiming success and poisoning the turn.
+func TestCancelInflightNoopWhenCancelNotYetRegistered(t *testing.T) {
+	s := newOttoState()
+	if !s.tryAcquire("A") {
+		t.Fatal("tryAcquire A should succeed on a fresh state")
+	}
+	// setCancel has not run yet: busy but no cancel func registered.
+	if s.cancelInflight(s.gen) {
+		t.Error("cancelInflight should return false before the cancel func is registered")
+	}
+	if s.shouldSuppressError() {
+		t.Error("cancelInflight must not set suppressError during the registration window")
+	}
+	// Once the cancel func is registered, a retry succeeds.
+	cancelled := false
+	s.setCancel(func() { cancelled = true })
+	if !s.cancelInflight(s.gen) {
+		t.Fatal("cancelInflight should succeed after the cancel func is registered")
+	}
+	if !cancelled {
+		t.Error("cancelInflight should have invoked the registered cancel func")
+	}
+}
+
 // TestCancelInflightNoopWhenIdle verifies cancelInflight is a no-op (returns
 // false) when Otto isn't busy, so /restart and the watchdog can skip their
 // user-facing "interrupted" messages.
