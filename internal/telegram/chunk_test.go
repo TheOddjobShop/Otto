@@ -63,6 +63,64 @@ func TestChunkVeryLongUnbrokenText(t *testing.T) {
 	}
 }
 
+func TestChunkNeverSplitsMidEntity(t *testing.T) {
+	// A long unbroken run of HTML entities (no newlines) forces hardSplit.
+	// No chunk may end partway through an "&...;" span, or Telegram rejects
+	// it as malformed entities under parse_mode=HTML.
+	for _, ent := range []string{"&amp;", "&#39;"} {
+		s := strings.Repeat(ent, 3000) // well past 4096 bytes
+		got := ChunkMessage(s, 4096)
+		if len(got) < 2 {
+			t.Fatalf("%s: got %d chunks, want >= 2", ent, len(got))
+		}
+		for i, c := range got {
+			if len(c) > 4096 {
+				t.Errorf("%s: chunk %d byte length %d > limit 4096", ent, i, len(c))
+			}
+			if strings.Count(c, "&") != strings.Count(c, ";") {
+				t.Errorf("%s: chunk %d splits an entity: ...%q", ent, i, tail(c, 8))
+			}
+			if !strings.HasSuffix(c, ";") {
+				t.Errorf("%s: chunk %d ends mid-entity: ...%q", ent, i, tail(c, 8))
+			}
+		}
+		if strings.Join(got, "") != s {
+			t.Errorf("%s: round-trip lost data", ent)
+		}
+	}
+}
+
+func TestChunkLoneAmpersandStillSplits(t *testing.T) {
+	// A lone "&" is not an entity, so it must advance a single rune and not
+	// consume up to a distant ";". A long run of "a & " (with a trailing ";"
+	// far away) must still split at the byte limit without hanging or
+	// producing an over-limit chunk.
+	s := strings.Repeat("a & b ", 1000) + ";" // > 4096 bytes, lone '&'s
+	got := ChunkMessage(s, 4096)
+	if len(got) < 2 {
+		t.Fatalf("got %d chunks, want >= 2", len(got))
+	}
+	for i, c := range got {
+		if len(c) > 4096 {
+			t.Errorf("chunk %d byte length %d > limit 4096", i, len(c))
+		}
+		if !utf8.ValidString(c) {
+			t.Errorf("chunk %d is not valid UTF-8", i)
+		}
+	}
+	if strings.Join(got, "") != s {
+		t.Error("round-trip lost data")
+	}
+}
+
+// tail returns up to the last n bytes of s, for readable test failures.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
 func TestChunkPreservesUTF8Boundaries(t *testing.T) {
 	// "家" is 3 bytes in UTF-8. Repeating past the limit forces hardSplit
 	// to engage; a naive byte split would land mid-rune.
