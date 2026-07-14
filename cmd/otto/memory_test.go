@@ -212,6 +212,20 @@ func TestLogTurnWithEmbedderStillLogsTurn(t *testing.T) {
 	if got, _ := st.SearchFTS(ctx, "tokyo", 5); len(got) == 0 {
 		t.Fatal("turn not logged")
 	}
+	// logTurn embeds in a detached goroutine that writes the vector into
+	// state.db. Wait for that write to land before returning; otherwise
+	// t.TempDir cleanup races the goroutine and intermittently fails with
+	// "directory not empty".
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got, _ := st.SearchSemantic(ctx, []float32{1, 0}, 5); len(got) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("embed vector not persisted before timeout")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // serialEmbedder records whether two Embed calls overlapped in time, which
