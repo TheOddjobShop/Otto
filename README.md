@@ -116,11 +116,13 @@ Otto persists memory across messages, restarts, and `/new`. Two tiers (Hermes-st
 
 Hand-editable. The `otto-memory` MCP server exposes `memory_add` / `memory_replace` / `memory_remove` so Claude can update them mid-conversation. Every write is security-scanned (credentials / prompt-injection patterns / invisible Unicode are rejected) and exact duplicates are blocked. At 80% of cap the next `memory_add` errors with the current contents, prompting consolidation.
 
-**Tier 2 — Episodic + semantic store (on-demand, unbounded).** A SQLite database at `~/.local/state/otto/state.db`:
+**Tier 2 — Episodic + semantic store (on-demand, bounded).** A SQLite database at `~/.local/state/otto/state.db`:
 
-- `turns` table — every Otto/Toto/Toot exchange (user + assistant), append-only.
+- `turns` table — every Otto/Toto/Toot exchange (user + assistant). Rows are never updated in place, but an hourly pruner caps the table at the most-recent ~2000 turns (weeks of history for a single-user bot), cascading deletes to `turns_fts` and `vectors`.
 - `turns_fts` — FTS5 keyword mirror, kept in sync by trigger.
 - `vectors` table — one embedding per turn (model + dim + blob).
+
+A background pruner runs hourly (and once at startup): it holds `turns` to the most-recent ~2000 rows and delivered inbox rows to the most-recent ~500, so the store stays bounded rather than growing forever.
 
 Otto embeds each turn asynchronously after sending the reply (best-effort, 130 s-bounded — 2 × 60 s per embedding backend + 10 s slack — off the reply path). The `session_search` MCP tool embeds the query, runs semantic top-k + FTS5 in parallel, and merges (semantic first, keyword fills). If Ollama is unreachable or no model is pulled, search transparently degrades to FTS5 keyword only — nothing breaks.
 
@@ -159,7 +161,7 @@ For options 1 and 2, no systemd config is needed — `~/.claude/` lives under th
 
 `setup.sh` writes `~/.config/otto/mcp.json` registering five servers:
 
-- **`otto-memory`** — local Go binary at `~/.local/bin/otto-memory` (this repo). Tools: `memory_add`, `memory_replace`, `memory_remove`, `session_search`.
+- **`otto-memory`** — local Go binary at `~/.local/bin/otto-memory` (this repo). Tools: `memory_add`, `memory_replace`, `memory_remove`, `session_search`, plus the inter-agent bus tools `forward_to_otto`, `message_toto`, `message_toot`.
 - `notion` — `@notionhq/notion-mcp-server` via `npx`.
 - `google-calendar` — `@cocal/google-calendar-mcp` via `npx`.
 - `gdrive` — `mcp-gdrive-workspace` via `npx`.
