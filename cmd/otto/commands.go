@@ -33,7 +33,7 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		// silently undoing the clear. The slot serialises the two operations
 		// so /new has no lasting effect only when it truly wins the race.
 		if !h.otto.tryAcquire("(/new)") {
-			return commandResult{reply: "⏳ Otto is mid-turn — session will be cleared once he finishes.", handled: true}
+			return commandResult{reply: "⏳ Otto is mid-turn — send /new again once he finishes to clear the session.", handled: true}
 		}
 		err := h.session.Clear()
 		h.otto.resetInputTokens()
