@@ -101,6 +101,20 @@ type ottoState struct {
 	lastInputTokens int       // ContextTokens (input+cache) of the most recent Otto turn
 	lastUserMsg     time.Time // time of the most recent user message (idle calc)
 	lastModel       string    // model id chosen for the most recent Otto turn ("" = inherited)
+
+	// turnKey identifies the in-flight turn. Set on acquisition, it groups
+	// activity rows so a reader can ask for "this turn" rather than "the last
+	// N rows", which would interleave a bus turn with a Telegram one.
+	turnKey string
+	// activity is a bounded ring of the in-flight turn's tool calls, kept in
+	// memory so Toto's dispatch path can read it without a DB round-trip.
+	// Cleared on release alongside lastSnippet.
+	activity []activityEntry
+	// pendingTools maps tool_use id → tool name, so a tool_result (which
+	// carries only the id) can be attributed to the tool that produced it.
+	// Bounded by the same cap as the ring; a turn calling more tools than that
+	// simply loses attribution on the oldest, which only affects a log line.
+	pendingTools map[string]string
 }
 
 // snippetCap bounds how many tail bytes of Otto's stream we expose to
@@ -125,7 +139,16 @@ func (s *ottoState) tryAcquire(prompt string) bool {
 	s.currentPrompt = prompt
 	s.lastEvent = time.Now()
 	s.suppressError = false
+	s.startTurnLocked()
 	return true
+}
+
+// startTurnLocked stamps a fresh turn key and clears the per-turn activity
+// state. Caller must hold mu.
+func (s *ottoState) startTurnLocked() {
+	s.turnKey = newTurnKey()
+	s.activity = nil
+	s.pendingTools = map[string]string{}
 }
 
 // tryAcquireOrSnapshot is the dispatch-path atomic version of tryAcquire:
@@ -143,12 +166,14 @@ func (s *ottoState) tryAcquireOrSnapshot(prompt string) (acquired bool, snap ott
 		s.currentPrompt = prompt
 		s.lastEvent = time.Now()
 		s.suppressError = false
+		s.startTurnLocked()
 		return true, ottoSnapshot{}
 	}
 	snap = ottoSnapshot{
 		Busy:          true,
 		CurrentPrompt: s.currentPrompt,
 		Snippet:       s.lastSnippet,
+		Activity:      append([]activityEntry(nil), s.activity...),
 	}
 	if !s.lastEvent.IsZero() {
 		snap.Silence = time.Since(s.lastEvent)
@@ -163,6 +188,84 @@ func (s *ottoState) release() {
 	s.currentPrompt = ""
 	s.lastSnippet = ""
 	s.cancel = nil
+	// Per-turn activity dies with the turn: the ring answers "what is Otto
+	// doing RIGHT NOW", and reporting a finished turn's tool calls as current
+	// would be exactly the kind of stale answer this feature exists to fix.
+	// The durable copy lives in the activity table.
+	s.activity = nil
+	s.pendingTools = nil
+	s.turnKey = ""
+}
+
+// pushActivityLocked appends to the ring, trimming from the front past the
+// cap. Caller must hold mu.
+func (s *ottoState) pushActivityLocked(e activityEntry) {
+	s.activity = append(s.activity, e)
+	if len(s.activity) > activityRingCap {
+		// Re-slice from the tail into a fresh backing array. Slicing in place
+		// would keep the whole original array alive for the life of the turn.
+		s.activity = append([]activityEntry(nil), s.activity[len(s.activity)-activityRingCap:]...)
+	}
+}
+
+// recordToolUse notes a tool invocation and returns the turn key it belongs
+// to, or "" if no turn is in flight (in which case the caller skips the
+// durable write too — an activity row with no turn is unreadable).
+func (s *ottoState) recordToolUse(id, name, detail string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnKey == "" {
+		return ""
+	}
+	if s.pendingTools == nil {
+		s.pendingTools = map[string]string{}
+	}
+	if id != "" {
+		// Bound the correlation map the same way as the ring. Without this a
+		// turn making hundreds of tool calls would grow it unboundedly for the
+		// whole turn, purely to attribute log lines.
+		if len(s.pendingTools) >= activityRingCap*2 {
+			s.pendingTools = map[string]string{}
+		}
+		s.pendingTools[id] = name
+	}
+	s.pushActivityLocked(activityEntry{
+		At: time.Now(), Kind: store.ActivityTool, Tool: name, Detail: detail,
+	})
+	return s.turnKey
+}
+
+// recordToolResult correlates a result back to its tool by id and notes it.
+// Returns the turn key and the resolved tool name; ok is false when no turn is
+// in flight.
+//
+// Only failures enter the ring: a successful result adds a line that says
+// nothing a reader would act on, and the ring is small enough that filling it
+// with successes would push out the tool calls themselves.
+func (s *ottoState) recordToolResult(id string, isError bool, content string) (turnKey, tool string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnKey == "" {
+		return "", "", false
+	}
+	tool = s.pendingTools[id]
+	if id != "" {
+		delete(s.pendingTools, id)
+	}
+	if isError {
+		s.pushActivityLocked(activityEntry{
+			At: time.Now(), Kind: store.ActivityResult, Tool: tool,
+			Detail: content, IsError: true,
+		})
+	}
+	return s.turnKey, tool, true
+}
+
+// currentTurnKey returns the in-flight turn's key, or "" when Otto is idle.
+func (s *ottoState) currentTurnKey() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnKey
 }
 
 func (s *ottoState) setCancel(c context.CancelFunc) {
@@ -285,6 +388,10 @@ type ottoSnapshot struct {
 	CurrentPrompt string        // Otto's in-flight prompt (only when Busy)
 	Snippet       string        // tail of Otto's in-progress reply (only when Busy)
 	Silence       time.Duration // how long since Otto's last stream event (zero if Otto has never run)
+	// Activity is a copy of the in-flight turn's recent tool calls. Copied
+	// rather than shared so the reader can never observe the slice mutating
+	// under it after mu is released.
+	Activity []activityEntry
 }
 
 // Snapshot returns the current Otto state under lock. Safe to call
@@ -297,6 +404,7 @@ func (s *ottoState) Snapshot() ottoSnapshot {
 		Busy:          s.busy,
 		CurrentPrompt: s.currentPrompt,
 		Snippet:       s.lastSnippet,
+		Activity:      append([]activityEntry(nil), s.activity...),
 	}
 	if !s.lastEvent.IsZero() {
 		snap.Silence = time.Since(s.lastEvent)
@@ -457,7 +565,7 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 	// the handler, but omitting the check would panic on the first busy
 	// message in any setup that leaves the field nil.
 	if h.toto != nil {
-		h.toto.BusyReply(ctx, u.ChatID, u.Text, snap.CurrentPrompt, snap.Snippet)
+		h.toto.BusyReply(ctx, u.ChatID, u.Text, snap.CurrentPrompt, snap.Snippet, snap.Activity)
 	}
 }
 
@@ -593,6 +701,16 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	var gotResult bool
 	var capturedSessionID string
 
+	// Bookend the turn in the activity log so a reader can tell a finished
+	// turn from one still running, and see what it was asked to do.
+	turnStart := time.Now()
+	if tk := h.otto.currentTurnKey(); tk != "" {
+		logActivity(sendCtx, h.store, store.ActivityEntry{
+			Persona: "otto", TurnKey: tk, Kind: store.ActivityTurnStart,
+			Detail: clip(oneLine(args.Prompt), activityDetailCap),
+		})
+	}
+
 	go func() {
 		defer close(doneParsing)
 		for ev := range events {
@@ -603,6 +721,26 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 				h.otto.appendSnippet(e.Text)
 			case claude.SessionEvent:
 				capturedSessionID = e.ID
+			case claude.ToolUseEvent:
+				detail := summarizeToolInput(e.Name, e.Input)
+				if tk := h.otto.recordToolUse(e.ID, e.Name, detail); tk != "" {
+					logActivity(sendCtx, h.store, store.ActivityEntry{
+						Persona: "otto", TurnKey: tk, Kind: store.ActivityTool,
+						Tool: e.Name, Detail: detail,
+					})
+				}
+			case claude.ToolResultEvent:
+				tk, tool, ok := h.otto.recordToolResult(e.ToolUseID, e.IsError, clip(oneLine(e.Content), activityDetailCap))
+				// Only failures are persisted, matching the ring: a row per
+				// successful tool result would multiply the table's volume for
+				// information no reader acts on.
+				if ok && e.IsError {
+					logActivity(sendCtx, h.store, store.ActivityEntry{
+						Persona: "otto", TurnKey: tk, Kind: store.ActivityResult,
+						Tool: tool, Detail: clip(oneLine(e.Content), activityDetailCap),
+						IsError: true,
+					})
+				}
 			case claude.ResultEvent:
 				lastResult = e
 				gotResult = true
@@ -613,6 +751,34 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	err := runner.Run(callCtx, args)
 	close(events)
 	<-doneParsing
+
+	// Close the bookend. Recorded before the error/non-success early returns
+	// below so a failed turn is still marked finished rather than looking
+	// perpetually in-flight to a later reader.
+	//
+	// Deliberately NOT on sendCtx: that context is cancelled at shutdown, and
+	// a turn interrupted by a restart is exactly the case where an unclosed
+	// bookend is most misleading — the row would sit in the table forever
+	// implying Otto is still working on something from three reboots ago.
+	// WithoutCancel keeps the write while the timeout stops shutdown hanging
+	// on a wedged database.
+	if tk := h.otto.currentTurnKey(); tk != "" {
+		endCtx, endCancel := context.WithTimeout(context.WithoutCancel(sendCtx), 5*time.Second)
+		defer endCancel()
+		outcome := fmt.Sprintf("ok in %s", time.Since(turnStart).Round(time.Second))
+		isErr := false
+		if err != nil {
+			outcome = fmt.Sprintf("failed after %s: %v", time.Since(turnStart).Round(time.Second), err)
+			isErr = true
+		} else if lastResult.Subtype != "" && lastResult.Subtype != "success" {
+			outcome = fmt.Sprintf("result %s after %s", lastResult.Subtype, time.Since(turnStart).Round(time.Second))
+			isErr = true
+		}
+		logActivity(endCtx, h.store, store.ActivityEntry{
+			Persona: "otto", TurnKey: tk, Kind: store.ActivityTurnEnd,
+			Detail: outcome, IsError: isErr,
+		})
+	}
 
 	// Record the latest observed context-token count so the rotator can decide
 	// whether the session has grown large enough to clear. ContextTokens sums

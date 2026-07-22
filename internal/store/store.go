@@ -66,6 +66,17 @@ CREATE TABLE IF NOT EXISTS token_usage (
 	ts              INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS token_usage_source ON token_usage(source);
+CREATE TABLE IF NOT EXISTS activity (
+	id       INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts       INTEGER NOT NULL,
+	persona  TEXT    NOT NULL,
+	turn_key TEXT    NOT NULL,
+	kind     TEXT    NOT NULL,
+	tool     TEXT    NOT NULL,
+	detail   TEXT    NOT NULL,
+	is_error INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS activity_turn ON activity(turn_key, id);
 `
 
 // Open opens (creating if needed) the SQLite database at path and ensures the

@@ -26,7 +26,7 @@ func TestPruneStoreOnceTrimsTurns(t *testing.T) {
 		}
 	}
 
-	pruneStoreOnce(ctx, st, 2, 100)
+	pruneStoreOnce(ctx, st, 2, 100, 100)
 
 	// If pruneStoreOnce trimmed to 2 rows, a second prune to the same bound
 	// removes nothing.

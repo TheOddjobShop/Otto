@@ -32,11 +32,84 @@ type rawMessage struct {
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage"`
 	Message struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+		Content []rawContentBlock `json:"content"`
 	} `json:"message"`
+}
+
+// rawContentBlock covers every content-block shape Otto reads, across both
+// `assistant` frames (text, tool_use) and `user` frames (tool_result).
+// Unknown block types decode into zero values and are skipped by the switch in
+// ParseStream, so a new block type upstream is inert rather than fatal.
+type rawContentBlock struct {
+	Type string `json:"type"`
+
+	// text blocks
+	Text string `json:"text"`
+
+	// tool_use blocks
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+
+	// tool_result blocks. Content is either a bare string or an array of
+	// content blocks depending on the tool, so it stays raw until
+	// flattenToolResult decides which.
+	ToolUseID string          `json:"tool_use_id"`
+	IsError   bool            `json:"is_error"`
+	Content   json.RawMessage `json:"content"`
+}
+
+// toolResultTextCap bounds how much tool-result text the parser carries into a
+// ToolResultEvent. Results can be megabytes (a file read, a verbose test run);
+// the event feeds a one-line activity entry, so anything past this is waste
+// that would otherwise be copied through the channel and into SQLite.
+const toolResultTextCap = 2000
+
+// flattenToolResult extracts displayable text from a tool_result content field,
+// which the API types as `string | ContentBlock[]`. Returns "" when neither
+// shape yields text (e.g. an image-only result).
+func flattenToolResult(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Shape 1: a bare JSON string.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return truncateRunes(s, toolResultTextCap)
+	}
+	// Shape 2: an array of blocks; concatenate the text ones.
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	var b bytes.Buffer
+	for _, blk := range blocks {
+		if blk.Type == "text" && blk.Text != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(blk.Text)
+			if b.Len() >= toolResultTextCap {
+				break
+			}
+		}
+	}
+	return truncateRunes(b.String(), toolResultTextCap)
+}
+
+// truncateRunes caps s at n runes, never splitting a multi-byte sequence.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n { // byte length >= rune count, so this is a safe fast path
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 type rawPermissionDeny struct {
@@ -81,12 +154,37 @@ func ParseStream(ctx context.Context, r io.Reader, events chan<- Event) error {
 						}
 					case "assistant":
 						for _, c := range raw.Message.Content {
-							if c.Type == "text" && c.Text != "" {
-								select {
-								case events <- AssistantTextEvent{Text: c.Text}:
-								case <-ctx.Done():
-									return ctx.Err()
-								}
+							var ev Event
+							switch {
+							case c.Type == "text" && c.Text != "":
+								ev = AssistantTextEvent{Text: c.Text}
+							case c.Type == "tool_use" && c.Name != "":
+								ev = ToolUseEvent{ID: c.ID, Name: c.Name, Input: c.Input}
+							default:
+								continue
+							}
+							select {
+							case events <- ev:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+						}
+					case "user":
+						// Tool results come back as user-role frames. Otto sends
+						// no user frames of its own mid-stream, so anything here
+						// is Claude Code reporting a tool outcome.
+						for _, c := range raw.Message.Content {
+							if c.Type != "tool_result" {
+								continue
+							}
+							select {
+							case events <- ToolResultEvent{
+								ToolUseID: c.ToolUseID,
+								IsError:   c.IsError,
+								Content:   flattenToolResult(c.Content),
+							}:
+							case <-ctx.Done():
+								return ctx.Err()
 							}
 						}
 					case "result":
