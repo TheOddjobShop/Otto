@@ -2,6 +2,8 @@ package memory
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -235,5 +237,46 @@ func TestAddConcurrentNoLostUpdates(t *testing.T) {
 		if !strings.Contains(mem, fmt.Sprintf("fact number %d", i)) {
 			t.Errorf("lost update: %q missing from store", fmt.Sprintf("fact number %d", i))
 		}
+	}
+}
+
+// TestSeededCoreLeavesHeadroom guards setup.sh's memory seeding against the
+// failure mode where the seed itself consumes so much of MEMORY.md's cap that
+// Otto's very first memory_add is refused with the 80%-capacity error.
+//
+// The lines below mirror the shape and length of what setup.sh writes (see
+// the "Seeding memory core" block). If a future seed line grows substantially
+// longer, or a fifth is added, this test fails and the cap should be revisited
+// rather than the seed silently starving real memory.
+func TestSeededCoreLeavesHeadroom(t *testing.T) {
+	dir := t.TempDir()
+	seed := []string{
+		"Otto runs on Darwin as a launchd user agent (com.otto.bot), installed from the Otto repo by setup.sh.",
+		"Otto's config is in ~/.config/otto/; his memory files, session ids and state.db are in ~/.local/state/otto/.",
+		"Scheduled scripts and automations Otto writes belong in ~/.config/otto/scripts/, never inside the Otto source repository.",
+		"Otto's connected MCP servers are: otto-memory, notion, google-calendar, gdrive, gmail-personal, gmail-work.",
+	}
+	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(strings.Join(seed, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	core := NewCore(dir, 2200, 1375)
+
+	// A freshly-seeded core must still accept a healthy number of real facts.
+	const wantHeadroom = 10
+	for i := 0; i < wantHeadroom; i++ {
+		fact := fmt.Sprintf("The user prefers option number %d for their editor configuration.", i)
+		if err := core.Add(TargetMemory, fact); err != nil {
+			t.Fatalf("seed left too little headroom: add #%d failed: %v", i+1, err)
+		}
+	}
+
+	// And the seed must survive as readable, injectable content.
+	block, err := core.Inject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(block, "Scheduled scripts and automations") {
+		t.Errorf("seeded fact missing from injected block:\n%s", block)
 	}
 }
