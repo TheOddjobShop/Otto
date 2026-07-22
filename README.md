@@ -114,6 +114,8 @@ Otto persists memory across messages, restarts, and `/new`. Two tiers (Hermes-st
 - `~/.local/state/otto/memory/USER.md` — identity, preferences, communication style (cap ~500 tokens).
 - `~/.local/state/otto/memory/MEMORY.md` — environment facts, project conventions, lessons (cap ~800 tokens).
 
+`setup.sh` seeds `MEMORY.md` on a fresh install with the deployment facts it has just established first-hand (OS + service manager, where config and state live, where scheduled scripts belong, which MCP servers are wired) and offers to seed `USER.md` with what Otto should call you. Seeding is strictly additive: a file that already exists and is non-empty is never touched, so re-running `setup.sh` cannot clobber curated memory.
+
 Hand-editable. The `otto-memory` MCP server exposes `memory_add` / `memory_replace` / `memory_remove` so Claude can update them mid-conversation. Every write is security-scanned (credentials / prompt-injection patterns / invisible Unicode are rejected) and exact duplicates are blocked. At 80% of cap the next `memory_add` errors with the current contents, prompting consolidation.
 
 **Tier 2 — Episodic + semantic store (on-demand, bounded).** A SQLite database at `~/.local/state/otto/state.db`:

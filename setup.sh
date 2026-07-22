@@ -714,6 +714,70 @@ print(json.dumps(config, indent=2))
 PYEOF
 chmod 600 "$MCP_FILE"
 
+# ── Seed the curated memory core ────────────────────────────────────────────
+# A fresh install starts with an empty Tier-1 core, so Otto knows nothing
+# about his own deployment until the user happens to tell him. Seed MEMORY.md
+# with environment facts setup.sh has just established first-hand, and offer
+# to seed USER.md with a name.
+#
+# Strictly additive and idempotent: a file that already exists and is
+# non-empty is NEVER touched, so re-running setup.sh can't clobber memory
+# Otto has curated since. Both files are one-fact-per-line with no headers —
+# that is the format internal/memory parses, dedupes and caps against; a
+# markdown heading here would burn cap and confuse line-based dedup.
+#
+# Content constraints (see internal/memory/scan.go): no credentials, no
+# newlines within an entry. These lines are injected into EVERY prompt for
+# all three personas, so keep them few and dense.
+seed_memory_file() {
+  # $1 = path, remaining args = one entry per line
+  local path="$1"; shift
+  [ -s "$path" ] && return 0
+  printf '%s\n' "$@" > "$path"
+  chmod 600 "$path"
+  echo "  [ok] seeded $(basename "$path")"
+}
+
+echo ""
+echo "  Seeding memory core..."
+
+if [ "$OS" = Linux ]; then
+  OTTO_SERVICE_DESC="a systemd --user service (otto.service)"
+else
+  OTTO_SERVICE_DESC="a launchd user agent (com.otto.bot)"
+fi
+
+# The MCP server names exactly as written into mcp.json above.
+MCP_NAMES="otto-memory, notion, google-calendar, gdrive"
+for label in "${GMAIL_LABELS[@]}"; do
+  MCP_NAMES="$MCP_NAMES, gmail-$label"
+done
+
+seed_memory_file "$OTTO_MEMORY_DIR/MEMORY.md" \
+  "Otto runs on $OS as $OTTO_SERVICE_DESC, installed from the Otto repo by setup.sh." \
+  "Otto's config is in ~/.config/otto/; his memory files, session ids and state.db are in ~/.local/state/otto/." \
+  "Scheduled scripts and automations Otto writes belong in ~/.config/otto/scripts/, never inside the Otto source repository." \
+  "Otto's connected MCP servers are: $MCP_NAMES."
+
+# USER.md: only seeded if the user offers a name. An empty file is left
+# absent rather than filled with a placeholder — every line here costs tokens
+# on every single turn, so "(nothing recorded yet)" would be pure overhead.
+if [ ! -s "$OTTO_MEMORY_DIR/USER.md" ]; then
+  echo ""
+  echo "  Otto keeps a short profile of you that he reads on every message."
+  echo "  He'll learn more as you talk; this is just a first line."
+  read -r -p "  What should Otto call you? (enter to skip): " OTTO_USER_NAME
+  # Strip characters that would break the one-fact-per-line format or trip
+  # the memory security scan.
+  OTTO_USER_NAME="$(printf '%s' "$OTTO_USER_NAME" | tr -d '\n\r' | cut -c1-60)"
+  if [ -n "$OTTO_USER_NAME" ]; then
+    seed_memory_file "$OTTO_MEMORY_DIR/USER.md" \
+      "The user's name is $OTTO_USER_NAME."
+  else
+    echo "  [skip] USER.md — Otto will build it as you talk."
+  fi
+fi
+
 # ── systemd user unit (Linux only) ──────────────────────────────────────────
 if [ "$OS" = Linux ]; then
   SYSTEMD_DIR="$HOME/.config/systemd/user"
