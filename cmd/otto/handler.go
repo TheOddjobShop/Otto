@@ -334,18 +334,27 @@ func (h *handler) runPollingLoop(ctx context.Context) error {
 			continue
 		}
 		backoff = pollErrorBaseBackoff
-		for i, u := range updates {
+		// Reorder the batch so pet-addressed messages dispatch last. The
+		// 150ms spacing below only fixes the busy-snapshot race when the
+		// Otto-bound message happens to arrive first; Telegram's delivery
+		// order is not guaranteed (network jitter can invert two messages
+		// sent a second apart), and when it inverts, Toto snapshots an idle
+		// Otto and tells the user "nothing's going on" while Otto is about
+		// to start on their sibling message. Partitioning removes the
+		// dependence on arrival order entirely.
+		ordered := partitionPetLast(updates, h.pets)
+		for i, u := range ordered {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
 			// When a batch contains multiple updates (user sent messages
 			// close enough together to land in the same long-poll), pause
 			// briefly between dispatches so each message's routing
-			// decision lands in order. Without this, parallel goroutines
-			// race on Otto's busy state — Toto could snapshot "idle"
-			// while Otto's about to start working on a sibling message.
-			// 150ms is plenty for tryAcquire to win its mutex; single-
-			// message batches (the common case) are unaffected.
+			// decision lands in order. Combined with the pet-last
+			// partition above, any Otto-bound sibling has claimed the slot
+			// before a pet goroutine reads the snapshot. 150ms is plenty
+			// for tryAcquire to win its mutex; single-message batches (the
+			// common case) are unaffected.
 			if i > 0 {
 				// Same pattern as the backoff timer: NewTimer+Stop ensures no
 				// goroutine leak when ctx.Done() wins, even at 150ms.
@@ -366,6 +375,41 @@ func (h *handler) runPollingLoop(ctx context.Context) error {
 			}(u)
 		}
 	}
+}
+
+// isPetAddressed reports whether u would route to a pet in dispatch. The
+// classification mirrors dispatch's own pet check exactly — including the
+// photo carve-out (photos always go to Otto regardless of caption text) —
+// so the batch partition can never disagree with downstream routing.
+func isPetAddressed(u telegram.Update, pets *petRegistry) bool {
+	if pets == nil || len(u.PhotoIDs) > 0 {
+		return false
+	}
+	_, _, ok := pets.Match(u.Text)
+	return ok
+}
+
+// partitionPetLast returns updates reordered so that every non-pet-addressed
+// update precedes every pet-addressed one, preserving the original relative
+// order within each group.
+//
+// Reordering is benign even when the user genuinely typed the pet message
+// first: the only updates affected are ones that landed in the same long-poll
+// (typically sent under a second apart), where send-order intent is weak.
+// Commands are treated as non-pet — they never acquire the Otto slot, so
+// their position is irrelevant to the race, and dispatching them early keeps
+// /status and friends snappy.
+func partitionPetLast(updates []telegram.Update, pets *petRegistry) []telegram.Update {
+	pet := make([]telegram.Update, 0, len(updates))
+	ordered := make([]telegram.Update, 0, len(updates))
+	for _, u := range updates {
+		if isPetAddressed(u, pets) {
+			pet = append(pet, u)
+			continue
+		}
+		ordered = append(ordered, u)
+	}
+	return append(ordered, pet...)
 }
 
 func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
