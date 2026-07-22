@@ -27,20 +27,34 @@ func recordUsage(ctx context.Context, s *store.Store, source, model string, r cl
 	}
 }
 
-// formatUsage renders the /tokens reply: a grand total followed by a
-// per-source breakdown (input + output only; cache columns stay in the DB).
-func formatUsage(totals store.Totals, bySrc []store.SourceTotals) string {
+// formatUsage renders the /tokens reply: a grand total, an estimated dollar
+// cost broken down by model, then a per-source token breakdown (input + output
+// only; the cache columns stay in the DB but do feed the cost estimate).
+//
+// byModel may be empty — the cost section is then omitted rather than shown as
+// $0.00, which would read as "this is free" instead of "this isn't known".
+func formatUsage(totals store.Totals, bySrc []store.SourceTotals, byModel []store.ModelTotals) string {
 	if len(bySrc) == 0 {
 		return "📊 No token usage recorded yet."
 	}
 	var b strings.Builder
 	b.WriteString("📊 Token usage (all-time)\n")
-	fmt.Fprintf(&b, "Total: %s in · %s out\n\n",
+	fmt.Fprintf(&b, "Total: %s in · %s out\n",
 		thousands(totals.InputTokens), thousands(totals.OutputTokens))
+	fmt.Fprintf(&b, "Cache: %s written · %s read\n\n",
+		thousands(totals.CacheCreation), thousands(totals.CacheRead))
+
+	if cost := formatCost(estimateCost(byModel)); cost != "" {
+		b.WriteString(cost)
+		b.WriteString("\n")
+	}
+
 	for _, s := range bySrc {
 		fmt.Fprintf(&b, "%-9s %s in · %s out\n",
 			s.Source, thousands(s.InputTokens), thousands(s.OutputTokens))
 	}
+	b.WriteString("\nCost is an estimate from list prices, assuming the\n")
+	b.WriteString("5-minute cache TTL. Not a billing figure.")
 	return strings.TrimRight(b.String(), "\n")
 }
 

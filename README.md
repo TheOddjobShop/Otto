@@ -38,7 +38,7 @@ After `setup.sh` reports success, on Telegram:
 - Send `/whoami` — prints your Telegram user ID and current session ID.
 - Send `/status` — prints uptime + session.
 - Send `/restart` — interrupts an in-flight Claude call.
-- Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify).
+- Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify), plus an estimated dollar cost broken down by model. The cost is computed from published list prices in `cmd/otto/pricing.go` and assumes the default 5-minute cache TTL; it is an estimate, not a billing figure, and any model without a rate card (e.g. turns that inherited Claude Code's own model) is named as excluded rather than silently counted as free.
 - Send a photo with caption "describe this" — Otto downloads it and forwards to Claude via `@<path>`.
 - Send "what's on my calendar today?" — exercises the Google Calendar MCP.
 

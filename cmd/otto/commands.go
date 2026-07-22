@@ -63,7 +63,11 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		if err != nil {
 			return commandResult{reply: fmt.Sprintf("⚠️ token breakdown failed: %v", err), handled: true}
 		}
-		return commandResult{reply: formatUsage(totals, bySrc), handled: true}
+		byModel, err := h.store.UsageByModel(ctx)
+		if err != nil {
+			return commandResult{reply: fmt.Sprintf("⚠️ token cost breakdown failed: %v", err), handled: true}
+		}
+		return commandResult{reply: formatUsage(totals, bySrc, byModel), handled: true}
 	case "/restart":
 		// Force-cancel an in-flight Otto call. Used when Otto seems wedged,
 		// or when a long task isn't worth waiting for. The watchdog uses

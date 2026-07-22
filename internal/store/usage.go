@@ -20,6 +20,15 @@ type SourceTotals struct {
 	Totals
 }
 
+// ModelTotals is Totals for one model id. Cost can only be computed per model
+// — rates differ per tier — so this is the aggregate the pricing layer reads,
+// not SourceTotals (a single source such as "main" spans several models
+// because the per-turn router picks one).
+type ModelTotals struct {
+	Model string
+	Totals
+}
+
 // RecordUsage appends one token-usage row. It stamps ts with the current unix
 // time, mirroring AppendTurn. Best-effort callers may ignore the error after
 // logging — a failed usage write must never break a reply.
@@ -48,6 +57,33 @@ func (s *Store) UsageTotals(ctx context.Context) (Totals, error) {
 		return Totals{}, fmt.Errorf("store: usage totals: %w", err)
 	}
 	return t, nil
+}
+
+// UsageByModel returns one aggregate row per model id, ordered by model name
+// for stable rendering. Used by the cost estimator, which needs per-model
+// token counts because each tier bills at a different rate.
+func (s *Store) UsageByModel(ctx context.Context) ([]ModelTotals, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT model, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_creation), 0), COALESCE(SUM(cache_read), 0)
+		FROM token_usage
+		GROUP BY model
+		ORDER BY model`)
+	if err != nil {
+		return nil, fmt.Errorf("store: usage by model: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ModelTotals
+	for rows.Next() {
+		var mt ModelTotals
+		if err := rows.Scan(&mt.Model, &mt.InputTokens, &mt.OutputTokens,
+			&mt.CacheCreation, &mt.CacheRead); err != nil {
+			return nil, fmt.Errorf("store: scan usage by model: %w", err)
+		}
+		out = append(out, mt)
+	}
+	return out, rows.Err()
 }
 
 // UsageBySource returns one aggregate row per source, ordered by source name
