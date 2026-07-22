@@ -124,7 +124,7 @@ func (h *handler) dispatchBusToOtto(ctx context.Context, chatID int64, m store.I
 	if !acquired {
 		log.Printf("bus: otto busy on forwarded msg id=%d (silence=%s)", m.ID, snap.Silence.Round(time.Second))
 		if h.toto != nil {
-			h.toto.BusyReply(ctx, chatID, u.Text, snap.CurrentPrompt, snap.Snippet)
+			h.toto.BusyReply(ctx, chatID, u.Text, snap.CurrentPrompt, snap.Snippet, snap.Activity)
 		}
 		return
 	}

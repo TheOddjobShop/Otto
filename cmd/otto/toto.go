@@ -166,14 +166,16 @@ func (t *Toto) Name() string { return "toto" }
 // per-call prompt includes Otto's current status (if available) so
 // Toto can answer "what's otto doing?" truthfully.
 func (t *Toto) Reply(ctx context.Context, chatID int64, userMessage string) {
-	t.replyWithContext(ctx, chatID, userMessage, false, "", "", nil)
+	t.replyWithContext(ctx, chatID, userMessage, false, "", "", nil, nil)
 }
 
 // BusyReply runs a Toto turn for the busy-fallback path — Otto is
 // mid-task and the user sent another message. ottoPrompt and
-// ottoSnippet ground Toto's reply in what Otto's actually working on.
-func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string) {
-	t.replyWithContext(ctx, chatID, userMessage, true, ottoPrompt, ottoSnippet, nil)
+// ottoSnippet ground Toto's reply in what Otto's actually working on;
+// activity carries the tool calls behind that work, which during a long
+// agentic turn is the only signal that isn't stale.
+func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPrompt, ottoSnippet string, activity []activityEntry) {
+	t.replyWithContext(ctx, chatID, userMessage, true, ottoPrompt, ottoSnippet, activity, nil)
 }
 
 // BusReply runs a Toto turn for a message that arrived via the inbox
@@ -183,7 +185,7 @@ func (t *Toto) BusyReply(ctx context.Context, chatID int64, userMessage, ottoPro
 // vars are stamped on the underlying claude subprocess so the MCP tool
 // handlers know who Toto is and how deep the chain is.
 func (t *Toto) BusReply(ctx context.Context, chatID int64, body string, bc busContext) {
-	t.replyWithContext(ctx, chatID, body, false, "", "", &bc)
+	t.replyWithContext(ctx, chatID, body, false, "", "", nil, &bc)
 }
 
 // totoAllowedTools is the closed allowlist of MCP tools Toto may call.
@@ -264,7 +266,7 @@ func ottoStatusNote(busy bool, ottoPrompt, ottoSnippet string, silence time.Dura
 // Toto runs with a Toto-scoped mcp.json (only otto-memory) plus an
 // explicit --allowedTools allowlist of forward_to_otto + session_search.
 // He can't reach gmail/notion/etc., and he can't call any built-in tool.
-func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage string, busyFallback bool, ottoPrompt, ottoSnippet string, bc *busContext) {
+func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage string, busyFallback bool, ottoPrompt, ottoSnippet string, activity []activityEntry, bc *busContext) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.lastActive = time.Now()
@@ -296,6 +298,10 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		systemPrompt += "your gmail right now' if the tail is about gmail. Do NOT relay Otto's "
 		systemPrompt += "words to the user verbatim, pretend his answer is yours, or echo the "
 		systemPrompt += "note itself back."
+		if block := formatActivityForPet(activity); block != "" {
+			systemPrompt += "\n\n───────────────────────────────────────────────\n"
+			systemPrompt += block
+		}
 	} else {
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
 		systemPrompt += "THE USER ADDRESSED YOU DIRECTLY.\n"
@@ -316,6 +322,10 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 			systemPrompt += "your own previous answer is NOT evidence of the current state.\n\n"
 			systemPrompt += "Don't improvise verbs like \"pulling\" or \"offline\". Paraphrase the "
 			systemPrompt += "note when asked; never invent, never echo the note back verbatim."
+			if block := formatActivityForPet(snap.Activity); block != "" {
+				systemPrompt += "\n\n───────────────────────────────────────────────\n"
+				systemPrompt += block
+			}
 		}
 	}
 

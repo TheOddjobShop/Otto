@@ -164,7 +164,7 @@ func TestTotoLiveStatusOnUserPrompt(t *testing.T) {
 		runner := &fakeRunner{respond: "mrow"}
 		toto := newTestToto(t, runner)
 
-		toto.BusyReply(context.Background(), 100, "hey", "summarize my inbox", "scanning gmail...")
+		toto.BusyReply(context.Background(), 100, "hey", "summarize my inbox", "scanning gmail...", nil)
 
 		got := runner.called[0]
 		if !strings.Contains(got.Prompt, `(otto status: busy on "summarize my inbox")`) {
@@ -182,7 +182,7 @@ func TestTotoLiveStatusOnUserPrompt(t *testing.T) {
 		runner := &fakeRunner{respond: "mrow"}
 		toto := newTestToto(t, runner)
 
-		toto.BusyReply(context.Background(), 100, "hey", "summarize my inbox", "")
+		toto.BusyReply(context.Background(), 100, "hey", "summarize my inbox", "", nil)
 
 		got := runner.called[0].Prompt
 		if strings.Contains(got, "tail of his reply") {

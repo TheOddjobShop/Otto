@@ -27,6 +27,11 @@ const (
 	// generous debugging window without unbounded growth. Undelivered
 	// rows are never touched by PruneInbox.
 	pruneKeepInbox = 500
+	// pruneKeepActivity bounds the activity log. It is the highest-volume
+	// table Otto writes — one agentic turn can emit dozens of rows, where a
+	// turn contributes exactly two rows to `turns` — so it gets a larger
+	// absolute cap that still covers far less wall-clock history.
+	pruneKeepActivity = 5000
 )
 
 // runStorePruner is a long-lived goroutine (started from main) that keeps
@@ -36,7 +41,7 @@ const (
 // the other store-writing goroutines so memStore.Close() never fires while
 // a prune DELETE is mid-flight.
 func runStorePruner(ctx context.Context, st *store.Store) {
-	pruneStoreOnce(ctx, st, pruneKeepTurns, pruneKeepInbox)
+	pruneStoreOnce(ctx, st, pruneKeepTurns, pruneKeepInbox, pruneKeepActivity)
 	ticker := time.NewTicker(pruneInterval)
 	defer ticker.Stop()
 	for {
@@ -44,7 +49,7 @@ func runStorePruner(ctx context.Context, st *store.Store) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			pruneStoreOnce(ctx, st, pruneKeepTurns, pruneKeepInbox)
+			pruneStoreOnce(ctx, st, pruneKeepTurns, pruneKeepInbox, pruneKeepActivity)
 		}
 	}
 }
@@ -53,7 +58,7 @@ func runStorePruner(ctx context.Context, st *store.Store) {
 // delivered inbox rows. Errors are logged (except plain context
 // cancellation during shutdown) rather than propagated — a failed prune
 // just retries next tick.
-func pruneStoreOnce(ctx context.Context, st *store.Store, keepTurns, keepInbox int) {
+func pruneStoreOnce(ctx context.Context, st *store.Store, keepTurns, keepInbox, keepActivity int) {
 	if n, err := st.PruneTurns(ctx, keepTurns); err != nil {
 		if ctx.Err() == nil {
 			log.Printf("pruner: prune turns: %v", err)
@@ -67,5 +72,12 @@ func pruneStoreOnce(ctx context.Context, st *store.Store, keepTurns, keepInbox i
 		}
 	} else if n > 0 {
 		log.Printf("pruner: removed %d delivered inbox rows (keeping %d most recent)", n, keepInbox)
+	}
+	if n, err := st.PruneActivity(ctx, keepActivity); err != nil {
+		if ctx.Err() == nil {
+			log.Printf("pruner: prune activity: %v", err)
+		}
+	} else if n > 0 {
+		log.Printf("pruner: removed %d old activity rows (keeping %d most recent)", n, keepActivity)
 	}
 }

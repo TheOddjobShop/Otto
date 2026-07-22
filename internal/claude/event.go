@@ -1,11 +1,42 @@
 package claude
 
+import "encoding/json"
+
 // Event is the discriminated union emitted by ParseStream.
 type Event interface{ isEvent() }
 
 type AssistantTextEvent struct{ Text string }
 
 func (AssistantTextEvent) isEvent() {}
+
+// ToolUseEvent is one tool invocation Claude made during a turn. Otto records
+// these to the activity log so Toto can say what Otto is actually doing rather
+// than only what he is saying — the assistant-text tail goes quiet for minutes
+// during a long tool sequence, which is exactly when the user asks.
+//
+// Input is the raw JSON argument object, left unparsed here because its shape
+// is per-tool; cmd/otto summarizes it for display.
+type ToolUseEvent struct {
+	ID    string
+	Name  string
+	Input json.RawMessage
+}
+
+func (ToolUseEvent) isEvent() {}
+
+// ToolResultEvent is the outcome of a ToolUseEvent, correlated by ToolUseID.
+// Claude Code reports these as `user`-role frames carrying tool_result blocks.
+//
+// Content is best-effort: the tool_result content field is either a plain
+// string or an array of content blocks, so the parser flattens the text it can
+// find and leaves the rest. It is only ever used for a truncated log line.
+type ToolResultEvent struct {
+	ToolUseID string
+	IsError   bool
+	Content   string
+}
+
+func (ToolResultEvent) isEvent() {}
 
 type ResultEvent struct {
 	Subtype string
