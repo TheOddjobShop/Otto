@@ -199,6 +199,7 @@ var totoAllowedTools = []string{
 	"mcp__otto-memory__forward_to_otto",
 	"mcp__otto-memory__message_toot",
 	"mcp__otto-memory__session_search",
+	"mcp__otto-memory__recent_turns",
 }
 
 // statusNoteCap bounds how many runes of Otto's prompt / reply-tail each

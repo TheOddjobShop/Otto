@@ -600,3 +600,80 @@ func resultText(res *mcp.CallToolResult) string {
 	}
 	return b.String()
 }
+
+// TestHandleRecentTurns covers the recency tool that resolves anaphora after a
+// session rotation: it must return the tail of the conversation in order,
+// attributed, without needing a query.
+func TestHandleRecentTurns(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	for _, tr := range []struct{ persona, role, content string }{
+		{"otto", "user", "deploy the staging build"},
+		{"otto", "assistant", "deployed, took 40s"},
+		{"toto", "user", "toto hi"},
+		{"toto", "assistant", "mrow"},
+		{"otto", "user", "did that work?"},
+	} {
+		if _, err := s.store.AppendTurn(ctx, tr.persona, tr.role, tr.content); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, _, err := s.handleRecentTurns(ctx, nil, recentTurnsArgs{Limit: 3})
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", resultText(res))
+	}
+	got := resultText(res)
+
+	// The newest three, oldest-first, each attributed to its speaker.
+	for _, want := range []string{"toto/user", "toto/assistant", "otto/user", "did that work?", "mrow"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+	// The oldest turn is outside the window.
+	if strings.Contains(got, "deploy the staging build") {
+		t.Errorf("limit not respected:\n%s", got)
+	}
+}
+
+func TestHandleRecentTurnsDefaultsAndCaps(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	for i := 0; i < maxRecentTurns*2; i++ {
+		if _, err := s.store.AppendTurn(ctx, "otto", "user", "turn"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("zero limit uses the default", func(t *testing.T) {
+		res, _, _ := s.handleRecentTurns(ctx, nil, recentTurnsArgs{})
+		if !strings.Contains(resultText(res), "Last 6 turn(s)") {
+			t.Errorf("expected default of %d:\n%s", defaultRecentTurns, resultText(res))
+		}
+	})
+
+	t.Run("oversized limit is clamped", func(t *testing.T) {
+		res, _, _ := s.handleRecentTurns(ctx, nil, recentTurnsArgs{Limit: 9999})
+		if !strings.Contains(resultText(res), "Last 30 turn(s)") {
+			t.Errorf("expected clamp to %d:\n%s", maxRecentTurns, resultText(res))
+		}
+	})
+}
+
+func TestHandleRecentTurnsEmptyStore(t *testing.T) {
+	s := newTestServer(t)
+	res, _, err := s.handleRecentTurns(context.Background(), nil, recentTurnsArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Error("empty history is not an error condition")
+	}
+	if !strings.Contains(resultText(res), "No earlier conversation") {
+		t.Errorf("got %q", resultText(res))
+	}
+}

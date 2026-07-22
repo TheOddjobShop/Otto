@@ -249,6 +249,55 @@ func (s *memoryServer) handleSearch(ctx context.Context, req *mcp.CallToolReques
 	return textResult(b.String()), nil, nil
 }
 
+// defaultRecentTurns is how many turns recent_turns returns when the caller
+// doesn't say. Six is about three exchanges — enough to resolve "that thing
+// you mentioned" without pulling a whole conversation into context.
+const defaultRecentTurns = 6
+
+// maxRecentTurns caps the caller-supplied limit. Higher values stop being a
+// reference lookup and start being a transcript dump into the model's context,
+// which is what session rotation exists to avoid.
+const maxRecentTurns = 30
+
+type recentTurnsArgs struct {
+	Limit int `json:"limit,omitempty" jsonschema:"how many recent turns to return (default 6, max 30)"`
+}
+
+// handleRecentTurns returns the tail of the conversation in chronological
+// order. Unlike session_search this takes no query: it is a recency lookup,
+// used when the user's message refers back to something without naming it.
+//
+// Content is truncated per turn with the same cap as search results so a
+// single long turn cannot dominate the response.
+func (s *memoryServer) handleRecentTurns(ctx context.Context, req *mcp.CallToolRequest, args recentTurnsArgs) (*mcp.CallToolResult, any, error) {
+	limit := args.Limit
+	if limit <= 0 {
+		limit = defaultRecentTurns
+	}
+	if limit > maxRecentTurns {
+		limit = maxRecentTurns
+	}
+
+	turns, err := s.store.RecentTurns(ctx, limit, 0)
+	if err != nil {
+		return errResult(fmt.Sprintf("recent_turns failed: %v", err)), nil, nil
+	}
+	if len(turns) == 0 {
+		return textResult("No earlier conversation on record."), nil, nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Last %d turn(s), oldest first:\n", len(turns))
+	for _, tr := range turns {
+		// Persona is included because the user may have been talking to Toto
+		// or Toot in between; attributing a line to the wrong speaker is worse
+		// than omitting it.
+		fmt.Fprintf(&b, "\n[%s/%s @ %s] %s",
+			tr.Persona, tr.Role, tr.TS.Format("2006-01-02 15:04"), truncateContent(tr.Content))
+	}
+	return textResult(b.String()), nil, nil
+}
+
 // forwardArgs is the schema for the forward_to_otto tool. Both fields are
 // required; the reason is shown to the user verbatim in the bus banner so
 // they know why Toto handed the message off.
