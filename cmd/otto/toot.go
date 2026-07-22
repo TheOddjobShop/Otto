@@ -182,6 +182,7 @@ var tootAllowedTools = []string{
 	"mcp__otto-memory__message_toto",
 	"mcp__otto-memory__forward_to_otto",
 	"mcp__otto-memory__session_search",
+	"mcp__otto-memory__recent_turns",
 }
 
 // reply is the shared body of Reply / BusReply. bc is nil for direct

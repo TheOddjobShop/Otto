@@ -81,6 +81,10 @@ func run() error {
 		Description: "Search past conversation turns by meaning AND keyword (semantic + keyword retrieval). Use for \"what did we discuss about X\" and fuzzy recall where you don't remember the exact words.",
 	}, srv.handleSearch)
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "recent_turns",
+		Description: "Read back the last few messages of conversation, in order, exactly as they happened. Use this the moment the user says something that REFERS BACK without restating it — \"that thing\", \"the one you mentioned\", \"like I said\", \"do it\", \"what about the other one\", or a bare yes/no answering a question you can't see. Otto's session is cleared after a period of inactivity, so a follow-up that reads as obvious to the user can arrive with no context at all on your side. Prefer this over session_search for anything recent: search ranks by relevance, which is useless when the message has no content to match on. limit defaults to 6 (about three exchanges).",
+	}, srv.handleRecentTurns)
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "forward_to_otto",
 		Description: fmt.Sprintf("Hand off a user message to Otto. Use when the user's request is actual work Otto should handle (running code, sending email, files, calendar, anything beyond chat). message = the user's request in their voice; reason = a one-line \"why I forwarded\" shown to the user in the visible banner. Do NOT forward chitchat or questions about Toto himself. Refused once the agent-to-agent chain reaches its %d-hop cap.", store.MaxBusHop),
 	}, srv.handleForward)
