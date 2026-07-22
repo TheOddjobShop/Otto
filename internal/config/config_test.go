@@ -343,3 +343,63 @@ func TestLoadClampsOutOfRangeRotateHardPct(t *testing.T) {
 		t.Errorf("RotateHardPct = %v, want 0.85 (clamped from out-of-range 1.5)", cfg.RotateHardPct)
 	}
 }
+
+// TestFlushEnabledTriState covers why RotateFlush is a *bool: an absent key
+// must mean "default on", while an explicit `false` must mean "off". A plain
+// bool would collapse those two cases into the same zero value.
+func TestFlushEnabledTriState(t *testing.T) {
+	tru, fls := true, false
+	cases := []struct {
+		name string
+		val  *bool
+		want bool
+	}{
+		{"absent key defaults on", nil, true},
+		{"explicit true", &tru, true},
+		{"explicit false disables", &fls, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &Config{RotateFlush: c.val}
+			if got := cfg.FlushEnabled(); got != c.want {
+				t.Errorf("FlushEnabled() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestRotateFlushParsesFromTOML pins the wiring end-to-end: an explicit
+// `rotate_flush = false` in the file must survive decoding as a non-nil false,
+// not be lost to the zero value.
+func TestRotateFlushParsesFromTOML(t *testing.T) {
+	dir := t.TempDir()
+	claudeBin := filepath.Join(dir, "claude")
+	mcp := filepath.Join(dir, "mcp.json")
+	for _, p := range []string{claudeBin, mcp} {
+		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := `
+telegram_bot_token = "t"
+telegram_allowed_user_id = 1
+claude_binary_path = "` + claudeBin + `"
+mcp_config_path = "` + mcp + `"
+session_id_path = "` + filepath.Join(dir, "sid") + `"
+rotate_flush = false
+`
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RotateFlush == nil {
+		t.Fatal("rotate_flush = false decoded as nil (indistinguishable from absent)")
+	}
+	if cfg.FlushEnabled() {
+		t.Error("FlushEnabled() = true despite rotate_flush = false")
+	}
+}

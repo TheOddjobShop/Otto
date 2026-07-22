@@ -60,6 +60,21 @@ type Config struct {
 	// RotateIdleMinutes: minutes of user silence after which the session is
 	// cleared regardless of size — the periodic "reset on inactivity". Default 15.
 	RotateIdleMinutes int `toml:"rotate_idle_minutes"`
+	// RotateFlush enables the pre-clear memory distillation pass: before the
+	// rotator clears a session, one cheap Haiku turn reviews it and writes
+	// anything durable into the memory core via memory_add.
+	//
+	// Pointer so an absent key is distinguishable from an explicit `false` —
+	// a plain bool's zero value would make "unset" and "disabled" identical
+	// and there would be no way to express the default-on behavior.
+	// Defaults to true; set `rotate_flush = false` to disable.
+	RotateFlush *bool `toml:"rotate_flush"`
+}
+
+// FlushEnabled reports whether the rotation flush should run, applying the
+// default-on behavior for a config that omits the key.
+func (c *Config) FlushEnabled() bool {
+	return c.RotateFlush == nil || *c.RotateFlush
 }
 
 func Load(path string) (*Config, error) {

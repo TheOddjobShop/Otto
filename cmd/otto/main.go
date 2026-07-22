@@ -191,6 +191,7 @@ func main() {
 		ctxTokens:  cfg.ModelContextTokens,
 		hard:       cfg.RotateHardPct,
 		idleWindow: time.Duration(cfg.RotateIdleMinutes) * time.Minute,
+		flush:      cfg.FlushEnabled(),
 	}
 
 	// Toto can see what Otto's up to so he can answer "what's otto
