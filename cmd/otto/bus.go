@@ -122,10 +122,11 @@ func (h *handler) dispatchBusToOtto(ctx context.Context, chatID int64, m store.I
 	}
 	acquired, snap := h.otto.tryAcquireOrSnapshot(u.Text)
 	if !acquired {
-		log.Printf("bus: otto busy on forwarded msg id=%d (silence=%s)", m.ID, snap.Silence.Round(time.Second))
-		if h.toto != nil {
-			h.toto.BusyReply(ctx, chatID, u.Text, snap.CurrentPrompt, snap.Snippet, snap.Activity)
-		}
+		// Otto is mid-turn. The message was never processed, so returning it
+		// to the queue is the honest outcome — previously it was answered by
+		// Toto and then silently dropped, meaning a hand-off the user watched
+		// Toto accept simply evaporated.
+		h.deferBusMessage(ctx, chatID, m, snap)
 		return
 	}
 	defer h.otto.release()
@@ -138,6 +139,70 @@ func (h *handler) dispatchBusToOtto(ctx context.Context, chatID int64, m store.I
 		return
 	}
 	h.handleBusOttoMessage(ctx, u, busContextFromMsg(m))
+}
+
+// busDeferDelay is how long a message waits before the drain retries it after
+// finding Otto busy. Long enough that a normal turn (seconds to a couple of
+// minutes) finishes well inside a few retries, short enough that the user
+// isn't left waiting after Otto frees up. Combined with
+// store.MaxDeliveryAttempts this gives a ~10-minute total window, which lines
+// up with the watchdog's 10-minute hang kill: if Otto is genuinely wedged, the
+// watchdog cancels the turn and the queued message lands on the next tick.
+const busDeferDelay = 30 * time.Second
+
+// deferBusMessage returns a message for a busy Otto to the queue and, on the
+// FIRST deferral only, has Toto tell the user what happened.
+//
+// The first-deferral gate matters: without it, a five-minute Otto turn would
+// produce ten identical "otto's busy" messages as the drain retried, which
+// reads as a malfunction rather than a hand-off.
+func (h *handler) deferBusMessage(ctx context.Context, chatID int64, m store.InboxMsg, snap ottoSnapshot) {
+	firstAttempt := m.Attempts == 0
+
+	if h.store == nil {
+		// No store means no queue to defer into; fall back to the old
+		// behavior so the user at least gets an answer.
+		if h.toto != nil && firstAttempt {
+			h.toto.BusyReply(ctx, chatID, m.Body, snap.CurrentPrompt, snap.Snippet, snap.Activity)
+		}
+		return
+	}
+
+	requeued, attempts, err := h.store.Defer(ctx, m.ID, busDeferDelay)
+	switch {
+	case err != nil:
+		log.Printf("bus: defer id=%d failed: %v", m.ID, err)
+		// The row stays delivered; treat it as undeliverable rather than
+		// pretending it is queued.
+		h.reportUndeliverable(ctx, chatID, m, "it couldn't be re-queued")
+		return
+	case !requeued:
+		log.Printf("bus: giving up on id=%d after %d attempts (otto busy throughout)", m.ID, attempts)
+		h.reportUndeliverable(ctx, chatID, m,
+			fmt.Sprintf("Otto stayed busy across %d attempts", attempts))
+		return
+	}
+
+	log.Printf("bus: otto busy on forwarded msg id=%d (silence=%s) — deferred, attempt %d/%d",
+		m.ID, snap.Silence.Round(time.Second), attempts, store.MaxDeliveryAttempts)
+
+	if firstAttempt && h.toto != nil {
+		h.toto.BusyReply(ctx, chatID, m.Body, snap.CurrentPrompt, snap.Snippet, snap.Activity)
+	}
+}
+
+// reportUndeliverable tells the user, in plain text, that a queued hand-off
+// will not be delivered. Silence here would be the worst outcome: the user
+// watched Toto accept the message and would go on assuming Otto has it.
+func (h *handler) reportUndeliverable(ctx context.Context, chatID int64, m store.InboxMsg, why string) {
+	preview := truncate(oneLine(m.Body), 100)
+	msg := fmt.Sprintf(
+		"⚠️ Couldn't hand this to Otto — %s:\n\n%q\n\nSend it again when he's free.",
+		why, preview,
+	)
+	if err := telegram.SendChunked(ctx, h.bot, chatID, msg); err != nil {
+		log.Printf("bus: send undeliverable notice: %v", err)
+	}
 }
 
 // handleBusOttoMessage is the agent-sourced Otto path: it wraps the
