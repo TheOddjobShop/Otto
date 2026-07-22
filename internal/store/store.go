@@ -15,8 +15,14 @@ type Store struct {
 	db *sql.DB
 }
 
-// schema is run on every Open; every statement is idempotent so reopening an
-// existing database is a no-op.
+// schema creates tables, triggers, and the FTS5 virtual table. Every statement
+// is idempotent so reopening an existing database is a no-op.
+//
+// Indexes deliberately live in schemaIndexes, applied AFTER column migrations:
+// an index over a migrated column (inbox.deliver_after) would fail here on an
+// upgraded database, because CREATE TABLE IF NOT EXISTS leaves the old table
+// untouched and the column does not exist yet. That ordering bug would brick
+// startup for every existing install.
 const schema = `
 CREATE TABLE IF NOT EXISTS turns (
 	id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,18 +49,18 @@ CREATE TABLE IF NOT EXISTS vectors (
 	dim     INTEGER NOT NULL,
 	vec     BLOB    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS vectors_dim ON vectors(dim);
 CREATE TABLE IF NOT EXISTS inbox (
-	id        INTEGER PRIMARY KEY AUTOINCREMENT,
-	ts        TEXT    NOT NULL,
-	target    TEXT    NOT NULL,
-	source    TEXT    NOT NULL,
-	sender    TEXT    NOT NULL,
-	body      TEXT    NOT NULL,
-	delivered INTEGER NOT NULL DEFAULT 0,
-	hop       INTEGER NOT NULL DEFAULT 0
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts            TEXT    NOT NULL,
+	target        TEXT    NOT NULL,
+	source        TEXT    NOT NULL,
+	sender        TEXT    NOT NULL,
+	body          TEXT    NOT NULL,
+	delivered     INTEGER NOT NULL DEFAULT 0,
+	hop           INTEGER NOT NULL DEFAULT 0,
+	deliver_after INTEGER NOT NULL DEFAULT 0,
+	attempts      INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS inbox_undelivered ON inbox(delivered, id);
 CREATE TABLE IF NOT EXISTS token_usage (
 	id              INTEGER PRIMARY KEY AUTOINCREMENT,
 	source          TEXT    NOT NULL,
@@ -65,7 +71,6 @@ CREATE TABLE IF NOT EXISTS token_usage (
 	cache_read      INTEGER NOT NULL,
 	ts              INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS token_usage_source ON token_usage(source);
 CREATE TABLE IF NOT EXISTS activity (
 	id       INTEGER PRIMARY KEY AUTOINCREMENT,
 	ts       INTEGER NOT NULL,
@@ -76,6 +81,14 @@ CREATE TABLE IF NOT EXISTS activity (
 	detail   TEXT    NOT NULL,
 	is_error INTEGER NOT NULL DEFAULT 0
 );
+`
+
+// schemaIndexes is applied after column migrations, so indexes may reference
+// columns added by those migrations.
+const schemaIndexes = `
+CREATE INDEX IF NOT EXISTS vectors_dim ON vectors(dim);
+CREATE INDEX IF NOT EXISTS inbox_undelivered ON inbox(delivered, deliver_after, id);
+CREATE INDEX IF NOT EXISTS token_usage_source ON token_usage(source);
 CREATE INDEX IF NOT EXISTS activity_turn ON activity(turn_key, id);
 `
 
@@ -94,16 +107,52 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}
-	// Idempotent column migration: older DBs predate the inbox.hop column.
-	// Sniff with a SELECT; if the column is missing, ALTER. Re-running on a
-	// DB that already has the column hits the SELECT happy path and skips.
-	if _, err := db.Exec(`SELECT hop FROM inbox LIMIT 1`); err != nil {
-		if _, aerr := db.Exec(`ALTER TABLE inbox ADD COLUMN hop INTEGER NOT NULL DEFAULT 0`); aerr != nil {
+	// Idempotent column migrations for DBs created before a column existed.
+	// CREATE TABLE IF NOT EXISTS does not add columns to an existing table, so
+	// each addition needs an explicit ALTER guarded by a probe.
+	for _, m := range columnMigrations {
+		if err := addColumnIfMissing(db, m.table, m.column, m.definition); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("store: migrate inbox.hop: %w", aerr)
+			return nil, err
 		}
 	}
+	// Indexes last: some cover columns the migrations above just added.
+	if _, err := db.Exec(schemaIndexes); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: create indexes: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// columnMigrations lists every column added to a table after that table first
+// shipped. Order is irrelevant — each entry is independent and idempotent.
+//
+// A new install gets these columns from `schema` above and every probe here
+// succeeds immediately; an upgraded install picks them up by ALTER. Both paths
+// converge on the same layout, which is what keeps `schema` readable as the
+// authoritative description rather than a historical artifact.
+var columnMigrations = []struct{ table, column, definition string }{
+	{"inbox", "hop", "INTEGER NOT NULL DEFAULT 0"},
+	// deliver_after / attempts back deferred bus delivery: a message for a
+	// busy Otto is returned to the queue with a future deliver_after instead
+	// of being dropped, and attempts bounds how long that can go on.
+	{"inbox", "deliver_after", "INTEGER NOT NULL DEFAULT 0"},
+	{"inbox", "attempts", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+// addColumnIfMissing probes for a column with a cheap SELECT and adds it when
+// absent. The probe is the check rather than pragma table_info because it is
+// one statement and fails precisely when the column is missing.
+func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
+	// #nosec — table/column/definition are compile-time constants from
+	// columnMigrations, never user input; SQLite cannot parameterize DDL.
+	if _, err := db.Exec(fmt.Sprintf(`SELECT %s FROM %s LIMIT 1`, column, table)); err == nil {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)); err != nil {
+		return fmt.Errorf("store: migrate %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 // Close releases the underlying database handle.

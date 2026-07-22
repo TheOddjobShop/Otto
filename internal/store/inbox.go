@@ -37,6 +37,10 @@ type InboxMsg struct {
 	Sender string // "otto" | "toto" | "toot" | "" (user)
 	Body   string
 	Hop    int // 0 for user-originated; +1 per agent-to-agent forward
+	// Attempts counts prior delivery attempts that were deferred (recipient
+	// busy). 0 on the first delivery. The dispatcher uses it to avoid telling
+	// the user "Otto is busy" once per retry.
+	Attempts int
 }
 
 // ErrBusHopExceeded is returned by Enqueue when a caller tries to push a
@@ -149,12 +153,13 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 		return nil, fmt.Errorf("store: inbox dequeue: acquire write lock: %w", err)
 	}
 
+	now := time.Now().Unix()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, ts, target, source, sender, body, hop
+		SELECT id, ts, target, source, sender, body, hop, attempts
 		FROM inbox
-		WHERE delivered = 0
+		WHERE delivered = 0 AND deliver_after <= ?
 		ORDER BY id
-		LIMIT ?`, inboxDequeueCap)
+		LIMIT ?`, now, inboxDequeueCap)
 	if err != nil {
 		return nil, fmt.Errorf("store: inbox dequeue: select: %w", err)
 	}
@@ -164,7 +169,7 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 	for rows.Next() {
 		var m InboxMsg
 		var ts string
-		if err := rows.Scan(&m.ID, &ts, &m.Target, &m.Source, &m.Sender, &m.Body, &m.Hop); err != nil {
+		if err := rows.Scan(&m.ID, &ts, &m.Target, &m.Source, &m.Sender, &m.Body, &m.Hop, &m.Attempts); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("store: inbox dequeue: scan: %w", err)
 		}
@@ -191,13 +196,19 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 
 	// Mark exactly the rows we read as delivered. The SELECT above fetches
 	// rows in ascending id order with LIMIT, so maxID is the largest id in
-	// this batch and all delivered=0 rows with id <= maxID are exactly the
-	// rows we just scanned. Using an id-range predicate instead of a
-	// variable-length IN(...) list avoids SQLITE_LIMIT_VARIABLE_NUMBER
-	// (999 on older SQLite builds); should inboxDequeueCap ever be raised
-	// above that limit the range form remains correct and safe.
+	// this batch. Using an id-range predicate instead of a variable-length
+	// IN(...) list avoids SQLITE_LIMIT_VARIABLE_NUMBER (999 on older SQLite
+	// builds); should inboxDequeueCap ever be raised above that limit the
+	// range form remains correct and safe.
+	//
+	// The deliver_after clause is load-bearing, not decoration: once rows can
+	// be deferred into the future, "every delivered=0 row with id <= maxID"
+	// is no longer the set we scanned — a deferred row with a smaller id sits
+	// in that range and would be marked delivered without ever being
+	// dispatched, silently losing the message. The predicate here must mirror
+	// the SELECT's exactly, same `now`.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE inbox SET delivered = 1 WHERE delivered = 0 AND id <= ?`, maxID,
+		`UPDATE inbox SET delivered = 1 WHERE delivered = 0 AND deliver_after <= ? AND id <= ?`, now, maxID,
 	); err != nil {
 		return nil, fmt.Errorf("store: inbox dequeue: mark: %w", err)
 	}
@@ -205,6 +216,59 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 		return nil, fmt.Errorf("store: inbox dequeue: commit: %w", err)
 	}
 	return out, nil
+}
+
+// MaxDeliveryAttempts bounds how many times a message may be deferred before
+// the bus gives up on it. Paired with the dispatcher's retry delay this sets
+// the total window a message will wait for a busy recipient; the dispatcher
+// reports exhaustion to the user rather than dropping it silently.
+const MaxDeliveryAttempts = 20
+
+// Defer returns an already-dequeued message to the queue for a later attempt,
+// invisible until retryAfter has elapsed. Returns requeued=false when the row
+// has exhausted MaxDeliveryAttempts (it stays delivered, and the caller should
+// tell the user), or when the id no longer exists.
+//
+// This exists because DequeueAll marks rows delivered BEFORE dispatch — an
+// at-most-once contract chosen so a crashed dispatcher can't replay a batch.
+// That contract is right for a recipient who is merely slow, but wrong for one
+// who is busy: the message was never actually processed, and dropping it means
+// a hand-off the user watched Toto accept simply evaporates.
+func (s *Store) Defer(ctx context.Context, id int64, retryAfter time.Duration) (requeued bool, attempts int, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, 0, fmt.Errorf("store: inbox defer: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Same write-lock-up-front pattern as DequeueAll: begin as a writer so the
+	// read below cannot open a snapshot that the UPDATE then fails to upgrade
+	// with SQLITE_BUSY_SNAPSHOT, which busy_timeout deliberately won't retry.
+	if _, err := tx.ExecContext(ctx, `UPDATE inbox SET delivered = delivered WHERE 0`); err != nil {
+		return false, 0, fmt.Errorf("store: inbox defer: acquire write lock: %w", err)
+	}
+
+	if err := tx.QueryRowContext(ctx, `SELECT attempts FROM inbox WHERE id = ?`, id).Scan(&attempts); err != nil {
+		return false, 0, fmt.Errorf("store: inbox defer: read attempts: %w", err)
+	}
+	if attempts+1 >= MaxDeliveryAttempts {
+		// Leave it delivered=1 so it never comes back; the caller surfaces it.
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox SET attempts = ? WHERE id = ?`, attempts+1, id); err != nil {
+			return false, 0, fmt.Errorf("store: inbox defer: record final attempt: %w", err)
+		}
+		return false, attempts + 1, tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE inbox SET delivered = 0, attempts = ?, deliver_after = ? WHERE id = ?`,
+		attempts+1, time.Now().Add(retryAfter).Unix(), id,
+	); err != nil {
+		return false, 0, fmt.Errorf("store: inbox defer: requeue: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, fmt.Errorf("store: inbox defer: commit: %w", err)
+	}
+	return true, attempts + 1, nil
 }
 
 // PruneInbox deletes delivered inbox rows whose id is more than keep rows
