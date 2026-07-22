@@ -38,7 +38,7 @@ After `setup.sh` reports success, on Telegram:
 - Send `/whoami` — prints your Telegram user ID and current session ID.
 - Send `/status` — prints uptime + session.
 - Send `/restart` — interrupts an in-flight Claude call.
-- Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify), plus an estimated dollar cost broken down by model. The cost is computed from published list prices in `cmd/otto/pricing.go` and assumes the default 5-minute cache TTL; it is an estimate, not a billing figure, and any model without a rate card (e.g. turns that inherited Claude Code's own model) is named as excluded rather than silently counted as free.
+- Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify / flush), plus an estimated dollar cost broken down by model. The cost is computed from published list prices in `cmd/otto/pricing.go` and assumes the default 5-minute cache TTL; it is an estimate, not a billing figure, and any model without a rate card (e.g. turns that inherited Claude Code's own model) is named as excluded rather than silently counted as free.
 - Send a photo with caption "describe this" — Otto downloads it and forwards to Claude via `@<path>`.
 - Send "what's on my calendar today?" — exercises the Google Calendar MCP.
 
@@ -130,7 +130,7 @@ Otto embeds each turn asynchronously after sending the reply (best-effort, 130 s
 
 **Semantic embeddings.** Local-only via Ollama at `http://localhost:11434`, ordered chain `embeddinggemma → nomic-embed-text → keyword floor`. Zero per-token cost, fully private. Vectors are tagged with `model` + `dim`, so a model swap silently ignores stale-dimension rows until they get re-embedded.
 
-**Idle-gated session rotation.** Otto tracks `usage.input_tokens` per turn. A long-lived rotator goroutine clears the session when either of two conditions is met: (a) you have been quiet for **15 minutes** (idle reset — fires regardless of session size), or (b) `input_tokens` has crossed **85 %** of the model's context window AND you have paused for at least 5 minutes (hard cap with active grace, so the cap never wipes context mid-conversation). Your next message then starts fresh, seeded by the always-injected memory core + retrieved memories. Continuity comes from the core (durable facts you've taught Otto) + `session_search` (any past turn). You should rarely need `/new` again.
+**Idle-gated session rotation.** Otto tracks `usage.input_tokens` per turn. A long-lived rotator goroutine clears the session when either of two conditions is met: (a) you have been quiet for **15 minutes** (idle reset — fires regardless of session size), or (b) `input_tokens` has crossed **85 %** of the model's context window AND you have paused for at least 5 minutes (hard cap with active grace, so the cap never wipes context mid-conversation). Before clearing, Otto runs a **flush pass** (`rotate_flush`, on by default): one cheap Haiku turn reviews the closing session and saves anything durable — a stated preference, an environment fact, a correction — into the memory core via `memory_add`. It is deliberately narrow: `memory_add` only (never replace or remove, so a background pass can't overwrite something you taught Otto deliberately), skipped for sessions under 5000 tokens, capped at three facts, bounded at 90 seconds, and failure just logs and lets the rotation proceed. Your next message then starts fresh, seeded by the always-injected memory core + retrieved memories. Continuity comes from the core (durable facts you've taught Otto) + `session_search` (any past turn). You should rarely need `/new` again.
 
 All four memory tools are exposed via the local `otto-memory` MCP server registered in `mcp.json`. Toto and Toot share read access to the core (so they know your prefs too); Otto is the only one that writes.
 
@@ -198,6 +198,7 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 | `model_context_tokens` | `200000` | denominator for rotation thresholds |
 | `rotate_hard_pct` | `0.85` | rotate when tokens ≥ this fraction of context and user has paused ≥ 5 min |
 | `rotate_idle_minutes` | `15` | minutes of silence after which the session clears regardless of size |
+| `rotate_flush` | `true` | run a cheap Haiku pass over a session before clearing it, saving durable facts to the memory core |
 
 ### Caveman skill (or other SessionStart prose-changers)
 

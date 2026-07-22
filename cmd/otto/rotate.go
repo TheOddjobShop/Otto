@@ -31,6 +31,8 @@ type rotateConfig struct {
 	ctxTokens  int
 	hard       float64
 	idleWindow time.Duration
+	// flush enables the pre-clear memory distillation pass (see flush.go).
+	flush bool
 }
 
 // shouldRotate decides whether the current session should be cleared. tokens is
@@ -74,7 +76,7 @@ func (h *handler) runRotator(ctx context.Context) {
 	ticker := time.NewTicker(rotateCheckInterval)
 	defer ticker.Stop()
 	for {
-		h.maybeRotate()
+		h.maybeRotate(ctx)
 		// Pets clear their own sessions on the same idle window so they don't
 		// answer from stale history (e.g. an old version number).
 		for _, p := range h.petRotators {
@@ -89,9 +91,14 @@ func (h *handler) runRotator(ctx context.Context) {
 }
 
 // maybeRotate performs one rotation evaluation: if the session is non-empty,
-// over threshold, and Otto is free, clear it.
-func (h *handler) maybeRotate() {
-	if h.session.ID() == "" {
+// over threshold, and Otto is free, optionally distill it into the memory core
+// and then clear it.
+//
+// ctx bounds the flush pass; rotation itself is not cancellable (a clear that
+// has been decided on should complete).
+func (h *handler) maybeRotate(ctx context.Context) {
+	sessionID := h.session.ID()
+	if sessionID == "" {
 		return
 	}
 	tokens, idle := h.otto.rotationSnapshot()
@@ -100,6 +107,13 @@ func (h *handler) maybeRotate() {
 	}
 	if !h.otto.tryAcquire("(session rotation)") {
 		return // Otto busy; retry next tick
+	}
+	// The slot is held across the flush as well as the clear. The flush
+	// resumes this very session, so a concurrent Otto turn would interleave
+	// with it; and clearing between the two would distill a session that no
+	// longer exists.
+	if shouldFlush(h.rotate.flush, h.mem != nil, tokens) {
+		h.runFlush(ctx, sessionID, tokens)
 	}
 	err := h.session.Clear()
 	h.otto.resetInputTokens()

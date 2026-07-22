@@ -135,6 +135,13 @@ value per session.
 
 **Thresholds (configurable):**
 
+> **AMENDED 2026-07-21 — the shipped rule differs from the one designed here.**
+> The original three-threshold rule below was replaced during implementation; the
+> amendment immediately after it describes what `cmd/otto/rotate.go` actually does.
+> Kept side by side because the *why* of the change is the useful part.
+
+Originally designed:
+
 ```
 soft = 50% of model context window  → eligible to rotate, but wait for idle
 hard = 85% of model context window  → rotate now regardless (safety net)
@@ -143,19 +150,48 @@ idle = 15 min (configurable; 5–30)  → no user message for this long
 
 **Rotate when:** `(tokens >= soft AND idle >= idleWindow)` OR `(tokens >= hard)`.
 
-The normal path is the idle-gated one: the conversation may ride past 50% while the user
-is actively talking; rotation only fires once they go quiet. This eliminates mid-thread
-"stutter." The hard cap is a rare safety net for a single very long unbroken session.
+**As shipped (v0.7.2):**
 
-**Rotation sequence (runs in the background while idle, or inline at hard cap):**
+```
+idle = 15 min (rotate_idle_minutes)  → clear regardless of session size
+hard = 85% of context (rotate_hard_pct) AND idle >= 5 min (hardRotateActiveGrace)
+```
+
+**Rotate when:** `idle >= idleWindow` OR `(tokens >= hard AND idle >= 5min)`.
+
+Two changes, both made in response to observed behavior:
+
+- **`rotate_soft_pct` was dropped entirely** — it does not exist as a config key or a
+  field on `rotateConfig`. The idle reset fires on *any* non-empty session rather than
+  only ones past 50%. Gating the idle reset on size meant small-but-stale sessions
+  survived indefinitely, which is exactly the "answers from stale context" failure the
+  rotation was built to prevent. Since continuity comes from the always-injected core
+  plus `session_search`, clearing a small idle session costs nothing.
+- **The hard cap gained a 5-minute active grace** (commit `fdbde0f`). "Rotate now
+  regardless" wiped context mid-conversation: one data-heavy turn (a full Notion backlog
+  dump) pushes past 85%, and the user's very next message — seconds later — lands in a
+  fresh session with the just-fetched context gone. The cap now waits for the user to
+  pause, so it never fires mid-thread.
+
+The normal path remains the idle-gated one. The hard cap is a rare safety net for a
+single very long unbroken session.
+
+**Rotation sequence:**
 
 1. **Flush** — one cheap haiku extraction pass distills the closing session into durable
    `memory_add` calls (catches anything the inline hybrid-writes missed).
+   *Deferred as a v1 non-goal by the rotation plan; **shipped 2026-07-21** — see
+   `cmd/otto/flush.go`. Gated on `rotate_flush` (default on), skipped for sessions under
+   5000 tokens, restricted to `memory_add` only (never replace/remove), and bounded at
+   90s. Failure is logged and the rotation proceeds.*
 2. **Handoff note** — generate a short "open thread" summary of what is currently
    in-flight, persisted for the next session's first turn.
+   *Still not implemented, and still a deliberate non-goal: rotation is idle-gated at
+   ≥15 minutes, so the thread is almost always already concluded. `session_search`
+   recovers older context on demand.*
 3. **Clear session** — `Session.Clear()`; the next turn starts a fresh Claude session.
 4. **Reseed** — the fresh turn injects: persona + memory core (USER.md + MEMORY.md) +
-   semantic-retrieved memories for the incoming message + the handoff note.
+   semantic-retrieved memories for the incoming message. *(No handoff note — see 2.)*
 
 **Concurrency.** The rotator mirrors the existing watchdog pattern: a ticker goroutine
 inspecting `ottoState` (must be `!busy`) + time-since-last-user-message + tracked session
@@ -183,17 +219,18 @@ not logs ("On 2026-01-05 the user asked...").
 
 ```
 Telegram msg → allowlist → dispatch
-  → assemble system prompt: persona + core(USER.md+MEMORY.md) + handoff-note(if fresh) + footer
-  → semantic+FTS5 retrieve top-k memories for the message → inject
+  → assemble system prompt: persona + core(USER.md+MEMORY.md) + current-time + footer
   → claude -p --resume <sid> --append-system-prompt <assembled> --mcp-config <incl otto-memory>
       ↳ during the turn, Claude may call memory_add/replace/remove, session_search
+        (retrieval is ON DEMAND via the session_search tool — there is no
+         automatic top-k pre-injection per message; see the amendment below)
   → parse stream: assistant text, session id, result(input_tokens, denials)
   → send reply to Telegram (markdown-stripped)
   → log turn to state.db (embed + index, off the reply path)
-  → update tracked session tokens; mark rotation-eligible if over soft threshold
+  → update tracked session tokens
 
-[background ticker] if idle >= idleWindow AND tokens >= soft  → rotate (flush, handoff, clear)
-                    if tokens >= hard                          → rotate now
+[background ticker] if idle >= idleWindow                     → flush, clear
+                    if tokens >= hard AND idle >= 5min         → flush, clear
 ```
 
 ## Config additions (`config.toml`)
@@ -202,9 +239,12 @@ Telegram msg → allowlist → dispatch
 - `state_db_path` — default `~/.config/otto/state.db`.
 - `embed_ollama_url` — default `http://localhost:11434`.
 - `embed_models` — ordered list, default `["embeddinggemma", "nomic-embed-text"]`.
-- `rotate_soft_pct` — default `0.50`.
+- ~~`rotate_soft_pct` — default `0.50`.~~ **Not implemented** — dropped during
+  implementation; see the rotator amendment above.
 - `rotate_hard_pct` — default `0.85`.
 - `rotate_idle_minutes` — default `15`.
+- `rotate_flush` — default `true`. **Added 2026-07-21.** Enables the step-1 flush
+  pass. Absent means on; set `false` to disable.
 - `model_context_tokens` — default `200000` (the model's window, for pct math).
 
 All optional with the defaults above so existing `config.toml` files keep working.
