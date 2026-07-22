@@ -6,6 +6,9 @@ Design specs:
 
 - [`docs/superpowers/specs/2026-04-24-otto-design.md`](docs/superpowers/specs/2026-04-24-otto-design.md) — original bot design.
 - [`docs/superpowers/specs/2026-05-27-otto-memory-rearchitect-design.md`](docs/superpowers/specs/2026-05-27-otto-memory-rearchitect-design.md) — the memory system (Hermes-style two-tier + local embeddings + idle rotation).
+- [`docs/superpowers/specs/2026-07-21-agent-bus-design.md`](docs/superpowers/specs/2026-07-21-agent-bus-design.md) — the inter-agent message bus (inbox table, drain loop, hop cap). *Retroactive.*
+- [`docs/superpowers/specs/2026-07-21-model-router-design.md`](docs/superpowers/specs/2026-07-21-model-router-design.md) — the per-turn Haiku model classifier (CODE vs CHAT routing). *Retroactive.*
+- [`docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md`](docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md) — the multi-persona pet system (Toto/Toot) and the liveness watchdog. *Retroactive.*
 
 ## Quick start
 
