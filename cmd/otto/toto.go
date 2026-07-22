@@ -199,6 +199,55 @@ var totoAllowedTools = []string{
 	"mcp__otto-memory__session_search",
 }
 
+// statusNoteCap bounds how many runes of Otto's prompt / reply-tail each
+// parenthetical status line carries. The note is a stage direction, not a
+// transcript — it needs to convey the gist ("he's on your gmail") in a line
+// the model reads at a glance. The snippet is already byte-capped upstream
+// at snippetCap; this bounds the visible line further.
+const statusNoteCap = 200
+
+// flattenForNote collapses s to a single line (newlines and runs of
+// whitespace become one space) and truncates it to max runes. Status notes
+// are line-oriented parentheticals — an embedded newline would break the
+// "one fact per line" reading the model relies on.
+func flattenForNote(s string, max int) string {
+	return truncate(strings.Join(strings.Fields(s), " "), max)
+}
+
+// ottoStatusNote renders the live Otto-status stage direction prepended to
+// Toto's user-side prompt.
+//
+// This deliberately lives on the USER side, not in --append-system-prompt.
+// Toto runs with --resume, so his conversation history persists; a small
+// model weighs a prior assistant turn ("idle. nothing.") over a system
+// prompt that changed silently between turns, and answers "what's he doing
+// now?" by echoing its own last answer. Putting the live values inline in
+// the user message means the history itself records the status at each turn
+// — the model sees "last turn: idle → I said idle; this turn: busy on X"
+// and updates naturally.
+//
+// Returns "" when there is nothing to report, so callers can prepend
+// unconditionally.
+func ottoStatusNote(busy bool, ottoPrompt, ottoSnippet string, silence time.Duration) string {
+	var lines []string
+	if busy {
+		if p := flattenForNote(ottoPrompt, statusNoteCap); p != "" {
+			lines = append(lines, fmt.Sprintf("(otto status: busy on %q)", p))
+		} else {
+			lines = append(lines, "(otto status: busy)")
+		}
+		if s := flattenForNote(ottoSnippet, statusNoteCap); s != "" {
+			lines = append(lines, fmt.Sprintf("(tail of his reply: %q)", s))
+		}
+		if silence > 30*time.Second {
+			lines = append(lines, fmt.Sprintf("(he's been silent for %s)", silence.Round(time.Second)))
+		}
+	} else {
+		lines = append(lines, "(otto status: idle)")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // replyWithContext is the shared implementation for both paths.
 // busyFallback distinguishes the two modes: in busy-fallback the user's
 // message wasn't addressed to Toto and Otto's the one they meant; in
@@ -226,47 +275,47 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		// so Toto knows he's mid-chain and how to keep / wrap the loop.
 		systemPrompt += "\n\n" + busPromptBlock(*bc, "toto")
 	}
+	// statusNote carries the live, volatile Otto state. It is built here but
+	// prepended to the USER-side prompt below — see ottoStatusNote for why it
+	// must not live in the system prompt.
+	var statusNote string
 	if busyFallback {
 		// User's message was meant for Otto, but Otto is busy. ottoPrompt
 		// and ottoSnippet were captured by dispatch under lock and reflect
 		// the same data the snapshot would yield.
+		statusNote = ottoStatusNote(true, ottoPrompt, ottoSnippet, 0)
+
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
-		systemPrompt += "OTTO IS CURRENTLY WORKING ON THIS FOR THE USER:\n"
+		systemPrompt += "OTTO IS CURRENTLY WORKING ON THIS FOR THE USER.\n"
 		systemPrompt += "───────────────────────────────────────────────\n\n"
-		systemPrompt += ottoPrompt
-		if ottoSnippet != "" {
-			systemPrompt += "\n\n───────────────────────────────────────────────\n"
-			systemPrompt += "WHAT OTTO HAS PARTIALLY SAID SO FAR (in-progress, the tail of his streamed reply — NOT a finished answer):\n"
-			systemPrompt += "───────────────────────────────────────────────\n\n"
-			systemPrompt += ottoSnippet
-			systemPrompt += "\n\nUse this only to ground your reply in reality — e.g. 'he's typing about your gmail right now' if the snippet is about gmail. Do NOT relay Otto's words to the user verbatim or pretend his answer is yours."
-		}
-		systemPrompt += "\n\nRead the STATE above LITERALLY. Don't improvise verbs like \"pulling\" or \"offline\" — Otto is either BUSY (working on the prompt shown) or IDLE (nothing in progress). When the user asks, paraphrase this block, don't invent."
+		systemPrompt += "What he's working on — and the tail of his in-progress reply — "
+		systemPrompt += "are in the status note at the top of the user's message. That note "
+		systemPrompt += "is the CURRENT truth; re-read it every turn rather than repeating "
+		systemPrompt += "what you said last time.\n\n"
+		systemPrompt += "Use it only to ground your reply in reality — e.g. 'he's typing about "
+		systemPrompt += "your gmail right now' if the tail is about gmail. Do NOT relay Otto's "
+		systemPrompt += "words to the user verbatim, pretend his answer is yours, or echo the "
+		systemPrompt += "note itself back."
 	} else {
 		systemPrompt += "\n\n───────────────────────────────────────────────\n"
 		systemPrompt += "THE USER ADDRESSED YOU DIRECTLY.\n"
 		systemPrompt += "───────────────────────────────────────────────\n\n"
 		systemPrompt += "They want to talk to YOU, not Otto. They specifically said your name. Greet them like a cat. Chat in your voice."
 
-		// Status snippet so Toto can answer "what's otto up to?" with truth.
+		// Status note so Toto can answer "what's otto up to?" with truth.
 		if t.ottoStatus != nil {
 			snap := t.ottoStatus()
+			statusNote = ottoStatusNote(snap.Busy, snap.CurrentPrompt, snap.Snippet, snap.Silence)
+
 			systemPrompt += "\n\n───────────────────────────────────────────────\n"
 			systemPrompt += "OTTO STATUS (in case the user asks):\n"
 			systemPrompt += "───────────────────────────────────────────────\n\n"
-			if snap.Busy {
-				systemPrompt += "Otto is BUSY. He's currently working on:\n\n"
-				systemPrompt += "  " + snap.CurrentPrompt
-				if snap.Snippet != "" {
-					systemPrompt += "\n\nTail of his in-progress reply (don't quote verbatim — just for grounding):\n\n  " + snap.Snippet
-				}
-				if snap.Silence > 30*time.Second {
-					systemPrompt += fmt.Sprintf("\n\n(He's been silent for %s.)", snap.Silence.Round(time.Second))
-				}
-			} else {
-				systemPrompt += "Otto is IDLE. Nothing in progress."
-			}
-			systemPrompt += "\n\nRead the STATE above LITERALLY. Don't improvise verbs like \"pulling\" or \"offline\" — Otto is either BUSY (working on the prompt shown) or IDLE (nothing in progress). When the user asks, paraphrase this block, don't invent."
+			systemPrompt += "The status note at the top of the user's message says what Otto is "
+			systemPrompt += "doing right now — either busy on a specific prompt, or idle. Read it "
+			systemPrompt += "LITERALLY and re-read it every turn: it changes between messages, and "
+			systemPrompt += "your own previous answer is NOT evidence of the current state.\n\n"
+			systemPrompt += "Don't improvise verbs like \"pulling\" or \"offline\". Paraphrase the "
+			systemPrompt += "note when asked; never invent, never echo the note back verbatim."
 		}
 	}
 
@@ -299,6 +348,12 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 	prompt := userMessage
 	if prompt == "" {
 		prompt = "(the user pinged you with no content — likely a greeting or attention check)"
+	}
+	// Prepend the live status AFTER the empty-body fallback, so a bare "toto"
+	// still carries current Otto state. Empty when there's nothing to report
+	// (direct address with no ottoStatus wired), leaving the prompt untouched.
+	if statusNote != "" {
+		prompt = statusNote + "\n\n" + prompt
 	}
 
 	// Cross-process: env vars carry the hop counter and self-name to the

@@ -534,3 +534,209 @@ func TestRunRotatorClearsLargeIdleSession(t *testing.T) {
 		}
 	}
 }
+
+// TestPartitionPetLast covers the batch reorder in isolation: pet-addressed
+// updates move to the back, relative order is preserved inside each group,
+// and photos are never treated as pet-addressed (they always go to Otto).
+func TestPartitionPetLast(t *testing.T) {
+	pets := newPetRegistry(&Toto{}, &Toot{})
+
+	mk := func(id int, text string) telegram.Update {
+		return telegram.Update{UpdateID: id, UserID: 99, ChatID: 99, Text: text}
+	}
+
+	t.Run("pet-first-batch-is-reordered", func(t *testing.T) {
+		in := []telegram.Update{
+			mk(1, "hey toto what's otto doing?"),
+			mk(2, "summarize all my emails"),
+		}
+		got := partitionPetLast(in, pets)
+		if len(got) != 2 || got[0].UpdateID != 2 || got[1].UpdateID != 1 {
+			t.Fatalf("want [2 1], got %v", ids(got))
+		}
+	})
+
+	t.Run("preserves-order-within-groups", func(t *testing.T) {
+		in := []telegram.Update{
+			mk(1, "toto hi"),
+			mk(2, "first otto message"),
+			mk(3, "toot status?"),
+			mk(4, "second otto message"),
+		}
+		got := partitionPetLast(in, pets)
+		if want := []int{2, 4, 1, 3}; !equalIDs(got, want) {
+			t.Fatalf("want %v, got %v", want, ids(got))
+		}
+	})
+
+	t.Run("photos-are-never-pet-addressed", func(t *testing.T) {
+		// Caption names a pet, but photos always route to Otto.
+		u := telegram.Update{UpdateID: 1, Text: "toto look at this", PhotoIDs: []string{"f1"}}
+		if isPetAddressed(u, pets) {
+			t.Error("photo update classified as pet-addressed")
+		}
+	})
+
+	t.Run("nil-registry-is-a-noop", func(t *testing.T) {
+		in := []telegram.Update{mk(1, "toto hi"), mk(2, "otto hi")}
+		got := partitionPetLast(in, nil)
+		if !equalIDs(got, []int{1, 2}) {
+			t.Fatalf("nil registry should preserve order, got %v", ids(got))
+		}
+	})
+
+	t.Run("commands-are-non-pet", func(t *testing.T) {
+		in := []telegram.Update{mk(1, "toto hi"), mk(2, "/status")}
+		got := partitionPetLast(in, pets)
+		if !equalIDs(got, []int{2, 1}) {
+			t.Fatalf("want commands dispatched before pets, got %v", ids(got))
+		}
+	})
+}
+
+func ids(us []telegram.Update) []int {
+	out := make([]int, len(us))
+	for i, u := range us {
+		out[i] = u.UpdateID
+	}
+	return out
+}
+
+func equalIDs(us []telegram.Update, want []int) bool {
+	if len(us) != len(want) {
+		return false
+	}
+	for i, u := range us {
+		if u.UpdateID != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// blockingRunner holds each Run call open until release is closed, so a test
+// can observe Otto mid-turn. Signals started on the first call.
+type blockingRunner struct {
+	mu      sync.Mutex
+	called  []claude.RunArgs
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingRunner) Run(ctx context.Context, args claude.RunArgs) error {
+	r.mu.Lock()
+	r.called = append(r.called, args)
+	r.mu.Unlock()
+	r.once.Do(func() { close(r.started) })
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	args.Events <- claude.AssistantTextEvent{Text: "done"}
+	args.Events <- claude.ResultEvent{Subtype: "success"}
+	return nil
+}
+
+func (r *blockingRunner) WithEnv(map[string]string) claude.Runner { return r }
+
+// recordingRunner is a fakeRunner with a mutex-guarded call log and a signal
+// fired on the first call, for use from a dispatch goroutine.
+type recordingRunner struct {
+	mu     sync.Mutex
+	called []claude.RunArgs
+	fired  chan struct{}
+	once   sync.Once
+}
+
+func (r *recordingRunner) Run(ctx context.Context, args claude.RunArgs) error {
+	r.mu.Lock()
+	r.called = append(r.called, args)
+	r.mu.Unlock()
+	args.Events <- claude.AssistantTextEvent{Text: "mrow"}
+	args.Events <- claude.ResultEvent{Subtype: "success"}
+	r.once.Do(func() { close(r.fired) })
+	return nil
+}
+
+func (r *recordingRunner) WithEnv(map[string]string) claude.Runner { return r }
+
+func (r *recordingRunner) first() claude.RunArgs {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.called) == 0 {
+		return claude.RunArgs{}
+	}
+	return r.called[0]
+}
+
+// TestPetLastBatchSeesOttoBusy is the end-to-end version of the reorder fix:
+// a batch delivered as [pet-addressed, Otto-bound] must still leave Toto
+// reporting Otto as BUSY. Before the partition, Toto dispatched first,
+// snapshotted an idle Otto, and told the user nothing was going on.
+func TestPetLastBatchSeesOttoBusy(t *testing.T) {
+	ottoRunner := &blockingRunner{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	totoRunner := &recordingRunner{fired: make(chan struct{})}
+
+	dir := t.TempDir()
+	sess, err := claude.LoadSession(filepath.Join(dir, "sid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	totoSess, err := claude.LoadSession(filepath.Join(dir, "toto-sid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bot := &fakeBot{updates: [][]telegram.Update{{
+		// Telegram delivered the pet message FIRST — the inverted order
+		// that used to defeat the 150ms spacing fix.
+		{UpdateID: 1, UserID: 99, ChatID: 99, Text: "hey toto what's otto doing?"},
+		{UpdateID: 2, UserID: 99, ChatID: 99, Text: "summarize all my emails"},
+	}}}
+
+	toto := &Toto{bot: bot, runner: totoRunner, session: totoSess, persona: "cat"}
+	h := &handler{
+		bot:       bot,
+		allow:     auth.New(99),
+		session:   sess,
+		runner:    ottoRunner,
+		startedAt: time.Now(),
+		otto:      newOttoState(),
+		toto:      toto,
+		pets:      newPetRegistry(toto),
+	}
+	toto.ottoStatus = h.otto.Snapshot
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = h.runPollingLoop(ctx) }()
+
+	// Otto must be the one to claim the slot first, despite arriving second.
+	select {
+	case <-ottoRunner.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Otto never started — the Otto-bound message was not dispatched first")
+	}
+	select {
+	case <-totoRunner.fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Toto never replied")
+	}
+
+	got := totoRunner.first().Prompt
+	if !strings.Contains(got, "otto status: busy") {
+		t.Errorf("Toto did not see Otto as busy; prompt was:\n%s", got)
+	}
+	if !strings.Contains(got, "summarize all my emails") {
+		t.Errorf("Toto's status note missing Otto's in-flight prompt:\n%s", got)
+	}
+
+	close(ottoRunner.release)
+	cancel()
+	h.WaitDispatches()
+}
