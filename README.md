@@ -171,6 +171,12 @@ For options 1 and 2, no systemd config is needed — `~/.claude/` lives under th
 
 Adding/removing servers: edit `mcp.json` and `systemctl --user restart otto`. On macOS use `launchctl kickstart -k gui/$(id -u)/com.otto.bot` instead.
 
+### Version pinning
+
+The four community servers are **pinned to exact versions**, declared once in `setup.sh` as `MCP_VER_NOTION` / `MCP_VER_GCAL` / `MCP_VER_GDRIVE` / `MCP_VER_GMAIL` and used both by the setup-time OAuth flows and by the generated `mcp.json`. Unpinned, every bot restart re-resolves `latest` and runs whatever the registry serves at that moment — in processes that are handed live OAuth client credentials through their environment. Each server is also spawned with `--ignore-scripts` so npm lifecycle hooks never execute on install.
+
+To upgrade: read the package's changelog, bump the `MCP_VER_*` value in `setup.sh`, and re-run `./setup.sh` (it rewrites `mcp.json`). Pinning does not apply to the Claude Code CLI itself, which is installed globally via `npm i -g` — see the security note above that block.
+
 ## Config keys (`~/.config/otto/config.toml`)
 
 All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults; explicit values in `config.toml` override them.

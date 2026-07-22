@@ -168,6 +168,24 @@ case "$PKG_MGR" in
     ;;
 esac
 
+# ── MCP server version pins ─────────────────────────────────────────────────
+# Every community MCP server is fetched with `npx` at BOTH setup time (OAuth
+# flows) and on every bot start (mcp.json spawns them). Unpinned, that means
+# each `systemctl restart otto` silently pulls whatever the registry serves
+# right now, and these processes are handed live OAuth client credentials via
+# their environment. A pin turns "whatever is latest today" into a reviewed,
+# reproducible dependency, and makes an unexpected upgrade a deliberate act.
+#
+# --ignore-scripts (applied at every call site) additionally stops npm
+# lifecycle hooks from executing on install.
+#
+# To bump: check the changelog, then update the version here — it flows to
+# both the auth invocations below and the generated mcp.json.
+MCP_VER_NOTION="2.4.1"
+MCP_VER_GCAL="2.6.2"
+MCP_VER_GDRIVE="0.1.0"
+MCP_VER_GMAIL="1.1.11"
+
 # Claude Code CLI via npm (global).
 # Security note: this installs the latest published version from the npm
 # registry without a version pin or integrity check.  To lock a specific
@@ -320,7 +338,7 @@ if ! $HAS_GCAL_AUTHED; then
   echo "  A browser will open. Sign in and click Allow."
   echo ""
   read -p "  Press Enter..."
-  GOOGLE_OAUTH_CREDENTIALS="$CLIENT_SECRET_FILE" npx --ignore-scripts -y @cocal/google-calendar-mcp auth
+  GOOGLE_OAUTH_CREDENTIALS="$CLIENT_SECRET_FILE" npx --ignore-scripts -y "@cocal/google-calendar-mcp@$MCP_VER_GCAL" auth
   # Verify the OAuth dance completed — the MCP package writes a tokens file on
   # success.  Some CLI auth helpers exit 0 even when the browser flow was
   # cancelled, so we check the artifact rather than the exit code.
@@ -350,7 +368,7 @@ if ! $HAS_GDRIVE_AUTHED; then
   : > "$AUTH_LOG"; chmod 600 "$AUTH_LOG"
   GOOGLE_CLIENT_ID="$DESKTOP_CLIENT_ID" \
     GOOGLE_CLIENT_SECRET="$DESKTOP_CLIENT_SECRET" \
-    npx --ignore-scripts -y mcp-gdrive-workspace > "$AUTH_LOG" 2>&1 &
+    npx --ignore-scripts -y "mcp-gdrive-workspace@$MCP_VER_GDRIVE" > "$AUTH_LOG" 2>&1 &
   GDRIVE_PID=$!
   for i in $(seq 1 180); do
     [ -f "$GDRIVE_CREDS_PATH" ] && { HAS_GDRIVE_AUTHED=true; break; }
@@ -475,7 +493,7 @@ for label in "${GMAIL_LABELS[@]}"; do
   read -p "  Press Enter to start..."
   GMAIL_OAUTH_PATH="$GMAIL_OAUTH_PATH" \
     GMAIL_CREDENTIALS_PATH="$CRED_PATH" \
-    npx --ignore-scripts -y @gongrzhe/server-gmail-autoauth-mcp auth
+    npx --ignore-scripts -y "@gongrzhe/server-gmail-autoauth-mcp@$MCP_VER_GMAIL" auth
   # The auth helper can exit 0 even if the browser flow was cancelled, so we
   # check the credentials artifact rather than the exit code (mirrors the
   # calendar/Drive steps).
@@ -665,6 +683,10 @@ OTTO_MEMORY_DIR="$OTTO_MEMORY_DIR" \
 OTTO_STATE_DB="$OTTO_STATE_DB" \
 OTTO_EMBED_URL="$OTTO_EMBED_URL" \
 OTTO_EMBED_MODELS="$OTTO_EMBED_MODELS" \
+MCP_VER_NOTION="$MCP_VER_NOTION" \
+MCP_VER_GCAL="$MCP_VER_GCAL" \
+MCP_VER_GDRIVE="$MCP_VER_GDRIVE" \
+MCP_VER_GMAIL="$MCP_VER_GMAIL" \
 HOME_DIR="$HOME" \
 python3 - "${GMAIL_LABELS[@]}" > "$MCP_FILE" <<'PYEOF'
 import json, os, sys
@@ -682,20 +704,22 @@ config["mcpServers"]["otto-memory"] = {
 }
 config["mcpServers"]["notion"] = {
     "command": "npx",
-    # --ignore-scripts prevents npm lifecycle hooks from running on install,
-    # reducing the risk of malicious code in an unpinned package executing at
-    # bot startup with access to injected OAuth credentials.
-    "args": ["--ignore-scripts", "-y", "@notionhq/notion-mcp-server"],
+    # Two layers of supply-chain hardening on every community server below:
+    # the exact version is pinned (MCP_VER_* in setup.sh — otherwise each bot
+    # restart re-resolves "latest" and silently runs whatever the registry
+    # serves), and --ignore-scripts blocks npm lifecycle hooks at install.
+    # These processes receive live OAuth client credentials via their env.
+    "args": ["--ignore-scripts", "-y", f"@notionhq/notion-mcp-server@{os.environ['MCP_VER_NOTION']}"],
     "env": {"NOTION_TOKEN": os.environ.get('NOTION_TOKEN_VAL', '')},
 }
 config["mcpServers"]["google-calendar"] = {
     "command": "npx",
-    "args": ["--ignore-scripts", "-y", "@cocal/google-calendar-mcp"],
+    "args": ["--ignore-scripts", "-y", f"@cocal/google-calendar-mcp@{os.environ['MCP_VER_GCAL']}"],
     "env": {"GOOGLE_OAUTH_CREDENTIALS": os.environ['CLIENT_SECRET_FILE']},
 }
 config["mcpServers"]["gdrive"] = {
     "command": "npx",
-    "args": ["--ignore-scripts", "-y", "mcp-gdrive-workspace"],
+    "args": ["--ignore-scripts", "-y", f"mcp-gdrive-workspace@{os.environ['MCP_VER_GDRIVE']}"],
     "env": {
         "GOOGLE_CLIENT_ID": os.environ['DESKTOP_CLIENT_ID'],
         "GOOGLE_CLIENT_SECRET": os.environ['DESKTOP_CLIENT_SECRET'],
@@ -704,7 +728,7 @@ config["mcpServers"]["gdrive"] = {
 for label in labels:
     config["mcpServers"][f"gmail-{label}"] = {
         "command": "npx",
-        "args": ["--ignore-scripts", "-y", "@gongrzhe/server-gmail-autoauth-mcp"],
+        "args": ["--ignore-scripts", "-y", f"@gongrzhe/server-gmail-autoauth-mcp@{os.environ['MCP_VER_GMAIL']}"],
         "env": {
             "GMAIL_OAUTH_PATH": os.environ['GMAIL_OAUTH_PATH'],
             "GMAIL_CREDENTIALS_PATH": f"{home}/.gmail-mcp/credentials-{label}.json",
