@@ -141,7 +141,7 @@ in-process path) and fall back to the env var (production). Absent both, hop is
 `message_*` defaults to `otto`, `forward_to_otto` defaults to `toto`.
 
 Because that guess cannot name a *third* agent, **Toto and Toot stamp the env
-unconditionally**, even on a direct Telegram turn (`toto.go:304-315`,
+unconditionally**, even on a direct Telegram turn (`toto.go:359-370`,
 `toot.go:303-311`). Without it, Toto calling `message_toot` on a non-bus turn
 would be misattributed to "otto."
 

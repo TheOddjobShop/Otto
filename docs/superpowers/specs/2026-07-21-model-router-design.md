@@ -163,7 +163,7 @@ itself is best-effort — a nil store or a write error is logged and swallowed
 
 Both Otto turn paths route identically, immediately before `runAndReply`:
 
-- `cmd/otto/handler.go:511` — the Telegram path. The classify call runs while
+- `cmd/otto/handler.go:555` — the Telegram path. The classify call runs while
   Otto **already holds the slot**, so a message arriving during classification
   still falls back to Toto rather than queueing behind the router.
 - `cmd/otto/bus.go:179` — the agent-bus path, same shape.

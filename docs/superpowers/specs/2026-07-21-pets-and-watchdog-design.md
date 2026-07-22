@@ -32,7 +32,7 @@ that notices when Otto stops emitting and, failing recovery, kills and reports.
   Calendar, or Drive.
 - **Pets handling photos.** Pet routing is skipped entirely when the update has
   attachments — `len(u.PhotoIDs) == 0` gates the match
-  (`cmd/otto/handler.go:391`); pets are text-only.
+  (`cmd/otto/handler.go:435`); pets are text-only.
 - **Fuzzy addressing.** Matching is strict first-word (see below); "I asked toto
   about it" does not route.
 - **A generic pet plugin system.** Adding a pet is a code change: implement
@@ -80,11 +80,23 @@ after it is rejected. `totoman` does not match. The strictness is deliberate:
 false positives silently steal messages meant for Otto.
 
 Routing happens in `dispatch` before Otto's slot is claimed
-(`handler.go:390-397`), so a pet turn never blocks Otto and vice versa.
+(`handler.go:434-441`), so a pet turn never blocks Otto and vice versa.
+
+**Batch ordering.** When several messages land in one long-poll,
+`runPollingLoop` reorders the batch so pet-addressed updates dispatch *last*
+(`partitionPetLast` / `isPetAddressed`, `handler.go:435`), keeping the existing
+150ms inter-dispatch spacing. Without it, the busy-handoff snapshot depends on
+Telegram's delivery order: send "summarize my emails" and "hey toto what's otto
+doing?" a second apart, have the network invert them, and Toto's goroutine reads
+an idle Otto before the sibling message claims the slot — then tells the user
+nothing is going on. `isPetAddressed` mirrors `dispatch`'s own check exactly,
+photo carve-out included, so the partition can never disagree with downstream
+routing. Commands count as non-pet: they never take the slot, so their position
+is irrelevant to the race and dispatching them early keeps `/status` snappy.
 
 ## Scoped MCP config
 
-`writeScopedPetMCPConfig(stateDir, ottoMCPPath)` (`cmd/otto/main.go:349`) reads
+`writeScopedPetMCPConfig(stateDir, ottoMCPPath)` (`cmd/otto/main.go:350`) reads
 the user's full `mcp.json`, extracts **only** the `otto-memory` entry, and writes
 `<stateDir>/pet-mcp.json` at `0600`. Both pet runners are constructed against
 that path (`main.go:113`, `main.go:140`). If the source config has no
@@ -141,27 +153,43 @@ The snapshot carries:
 - `Silence` — time since Otto's last stream event.
 
 `dispatch` passes prompt and snippet into `toto.BusyReply`
-(`handler.go:416`), which renders them into Toto's per-call system prompt under
-`OTTO IS CURRENTLY WORKING ON THIS FOR THE USER` and `WHAT OTTO HAS PARTIALLY
-SAID SO FAR`, with explicit instructions not to relay Otto's words verbatim or
-pass them off as his own — the snippet is for grounding ("he's typing about your
-gmail right now"), not for answering.
+(`handler.go:460`). On direct address the same information arrives instead
+through `t.ottoStatus`, wired in `main.go` to `h.otto.Snapshot`, so "what's otto
+up to?" gets a truthful answer.
 
-Both modes end with the same literal-reading instruction: Otto is either BUSY
-(working on the shown prompt) or IDLE, and Toto must paraphrase that block
-rather than improvise verbs like "pulling" or "offline."
+**Where the status is placed matters, and changed on 2026-07-21.** Both modes
+now render the live values — busy flag, Otto's prompt, the reply tail, and
+silence over 30s — as a parenthetical stage direction prepended to the
+**user-side** prompt via `ottoStatusNote` (`toto.go:231`):
 
-On direct address, the same status information arrives instead through
-`t.ottoStatus`, wired in `main.go` to `h.otto.Snapshot`, so "what's otto up to?"
-gets a truthful answer. Silence over 30s is mentioned explicitly
-(`toto.go:263`).
+```
+(otto status: busy on "summarize all my emails")
+(tail of his reply: "scanning gmail...")
+
+what's he doing now?
+```
+
+They previously lived in `--append-system-prompt`. Toto runs with `--resume`, so
+a small model weighs its own prior assistant turn over a system prompt that
+changed silently between turns: asked "what's he doing *now*?", Haiku echoed its
+own previous "idle. nothing." even though the system prompt by then said BUSY.
+Inline status makes each turn's history record the state it was answered
+against. See `docs/superpowers/specs/2026-05-06-toto-otto-visibility-design.md`
+(Fix B) for the full diagnosis.
+
+The system prompt keeps what is *stable*: the mode header — TOTO.md matches on
+the `OTTO IS CURRENTLY WORKING ON THIS` and `THE USER ADDRESSED YOU DIRECTLY`
+substrings to pick a voice — plus the standing rules. Those rules are that the
+note is grounding ("he's typing about your gmail right now"), not an answer: do
+not relay Otto's words verbatim, do not pass them off as your own, do not echo
+the note back, and re-read it every turn rather than repeating the last reply.
 
 Bus-relay turns are the one path that is **not** logged to the turn store
-(`toto.go:362`): the store backs `session_search`, and writing agent-to-agent
+(`toto.go:417`): the store backs `session_search`, and writing agent-to-agent
 payloads under the `toto/user` persona would make relay bodies surface as
 user-authored messages.
 
-`SystemMessage` (`toto.go:374`) delivers out-of-band text — the watchdog's
+`SystemMessage` (`toto.go:429`) delivers out-of-band text — the watchdog's
 notifications — while holding `t.mu`, so it cannot interleave with a Toto reply
 already mid-flight.
 
@@ -211,7 +239,7 @@ version number.
 `rotateIfIdle(window)`, implemented identically by Toto (`toto.go:143`) and Toot
 (`toot.go:143`). `runRotator` calls it for every registered pet on each tick of
 `rotateCheckInterval` (1 minute), reusing Otto's configured `idleWindow`
-(`rotate.go:78-82`). Wired as `petRotators: []petRotator{toto, toot}`
+(`rotate.go:80-84`). Wired as `petRotators: []petRotator{toto, toot}`
 (`main.go:187`).
 
 The implementation uses `mu.TryLock()`, not `Lock()`. A pet reply holds the
