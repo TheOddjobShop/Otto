@@ -9,6 +9,7 @@ Design specs:
 - [`docs/superpowers/specs/2026-07-21-agent-bus-design.md`](docs/superpowers/specs/2026-07-21-agent-bus-design.md) — the inter-agent message bus (inbox table, drain loop, hop cap). *Retroactive.*
 - [`docs/superpowers/specs/2026-07-21-model-router-design.md`](docs/superpowers/specs/2026-07-21-model-router-design.md) — the per-turn Haiku model classifier (CODE vs CHAT routing). *Retroactive.*
 - [`docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md`](docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md) — the multi-persona pet system (Toto/Toot) and the liveness watchdog. *Retroactive.*
+- [`docs/superpowers/specs/2026-08-07-voice-tui-design.md`](docs/superpowers/specs/2026-08-07-voice-tui-design.md) — the surface mux, the local voice pipeline (wake word → whisper → Otto → piper), and the `./otto tui` front end.
 
 ## Quick start
 
