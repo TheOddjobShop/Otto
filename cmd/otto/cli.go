@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"otto/internal/config"
 	"otto/internal/voice"
@@ -26,6 +27,7 @@ Usage:
   otto tui [flags]       run the daemon with a terminal UI and voice
   otto say <message>     hand a message to the running Otto (for scheduled work)
   otto voice-doctor      check that everything the voice stack needs is present
+  otto voice-fetch       download the speech models now instead of on first use
 
 Flags:
   -config <path>   path to config.toml (default ~/.config/otto/config.toml)
@@ -47,6 +49,8 @@ func runSubcommand(args []string) (handled bool, code int) {
 		return true, runSay(args[2:])
 	case "voice-doctor":
 		return true, runVoiceDoctor(args[2:])
+	case "voice-fetch":
+		return true, runVoiceFetch(args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usageText)
 		return true, 0
@@ -78,6 +82,33 @@ func runVoiceDoctor(args []string) int {
 		fmt.Printf("\nVoice will not work until the failures above are resolved.\n")
 		return 1
 	}
+	return 0
+}
+
+// runVoiceFetch downloads the speech models and the piper binary.
+//
+// The TUI does this on first launch anyway, but doing it during setup is the
+// difference between a machine that is ready when the installer finishes and
+// one that stalls for several minutes the first time you say "otto". Same
+// reason setup.sh pulls the Ollama embedding models rather than leaving them
+// to the first search.
+func runVoiceFetch(args []string) int {
+	cfg := voice.DefaultConfig(voiceStateDir(args))
+
+	missing := cfg.Missing()
+	if len(missing) == 0 {
+		fmt.Println("Voice assets are already present.")
+		return 0
+	}
+	fmt.Printf("Fetching: %s\n", strings.Join(missing, ", "))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
+	defer cancel()
+	if err := voice.EnsureInstalled(ctx, cfg, voice.StderrProgress); err != nil {
+		fmt.Fprintf(os.Stderr, "otto voice-fetch: %v\n", err)
+		return 1
+	}
+	fmt.Println("Voice assets ready.")
 	return 0
 }
 
