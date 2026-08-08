@@ -310,7 +310,7 @@ func main() {
 	// It owns the process from here: closing it cancels ctx, which unwinds the
 	// polling loop and the shutdown sequence below exactly as SIGTERM would.
 	if tuiMode && mux != nil {
-		go runTUI(ctx, cancel, h, mux, stateDir, cfg.TelegramAllowedUserID)
+		go runTUI(ctx, cancel, h, mux, cfg, stateDir, cfg.TelegramAllowedUserID)
 	}
 
 	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB memory_dir=%s state_db=%s embed=%s",

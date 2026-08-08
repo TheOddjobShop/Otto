@@ -263,14 +263,54 @@ func TestReplyEventDoesNotDuplicateScrollback(t *testing.T) {
 // Ambient mic level must not drive the bars while idle — it would look like
 // Otto is always hearing you, which is both untrue and unsettling.
 func TestAmplitudeIgnoresMicWhenIdle(t *testing.T) {
-	if got := amplitudeFor(voice.StateIdle, 0.9); got != idleAmplitude {
+	if got := amplitudeFor(voice.StateIdle, true, 0.9); got != idleAmplitude {
 		t.Errorf("idle amplitude = %v with a loud room, want the flat %v", got, idleAmplitude)
 	}
-	if got := amplitudeFor(voice.StateArmed, 0.1); got <= idleAmplitude {
+	if got := amplitudeFor(voice.StateArmed, true, 0.1); got <= idleAmplitude {
 		t.Errorf("armed amplitude = %v, want the bars to respond once listening", got)
 	}
-	if got := amplitudeFor(voice.StateSpeaking, 1.0); got > 1 {
+	if got := amplitudeFor(voice.StateArmed, true, 1.0); got > 1 {
 		t.Errorf("amplitude = %v, want it clamped to 1", got)
+	}
+}
+
+// With the capture device released there is no level to render, and moving
+// bars would show Otto listening at precisely the moments he is not.
+func TestAmplitudeIsFlatWhileTheMicrophoneIsClosed(t *testing.T) {
+	for _, state := range []string{voice.StateArmed, voice.StateProcessing, voice.StateSpeaking} {
+		if got := amplitudeFor(state, false, 0.9); got != idleAmplitude {
+			t.Errorf("%s amplitude = %v with the mic closed, want the flat %v", state, got, idleAmplitude)
+		}
+	}
+}
+
+// The states where Otto is producing sound have to say the microphone is off —
+// a wake-word assistant is assumed to be listening unless it says otherwise.
+func TestStatusLineNamesTheClosedMicrophone(t *testing.T) {
+	m := newTestModel(&fakeSubmitter{}, nil)
+	for _, state := range []string{voice.StateProcessing, voice.StateSpeaking} {
+		m.applyVoiceEvent(voice.StateEvent{State: state})
+		if !strings.Contains(m.statusLine(), "mic off") {
+			t.Errorf("%s status = %q, want it to say the mic is off", state, m.statusLine())
+		}
+	}
+	m.applyVoiceEvent(voice.StateEvent{State: voice.StateArmed})
+	if strings.Contains(m.statusLine(), "mic off") {
+		t.Errorf("armed status = %q, want no such claim while listening", m.statusLine())
+	}
+}
+
+func TestMicEventFlattensTheBars(t *testing.T) {
+	m := newTestModel(&fakeSubmitter{}, nil)
+	m.applyVoiceEvent(voice.MicEvent{Open: true})
+	m.applyVoiceEvent(voice.StateEvent{State: voice.StateArmed})
+	m.applyVoiceEvent(voice.LevelEvent{RMS: 0.5})
+	if m.waveTargetAmp <= idleAmplitude {
+		t.Fatalf("bars = %v while listening to a loud room, want them responding", m.waveTargetAmp)
+	}
+	m.applyVoiceEvent(voice.MicEvent{Open: false})
+	if m.waveTargetAmp != idleAmplitude {
+		t.Errorf("bars = %v after the device closed, want the flat %v", m.waveTargetAmp, idleAmplitude)
 	}
 }
 

@@ -29,8 +29,10 @@ own code.
 ## Non-goals
 
 - **Multi-user or remote voice.** Same single-user allowlist; the mic is local.
-- **Acoustic echo cancellation.** Real AEC is a CGO project. Barge-in is handled
-  by transcript *content* instead (see "Barge-in").
+- **Acoustic echo cancellation.** Real AEC is a CGO project, and it is not
+  needed: the microphone is released while Otto speaks, so there is no echo to
+  cancel (see "The microphone gate"). The cost is that speech cannot interrupt a
+  reply.
 - **Streaming/partial STT.** One whisper call per completed utterance. Partial
   transcripts are a v2 concern.
 - **openWakeWord.** The `voice-rearch` spec is right that whisper-per-utterance
@@ -104,13 +106,15 @@ updates throughout.
 ## Voice pipeline
 
 ```
-mic (sox, 16kHz mono s16le)
+mic (sox, 16kHz mono s16le) ◄── micGate: started and killed per turn
   → 100ms frames + RMS  ──────────────────────────► LevelEvent (drives the UI)
   → adaptive-threshold VAD → utterance assembly
+  → ┤ gate CLOSES here for an armed request ├──────► MicEvent{Open:false}
   → whisper.cpp (one call per utterance)
   → StripWakeWord → command text
   → muxBot injects an Update  ──► normal Otto turn ──► reply text
   → sentence splitter → piper (per persona voice) → playback
+  → ┤ gate REOPENS once the last sentence has played ├─► MicEvent{Open:true}
 ```
 
 ### Wake word
@@ -126,31 +130,70 @@ The bias is deliberate and is preserved: a false positive costs one ignored turn
 a false negative means Otto silently didn't hear you, which is the failure that
 makes a voice assistant feel broken.
 
-### Barge-in
+### The microphone gate
 
-Otto says his own name in replies, and the mic hears the speakers. Naive
-wake-word barge-in therefore self-triggers constantly — a bug `AbdurRazzaq` hit
-and solved, and whose solution is ported verbatim in spirit:
+*Superseded the original barge-in design in `refactor/gated-voice-loop`.*
 
-While in `speaking` state, an utterance interrupts playback **only** if its
-transcript matches a mute command (`shut up`, `quiet`, …) or a closer (`thanks`,
-`that's all`, …). Anything else — including the wake word plus a fresh question —
-is ignored and playback continues; the question is heard as a normal armed
-follow-up once Otto stops talking.
+The first version kept one `sox` process open for the whole session and tried to
+reason its way out of hearing itself. While `speaking`, an utterance interrupted
+playback only if it matched a mute command or a closer; utterances carried the
+state they *began* in so loopback could be recognized after the fact; the
+pre-roll ring was cleared mid-playback so Otto's own voice was never prepended.
 
-Utterances also carry the state they *began* in, not the state at flush time, so
-an utterance that started during playback is classified as loopback no matter how
-long the silence detector took.
+All of that machinery answered one question — "is this Otto's own voice?" — and
+none of it answered it reliably, because the honest answer depends on room
+acoustics, speaker volume and mic placement rather than on anything the
+transcript contains. In a live room it degraded exactly as you would expect:
+Otto talking over himself, replies chopped by his own sentences, ordinary
+conversation in the room treated as follow-ups.
+
+**The device is released instead.** `micLive(state)` is the whole rule:
+
+| state | mic | why |
+|---|---|---|
+| `idle` | ON | waiting for the wake word |
+| `armed` | ON | capturing a request |
+| `muted` | ON | silent, but still owes us "otto wake up" |
+| `processing` | **OFF** | transcribing, thinking, running tools |
+| `speaking` | **OFF** | the speakers are producing audio |
+| `installing`, `off` | OFF | nothing is running |
+
+Every transition runs through `setState`, which drives a `micGate` latch; the
+capture loop waits on the latch, starts `sox` when it opens and kills it when it
+shuts. `CaptureDevice.Capture` may not return until its process is reaped, so
+"the loop reports the mic closed" and "no process holds the device" cannot
+diverge. `micSettleMs` (300 ms) of audio is discarded after each open, covering
+both the hardware's click and the tail of Otto's last sentence still moving
+through the output buffer.
+
+Consequences, accepted deliberately:
+
+- **No voice barge-in.** Once Otto starts speaking he finishes. `m` in the TUI
+  still cuts him off, because a keypress is unambiguous intent in a way a phrase
+  picked up by a microphone is not.
+- **A wake-word check must not close the device.** Transcribing an idle
+  utterance keeps the mic open: whisper takes a few hundred milliseconds and the
+  next thing said is very often the wake word itself.
 
 ### Conversation shape
 
 `idle → armed → processing → speaking → armed …`, plus a `muted` overlay.
 
-- Wake word alone → a varied spoken ack ("Yes?", "Go ahead.") and `armed`.
+- Wake word alone → a varied spoken ack ("Yes?", "Go ahead.") and `armed`. The
+  ack goes through `speaking`, so the mic is shut while it plays — otherwise
+  Otto's "Yes?" is the first thing captured as the request.
 - Wake word + command in one breath → straight to the turn.
-- While `armed`, follow-ups need no wake word.
-- Closers (`thanks`, `that's all`, `bye`) end the conversation with an ack and no
-  model call at all.
+- A request is endpointed by `voice_end_silence_ms` (default 2000) of silence.
+  Waiting for the wake word uses a much shorter 750 ms: nothing is being
+  composed yet, and latency to the first acknowledgment is the whole feel.
+- While `armed`, follow-ups need no wake word — bounded by
+  `voice_conversation_timeout_sec` (default 30). Without that bound, every word
+  spoken in the room after a reply is sent to the model, which is precisely what
+  the wake word exists to prevent.
+- Dismissals (`go away`, `stand down`, `that'll be all`, …) and closers
+  (`thanks`, `bye`, …) end the conversation with an ack and no model call at
+  all. A dismissal heard while already `idle` is ignored rather than
+  acknowledged — answering it would open the conversation it is trying to close.
 - Mute is silent and instant; `otto wake up` (or `m` in the TUI) resumes.
 
 Acks are pre-rendered to disk and keyed by `sha1(voice + phrase)` — the voice is
@@ -291,9 +334,14 @@ boundaries:
   hardware.
 - **Stubbed**: piper and playback behind interfaces, as `claude.Runner` already
   is, so the speaking path is testable without sound.
-- **Manual, documented in the README**: mic capture, real STT accuracy, real
-  playback, and barge-in. `otto voice-doctor` exists to make the first failure
-  legible rather than mysterious.
+- **Manual, documented in the README**: mic capture, real STT accuracy and real
+  playback. `otto voice-doctor` exists to make the first failure legible rather
+  than mysterious.
+
+The gate itself is *not* manual: `CaptureDevice` is an interface, so
+`fakeCapture` reports whether a capture session is actually live and the tests
+assert the invariant directly — a fresh session per turn, and the gate shut at
+the moment the player is called.
 
 ## Phasing
 

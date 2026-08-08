@@ -160,9 +160,9 @@ type Player struct {
 // Play writes wav to a temp file and plays it to completion. Interrupt kills an
 // in-flight playback.
 //
-// A killed process is reported as success, not error: barge-in is a normal
-// outcome here, and surfacing it as a playback fault would put a spurious error
-// on screen every time the user tells Otto to be quiet.
+// A killed process is reported as success, not error: Interrupt is how a
+// keyboard mute stops a reply, and surfacing that as a playback fault would put
+// a spurious error on screen every time the user tells Otto to be quiet.
 func (p *Player) Play(ctx context.Context, wav []byte) error {
 	name, buildArgs, ok := ResolvePlayer()
 	if !ok {

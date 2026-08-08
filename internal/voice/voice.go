@@ -12,15 +12,22 @@
 //	sentence.go  streaming sentence splitting    — pure, fully tested
 //	stt.go       whisper.cpp subprocess          — needs the binary
 //	tts.go       piper subprocess + playback     — needs the binary
-//	client.go    mic capture, VAD, state machine — needs a microphone
+//	mic.go       the sox capture device + the gate that closes it
+//	client.go    VAD and the conversation state machine
 //	install.go   first-run asset download        — needs the network
 //	doctor.go    diagnostics for all of the above
+//
+// The microphone is behind an interface (mic.go's CaptureDevice), which makes
+// the one behavior that matters most testable without hardware: Otto releases
+// the capture device entirely while he is thinking and speaking, so he cannot
+// hear his own voice through the speakers.
 package voice
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Persona names the three characters that can speak. Each gets its own piper
@@ -69,7 +76,34 @@ type Config struct {
 
 	// WakeWord is the word that arms the listener.
 	WakeWord string
+
+	// RequestEndSilenceMs is how long the user must stop talking before a
+	// request is considered finished and the microphone is released. Zero uses
+	// defaultRequestEndSilenceMs.
+	//
+	// This is the number that decides whether Otto feels patient or impatient.
+	// Too short and he cuts you off mid-thought; too long and every question
+	// carries a dead pause before he starts working on it.
+	RequestEndSilenceMs int
+
+	// ConversationTimeoutSec is how long an answered conversation stays open
+	// for a follow-up before it drops back to needing the wake word. Zero uses
+	// defaultConversationTimeoutSec; negative disables the timeout, which means
+	// everything said in the room after a reply goes to the model.
+	ConversationTimeoutSec int
 }
+
+const (
+	// defaultRequestEndSilenceMs — two seconds. Long enough to think mid
+	// sentence ("remind me to… uh… call the dentist"), short enough that the
+	// wait before Otto starts is not itself annoying.
+	defaultRequestEndSilenceMs = 2000
+
+	// defaultConversationTimeoutSec bounds how long follow-ups skip the wake
+	// word. Half a minute is roughly how long a natural pause runs before the
+	// exchange is over in practice.
+	defaultConversationTimeoutSec = 30
+)
 
 // DefaultConfig returns the conventional layout under stateDir (the directory
 // holding state.db). An empty stateDir falls back to ~/.local/state/otto.
@@ -84,10 +118,34 @@ func DefaultConfig(stateDir string) Config {
 		voices[persona] = filepath.Join(dir, model+".onnx")
 	}
 	return Config{
-		Dir:          dir,
-		WhisperModel: ResolveWhisperModel(dir),
-		Voices:       voices,
-		WakeWord:     DefaultWakeWord,
+		Dir:                    dir,
+		WhisperModel:           ResolveWhisperModel(dir),
+		Voices:                 voices,
+		WakeWord:               DefaultWakeWord,
+		RequestEndSilenceMs:    defaultRequestEndSilenceMs,
+		ConversationTimeoutSec: defaultConversationTimeoutSec,
+	}
+}
+
+// RequestEndSilence returns the configured request endpoint, or the default.
+func (c Config) RequestEndSilence() time.Duration {
+	if c.RequestEndSilenceMs <= 0 {
+		return defaultRequestEndSilenceMs * time.Millisecond
+	}
+	return time.Duration(c.RequestEndSilenceMs) * time.Millisecond
+}
+
+// ConversationTimeout returns how long an open conversation survives without
+// being spoken to. A negative configured value returns zero, which the watcher
+// reads as "never time out".
+func (c Config) ConversationTimeout() time.Duration {
+	switch {
+	case c.ConversationTimeoutSec < 0:
+		return 0
+	case c.ConversationTimeoutSec == 0:
+		return defaultConversationTimeoutSec * time.Second
+	default:
+		return time.Duration(c.ConversationTimeoutSec) * time.Second
 	}
 }
 

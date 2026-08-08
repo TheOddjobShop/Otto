@@ -60,6 +60,19 @@ type Config struct {
 	// RotateIdleMinutes: minutes of user silence after which the session is
 	// cleared regardless of size — the periodic "reset on inactivity". Default 15.
 	RotateIdleMinutes int `toml:"rotate_idle_minutes"`
+	// VoiceWakeWord is the word that arms the local listener in `otto tui`.
+	// Default "otto". Filler words in front of it are skipped either way, so
+	// "hey otto" and "okay otto" work without being configured.
+	VoiceWakeWord string `toml:"voice_wake_word"`
+	// VoiceEndSilenceMs is how long you must stop talking before Otto decides
+	// your request is finished, closes the microphone and starts working.
+	// Default 2000. Raise it if he cuts you off while you are thinking.
+	VoiceEndSilenceMs int `toml:"voice_end_silence_ms"`
+	// VoiceConversationTimeoutSec is how long an answered conversation keeps
+	// accepting follow-ups without the wake word. Default 30. Negative never
+	// times out, which means everything said in the room after a reply is sent
+	// to the model — only sensible for a private office.
+	VoiceConversationTimeoutSec int `toml:"voice_conversation_timeout_sec"`
 	// RotateFlush enables the pre-clear memory distillation pass: before the
 	// rotator clears a session, one cheap Haiku turn reviews it and writes
 	// anything durable into the memory core via memory_add.

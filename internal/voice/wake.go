@@ -183,11 +183,28 @@ var wakeCommands = []string{
 	"unmute",
 }
 
+// dismissals are the blunt way to end a conversation: not a sign-off but an
+// instruction to stop listening. They are listed separately from the polite
+// closers below only for documentation — both end the conversation identically
+// — because this is the list a user goes looking for when they want to know the
+// shutdown phrase, and burying "go away" among twenty ways of saying thank you
+// makes it look accidental rather than intended.
+//
+// The wake word may be attached to any of them ("otto, go away"); the caller
+// tries the wake-stripped transcript as one of its variants.
+var dismissals = []string{
+	"go away", "goodbye otto", "leave me alone", "leave it",
+	"that'll be all", "that will be all", "thatll be all",
+	"you can go", "you can stop", "stand down", "dismissed",
+	"stop talking", "we're finished", "were finished", "we are finished",
+	"end conversation", "end the conversation", "exit conversation",
+}
+
 // closerCommands end an active conversation. Matched without requiring the wake
 // word, because by definition the user is already talking to Otto — and they
 // fast-path out without a model call, so a missed match costs a pointless
 // round-trip just to be told nothing.
-var closerCommands = []string{
+var closerCommands = append([]string{
 	"thanks", "thank you", "thank u", "thanks a lot", "thanks so much",
 	"thanks man", "thanks bro", "thanks dude",
 	"appreciate it", "appreciate you", "appreciate that",
@@ -205,8 +222,7 @@ var closerCommands = []string{
 	"that's enough", "that is enough", "enough for now",
 	"good work", "nice work", "good job", "nice job",
 	"let's stop", "lets stop", "stop for now",
-	"go away",
-}
+}, dismissals...)
 
 // ackGreetings answer a bare wake word. Varied so the interaction does not feel
 // like a doorbell.

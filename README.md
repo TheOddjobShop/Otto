@@ -90,23 +90,53 @@ one line of status. Say **"otto"** and he answers out loud.
 
 | | |
 |---|---|
-| `otto` | wake word. Say it alone for an acknowledgment, or with your request in the same breath |
-| — | once he's answered you're still armed: follow-ups need no wake word |
-| "thanks" / "that's all" / "bye" | ends the conversation. No model call — it's a fast path |
-| "otto, shut up" | mutes instantly, killing playback mid-sentence |
-| "otto, wake up" | unmutes |
+| `otto` / `hey otto` | wake word. Say it alone for an acknowledgment, or with your request in the same breath |
+| — | once he's answered you're still armed: follow-ups need no wake word, for 30 seconds |
+| "otto, go away" | ends the conversation, back to waiting for the wake word |
+| "thanks" / "that's all" / "bye" | same thing, politely. No model call — it's a fast path |
+| "otto, shut up" | mutes; `m` or "otto, wake up" brings him back |
 | any key | type to open the chat pane; `esc` closes it and keeps your draft |
 | `m` | mute toggle (on an empty input) |
 | `ctrl+c` | quit |
+
+**The microphone is off while Otto thinks and speaks.** Not ignored — released.
+The moment your request is endpointed there is no capture process at all, and
+one does not start again until the last sentence has finished playing. That is
+the whole design: Otto cannot hear himself through your speakers, because there
+is nothing listening.
+
+One turn, with the microphone's state on the right:
+
+```
+  waiting for "hey otto"                      mic ON
+    ↓  you speak
+  capturing your request                      mic ON
+    ↓  2 seconds of silence ends it
+  transcribing, thinking, doing               mic OFF
+    ↓
+  speaking the reply                          mic OFF
+    ↓
+  waiting for a follow-up (no wake word)      mic ON
+    ↓  "otto, go away" — or 30 s of silence
+  waiting for "hey otto"                      mic ON
+```
 
 Otto starts speaking **before he finishes thinking** — his reply is split into
 sentences as it streams, so the first one plays while the rest is still being
 generated.
 
-While he's speaking, only "shut up" and closers interrupt. A question asked over
-him waits and is heard as a follow-up once he stops. That's deliberate: Otto says
-his own name in replies and the microphone hears the speakers, so anything less
-selective self-interrupts constantly.
+The cost of a closed microphone is that speech cannot interrupt a reply: once
+Otto starts talking, he finishes. `m` still cuts him off from the keyboard.
+
+Both timings are tunable in `config.toml` if the defaults do not suit your
+speaking pace or your room:
+
+```toml
+voice_wake_word = "otto"                # filler words are skipped anyway,
+                                        # so "hey otto" works without setting it
+voice_end_silence_ms = 2000             # silence that means "I'm done asking"
+voice_conversation_timeout_sec = 30     # follow-up window; negative never closes
+```
 
 **Just run it — the handover is automatic.**
 
@@ -223,7 +253,8 @@ runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags
 │   └── otto-memory/      # MCP stdio server exposing memory_add/replace/remove + session_search
 ├── internal/
 │   ├── voice/            # local speech: whisper.cpp STT + piper TTS, wake word,
-│   │                     # VAD, barge-in, streaming sentence split, diagnostics
+│   │                     # VAD, the gated mic (released while Otto speaks),
+│   │                     # streaming sentence split, diagnostics
 │   ├── tui/              # Bubble Tea front end: minimal (art) and chat modes
 │   ├── artanim/          # 3D lightbulb rasterizer, Siri bars, boot reveal
 │   ├── auth/             # single-user allowlist
@@ -373,7 +404,10 @@ backstop, so this hook patch is optional but cleaner.
 - **Memory not persisting facts:** confirm `otto-memory` is in `mcp.json` (`grep otto-memory ~/.config/otto/mcp.json`) and that `~/.local/state/otto/memory/` is writable. Logs print `turn log` / `embed turn` errors at the `otto` journal.
 - **Voice not working:** run `otto voice-doctor`. It checks every piece — sox, whisper, piper, the decoder, playback, each model file including the `.onnx.json` sidecars piper needs but never names in its own errors — opens the microphone to confirm real samples arrive, and prints the `pacman` line for whatever is absent.
 - **`otto tui` refuses to start:** another Otto holds the lock, almost certainly the background service. `systemctl --user stop otto` (or `launchctl bootout gui/$(id -u)/com.otto.bot` on macOS), then retry. Two processes cannot share one bot token — Telegram would hand each message to whichever polled first.
-- **Otto talks over himself, or interrupts constantly:** the microphone is hearing the speakers. Only "shut up" and closers are meant to interrupt playback; if ordinary speech is cutting him off, lower the output volume or move the mic. Check `<state dir>/tui.log` for the wake-decision trail.
+- **Otto answers his own replies:** he shouldn't be able to — the microphone is released for the whole of thinking and speaking. Check `<state dir>/tui.log` for `mic: capture device released` around each turn; if it is missing, the gate is not closing and that is a bug, not a tuning problem. If it is there and he still self-triggers, the tail of his speech is arriving after the device reopens: raise `micSettleMs` in `internal/voice/client.go` or lower the output volume.
+- **Otto cuts you off mid-sentence:** he endpoints your request after 2 seconds of silence. Raise `voice_end_silence_ms` in `config.toml` if you pause longer than that while thinking.
+- **Otto answers things you said to somebody else:** after a reply he stays armed for 30 seconds so follow-ups need no wake word. Say "otto, go away" to close the conversation immediately, or lower `voice_conversation_timeout_sec`.
+- **A long reply won't stop:** by design — once the microphone is closed there is nothing to hear "shut up" with. Press `m`.
 - **Semantic search not working:** check Ollama (`systemctl --user status ollama` on Linux, `brew services list` on macOS) and `ollama list`. Without a pulled embedding model, `session_search` falls back to keyword (FTS5) and logs `session_search: embed unavailable, keyword-only`. To enable semantic recall after a fresh install: `ollama pull embeddinggemma`.
 - **Session never rotates:** the rotator fires when idle ≥ `rotate_idle_minutes` (regardless of session size), OR when `input_tokens` ≥ `rotate_hard_pct × model_context_tokens` AND you have paused for at least 5 minutes — whichever comes first. Otto must also be free (not mid-turn). The journal logs `rotator: rotated session ...` on success. Rotation cannot be disabled; to make it fire less often, raise `rotate_idle_minutes` and/or `model_context_tokens` (values ≤ 0 for either are reset to their defaults).
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.

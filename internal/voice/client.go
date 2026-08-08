@@ -2,11 +2,9 @@ package voice
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,13 +12,32 @@ import (
 
 // The listening loop: mic → frames → utterances → transcript → Otto → speech.
 //
-// State machine:
+// One turn of the cycle, with the microphone's state on the right:
 //
-//	idle ──wake word──► armed ──utterance──► processing ──reply──► speaking ──► armed
-//	  ▲                   │                                            │
-//	  └────── closer ─────┴──────────────── closer ────────────────────┘
+//	idle        waiting for the wake word                       mic ON
+//	  │ "hey otto, what's on my calendar"
+//	  ▼
+//	armed       capturing the request until endSilence          mic ON
+//	  │ 2 s of silence ends the utterance
+//	  ▼
+//	processing  transcribe, then Otto thinks and acts           mic OFF
+//	  ▼
+//	speaking    piper renders, the speakers play                mic OFF
+//	  ▼
+//	armed       follow-ups need no wake word                    mic ON
+//	  │ "otto, go away" — or conversationTimeout expires
+//	  ▼
+//	idle
 //
-//	muted is an overlay reachable from any state; only a wake command leaves it.
+//	muted is an overlay reachable from idle or armed; only a wake command
+//	leaves it. The microphone stays on there, because muted means Otto does not
+//	speak, not that he stops listening for permission to.
+//
+// The microphone column is the whole design. Between the moment a request is
+// endpointed and the moment the reply finishes playing, no capture process
+// exists — so Otto physically cannot hear himself, and none of the heuristics
+// that used to guess at loopback are needed. The cost is that speech cannot
+// interrupt a reply; a long answer plays to the end.
 
 // ─── Events ──────────────────────────────────────────────────────────────
 
@@ -28,10 +45,18 @@ import (
 type Event interface{ voiceEvent() }
 
 // LevelEvent carries the current mic RMS in [0,1], roughly ten times a second.
+// A zero level is emitted once when the device is released, so a meter driven
+// by this does not freeze at whatever the last live frame happened to be.
 type LevelEvent struct{ RMS float64 }
 
 // StateEvent fires on every state transition.
 type StateEvent struct{ State string }
+
+// MicEvent fires when the capture device is opened or released. Distinct from
+// StateEvent because "is the microphone on" is the one thing a user of a
+// voice assistant most wants shown truthfully, and inferring it from a state
+// name would put that inference in every consumer.
+type MicEvent struct{ Open bool }
 
 // TranscriptEvent fires when a user utterance was recognized and accepted.
 // Text is the command with the wake word already stripped, and is empty when
@@ -53,6 +78,7 @@ type ErrorEvent struct{ Err error }
 
 func (LevelEvent) voiceEvent()      {}
 func (StateEvent) voiceEvent()      {}
+func (MicEvent) voiceEvent()        {}
 func (TranscriptEvent) voiceEvent() {}
 func (ReplyEvent) voiceEvent()      {}
 func (ErrorEvent) voiceEvent()      {}
@@ -68,6 +94,22 @@ const (
 	StateOff        = "off"
 )
 
+// micLive reports whether the capture device should be running in a state.
+//
+// This single function is the contract the rest of the file relies on: every
+// transition through setState opens or releases the microphone according to it,
+// so there is exactly one place where "is Otto recording right now" is decided
+// and no path can forget to close the device.
+func micLive(state string) bool {
+	switch state {
+	case StateIdle, StateArmed, StateMuted:
+		return true
+	default:
+		// processing, speaking, installing, off.
+		return false
+	}
+}
+
 // ─── Tuning ──────────────────────────────────────────────────────────────
 
 const (
@@ -80,23 +122,31 @@ const (
 	// without saying the wake word again.
 	minSpeechMsArmed = 150
 
-	// endSilenceMsIdle is the trailing silence that ends an utterance while
-	// idle. Generous, so a pause mid-sentence ("hey otto, what's…") does not
-	// split one request into two.
-	endSilenceMsIdle = 750
-	// endSilenceMsActive applies once armed or speaking, where commands are
-	// short by design and snappiness matters more than tolerating pauses.
-	endSilenceMsActive = 400
+	// endSilenceMsWake ends a wake-word utterance while idle. Short, because
+	// nothing is being composed yet — the sooner "hey otto" is transcribed, the
+	// sooner Otto answers.
+	endSilenceMsWake = 750
 
 	// preRollMs of audio before speech onset is prepended to each utterance, so
 	// the first syllable is not clipped.
 	preRollMs = 300
+
+	// micSettleMs of audio is discarded after the device opens. It covers two
+	// things at once: the click most capture hardware produces on open, and the
+	// tail of Otto's last sentence still moving through the speaker and the
+	// operating system's output buffer after the player process has exited.
+	micSettleMs = 300
 
 	// noiseFloorGain multiplies the adapted noise floor to get the speech
 	// threshold; baseFloor stops a silent room from adapting the floor to zero
 	// and making every rustle count as speech.
 	noiseFloorGain = 2.8
 	baseFloor      = 0.02
+
+	// micRetryMaxSec caps the backoff after a capture failure. A microphone
+	// that has been unplugged should not spin, but it should also start working
+	// again within a few seconds of being plugged back in.
+	micRetryMaxSec = 5
 
 	// transcribeTimeout bounds one whisper invocation.
 	transcribeTimeout = 60 * time.Second
@@ -130,10 +180,8 @@ func (f ResponderFunc) Respond(ctx context.Context, text string) (<-chan Utteran
 	return f(ctx, text)
 }
 
-// PlaybackDevice plays rendered audio and can be interrupted mid-utterance.
-// An interface so the speaking path is testable without a sound card — the
-// state machine's barge-in logic is the most intricate part of this package and
-// the least amenable to being checked by hand.
+// PlaybackDevice plays rendered audio. An interface so the speaking path is
+// testable without a sound card.
 type PlaybackDevice interface {
 	Play(ctx context.Context, wav []byte) error
 	Interrupt()
@@ -145,9 +193,12 @@ type Client struct {
 	stt       Transcriber
 	tts       Speaker
 	player    PlaybackDevice
+	capture   CaptureDevice
 	cache     *Cache
 	responder Responder
 	logger    *log.Logger
+
+	gate *micGate
 
 	events    chan Event
 	closeOnce sync.Once
@@ -155,9 +206,14 @@ type Client struct {
 
 	mu    sync.Mutex
 	state string
+	// lastActive is when the user was last heard or answered. It exists only to
+	// close an abandoned conversation: without it, one stray word after Otto
+	// finishes speaking is sent to the model as though it were addressed to
+	// him, forever.
+	lastActive time.Time
 }
 
-// ClientOptions configures a Client. stt, tts and responder are required.
+// ClientOptions configures a Client. STT, TTS and Responder are required.
 type ClientOptions struct {
 	Config    Config
 	STT       Transcriber
@@ -165,10 +221,13 @@ type ClientOptions struct {
 	Responder Responder
 	// Logger receives the diagnostic trail. Voice failures are notoriously
 	// hard to reason about after the fact ("it just didn't hear me"), so every
-	// utterance, transcript, wake decision and state change is logged.
+	// utterance, transcript, wake decision, microphone open/close and state
+	// change is logged.
 	Logger *log.Logger
 	// Player overrides the audio output device. Nil uses the real one.
 	Player PlaybackDevice
+	// Capture overrides the microphone. Nil uses sox.
+	Capture CaptureDevice
 }
 
 // NewClient builds a Client. Returns an error when a required dependency is
@@ -191,16 +250,23 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if player == nil {
 		player = &Player{}
 	}
+	capture := opts.Capture
+	if capture == nil {
+		capture = SoxCapture{}
+	}
 	return &Client{
-		cfg:       opts.Config,
-		stt:       opts.STT,
-		tts:       opts.TTS,
-		player:    player,
-		cache:     NewCache(opts.Config.Dir),
-		responder: opts.Responder,
-		logger:    logger,
-		events:    make(chan Event, 64),
-		state:     StateIdle,
+		cfg:        opts.Config,
+		stt:        opts.STT,
+		tts:        opts.TTS,
+		player:     player,
+		capture:    capture,
+		cache:      NewCache(opts.Config.Dir),
+		responder:  opts.Responder,
+		logger:     logger,
+		gate:       newMicGate(),
+		events:     make(chan Event, 64),
+		state:      StateIdle,
+		lastActive: time.Now(),
 	}, nil
 }
 
@@ -217,7 +283,14 @@ func (c *Client) State() string {
 // IsMuted reports whether the client is muted.
 func (c *Client) IsMuted() bool { return c.State() == StateMuted }
 
-// Mute silences Otto immediately, killing any in-flight playback. Idempotent.
+// MicOpen reports whether the capture device is currently allowed to run.
+func (c *Client) MicOpen() bool { return c.gate.IsOpen() }
+
+// Mute silences Otto, killing any in-flight playback. Idempotent.
+//
+// This is the keyboard affordance, and it is the one thing that still stops a
+// reply mid-sentence — a keypress is unambiguous intent in a way that a phrase
+// picked up by a microphone is not.
 func (c *Client) Mute() {
 	c.logger.Printf("mute requested externally")
 	c.player.Interrupt()
@@ -230,59 +303,38 @@ func (c *Client) Unmute() {
 	c.setState(StateIdle)
 }
 
-// Start captures from the microphone until ctx is cancelled. A returned error
-// means the capture pipeline itself failed; recoverable problems arrive as
-// ErrorEvent instead.
+// Start runs the loop until ctx is cancelled. A returned error means the
+// capture pipeline could not be brought up at all; recoverable problems arrive
+// as ErrorEvent and the loop keeps trying.
 func (c *Client) Start(ctx context.Context) error {
 	defer c.closeEvents()
 
-	if _, err := exec.LookPath("sox"); err != nil {
+	if err := c.capture.Available(); err != nil {
 		c.setState(StateOff)
-		err = fmt.Errorf("sox not installed — run ./setup.sh, or `otto voice-doctor` for details")
 		c.emit(ErrorEvent{Err: err})
 		return err
 	}
 
-	// sox reads the default capture device and writes raw signed 16-bit
-	// little-endian mono PCM at 16 kHz to stdout.
-	cmd := exec.CommandContext(ctx, "sox",
-		"-q", "-d",
-		"-c", "1",
-		"-r", fmt.Sprint(sampleRate),
-		"-b", "16",
-		"-e", "signed-integer",
-		"-L",
-		"-t", "raw",
-		"-",
-	)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		c.setState(StateOff)
-		err = fmt.Errorf("start sox: %w", err)
-		c.emit(ErrorEvent{Err: err})
-		return err
-	}
-	c.logger.Printf("capture started (wake=%q)", c.cfg.Wake())
-
-	frames := make(chan []int16, 32)
+	frames := make(chan micFrame, 32)
 	utterances := make(chan capturedUtterance, 4)
 
 	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() { defer wg.Done(); c.readFrames(ctx, stdout, frames) }()
+	wg.Add(4)
+	go func() { defer wg.Done(); c.captureLoop(ctx, frames) }()
 	go func() { defer wg.Done(); c.detectUtterances(ctx, frames, utterances) }()
 	go func() { defer wg.Done(); c.handleUtterances(ctx, utterances) }()
+	go func() { defer wg.Done(); c.watchConversation(ctx) }()
 
+	c.logger.Printf("voice loop started (wake=%q endSilence=%s convTimeout=%s)",
+		c.cfg.Wake(), c.cfg.RequestEndSilence(), c.cfg.ConversationTimeout())
+	// The client is constructed already idle, so setState has no transition to
+	// make and would not touch the gate. Open it explicitly — this is the one
+	// place the device starts without a state change to carry it.
 	c.setState(StateIdle)
-	<-ctx.Done()
+	c.syncGate()
 
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
-	_ = cmd.Wait()
+	<-ctx.Done()
+	c.gate.Close()
 	wg.Wait()
 	return nil
 }
@@ -299,72 +351,149 @@ func (c *Client) WarmCache(ctx context.Context) error {
 	return nil
 }
 
-// ─── Stage 1: PCM reader ─────────────────────────────────────────────────
+// ─── Stage 1: the gated capture loop ─────────────────────────────────────
 
-func (c *Client) readFrames(ctx context.Context, r io.Reader, out chan<- []int16) {
+// micFrame is one 100 ms frame, flagged when it is the first of a new capture
+// session. The flag matters because the audio either side of a gate close is
+// not contiguous: the device was shut and reopened in between, and a half-
+// captured utterance from before must not be glued to whatever comes after.
+type micFrame struct {
+	samples []int16
+	reset   bool
+}
+
+// captureLoop opens the device whenever the gate allows and releases it the
+// moment the gate closes, forever.
+func (c *Client) captureLoop(ctx context.Context, out chan<- micFrame) {
 	defer close(out)
-	buf := make([]byte, frameSamples*2)
+
+	failures := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.gate.Opened():
+		}
+
+		sess, cancel := context.WithCancel(ctx)
+		// Cancel the session as soon as the gate shuts. The goroutine also
+		// exits when the session ends on its own, so it cannot outlive the
+		// session it was started for.
+		go func() {
+			select {
+			case <-c.gate.Closed():
+			case <-sess.Done():
+			}
+			cancel()
+		}()
+
+		c.logger.Printf("mic: opening capture device")
+		c.emit(MicEvent{Open: true})
+		err := c.captureSession(sess, out)
+		cancel()
+		c.emit(MicEvent{Open: false})
+		c.emit(LevelEvent{RMS: 0})
+		c.logger.Printf("mic: capture device released")
+
 		if ctx.Err() != nil {
 			return
 		}
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return
+		if err == nil {
+			failures = 0
+			continue
 		}
-		frame := make([]int16, frameSamples)
-		for i := range frame {
-			frame[i] = int16(binary.LittleEndian.Uint16(buf[i*2 : i*2+2]))
-		}
-		c.emit(LevelEvent{RMS: rms(frame)})
+
+		failures++
+		c.logger.Printf("mic: capture failed (attempt %d): %v", failures, err)
+		c.emit(ErrorEvent{Err: fmt.Errorf("microphone: %w", err)})
+		// The gate is still open — without a backoff a permanently broken
+		// device would respawn sox as fast as the kernel could fail it.
+		delay := time.Duration(min(failures, micRetryMaxSec)) * time.Second
 		select {
-		case out <- frame:
 		case <-ctx.Done():
 			return
+		case <-time.After(delay):
 		}
 	}
 }
 
+// captureSession runs one open-to-close lifetime of the device.
+func (c *Client) captureSession(ctx context.Context, out chan<- micFrame) error {
+	raw := make(chan []int16, 32)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.capture.Capture(ctx, raw)
+		close(raw)
+	}()
+
+	settle := micSettleMs / frameMs
+	first := true
+	for frame := range raw {
+		if settle > 0 {
+			settle--
+			continue
+		}
+		c.emit(LevelEvent{RMS: rms(frame)})
+		select {
+		case out <- micFrame{samples: frame, reset: first}:
+			first = false
+		case <-ctx.Done():
+			// Keep draining so Capture is never blocked on an unread channel;
+			// it is on its way out and closing raw is what ends this loop.
+		}
+	}
+	return <-done
+}
+
 // ─── Stage 2: VAD / utterance assembly ───────────────────────────────────
 
-// capturedUtterance bundles audio with the state speech *started* in.
-//
-// Using the start state rather than the current one is what stops Otto's own
-// playback from being treated as a follow-up question: an utterance that began
-// during playback is loopback no matter how long the silence detector took to
-// flush it, and by then the state may well have moved on.
+// capturedUtterance bundles audio with the state speech *started* in. The start
+// state decides how the utterance is interpreted — a wake-word candidate, a
+// request, or a phrase heard while muted — and by the time the silence detector
+// flushes it the current state may already have moved on.
 type capturedUtterance struct {
 	samples    []int16
 	startState string
 }
 
-func (c *Client) detectUtterances(ctx context.Context, in <-chan []int16, out chan<- capturedUtterance) {
+func (c *Client) detectUtterances(ctx context.Context, in <-chan micFrame, out chan<- capturedUtterance) {
 	defer close(out)
 
-	ring := newFrameRing(preRollMs / 100)
+	ring := newFrameRing(preRollMs / frameMs)
 	var speech []int16
 	var startState string
+	// The noise floor is a property of the room, so it deliberately survives
+	// the device being closed and reopened — re-adapting from scratch after
+	// every reply would make the first utterance of each turn the least
+	// reliable one.
 	noiseFloor := baseFloor
 	speechFrames, silenceFrames := 0, 0
 	inSpeech := false
+
+	discard := func() {
+		speech = speech[:0]
+		speechFrames, silenceFrames = 0, 0
+		inSpeech = false
+		ring.reset()
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case frame, ok := <-in:
+		case mf, ok := <-in:
 			if !ok {
 				return
 			}
-			state := c.State()
-
-			// While a reply is being computed there is no audio in flight and
-			// nothing to barge into, so pause detection and just keep the ring
-			// warm for the next utterance.
-			if state == StateProcessing {
-				ring.push(frame)
-				continue
+			if mf.reset && inSpeech {
+				c.logger.Printf("utterance abandoned: device was closed mid-speech")
+				discard()
+			} else if mf.reset {
+				discard()
 			}
 
+			frame := mf.samples
+			state := c.State()
 			level := rms(frame)
 			threshold := max(baseFloor, noiseFloor*noiseFloorGain)
 
@@ -372,17 +501,12 @@ func (c *Client) detectUtterances(ctx context.Context, in <-chan []int16, out ch
 				if !inSpeech {
 					speech = speech[:0]
 					startState = state
-					if state != StateSpeaking {
-						for _, f := range ring.drain() {
-							speech = append(speech, f...)
-						}
-					} else {
-						// Mid-playback the ring holds Otto's own voice off the
-						// speakers; prepending it would feed loopback into the
-						// transcript.
-						ring.reset()
+					for _, f := range ring.drain() {
+						speech = append(speech, f...)
 					}
 					inSpeech = true
+					// Somebody is talking; the conversation is not abandoned.
+					c.noteActivity()
 				}
 				speech = append(speech, frame...)
 				speechFrames++
@@ -401,19 +525,15 @@ func (c *Client) detectUtterances(ctx context.Context, in <-chan []int16, out ch
 			speech = append(speech, frame...)
 			silenceFrames++
 
-			endMs := endSilenceMsIdle
-			if state == StateArmed || state == StateSpeaking {
-				endMs = endSilenceMsActive
-			}
-			if silenceFrames < endMs/100 {
+			if silenceFrames < c.endSilenceFrames(startState) {
 				continue
 			}
 
 			minMs := minSpeechMsIdle
-			if startState == StateArmed || startState == StateSpeaking {
+			if startState == StateArmed {
 				minMs = minSpeechMsArmed
 			}
-			minFrames := max(1, minMs/100)
+			minFrames := max(1, minMs/frameMs)
 
 			if speechFrames >= minFrames {
 				clone := make([]int16, len(speech))
@@ -431,11 +551,24 @@ func (c *Client) detectUtterances(ctx context.Context, in <-chan []int16, out ch
 			} else {
 				c.logger.Printf("utterance too short: %d frames (need %d)", speechFrames, minFrames)
 			}
-			speech = speech[:0]
-			speechFrames, silenceFrames = 0, 0
-			inSpeech = false
+			discard()
 		}
 	}
+}
+
+// endSilenceFrames is how much trailing silence ends an utterance that began in
+// the given state.
+//
+// A request gets the long endpoint — two seconds by default — because the user
+// is composing a thought out loud and pausing mid-sentence is normal. Waiting
+// for the wake word gets a short one, because there is nothing to compose and
+// latency to the first acknowledgment is the whole feel of the thing.
+func (c *Client) endSilenceFrames(startState string) int {
+	ms := endSilenceMsWake
+	if startState == StateArmed {
+		ms = int(c.cfg.RequestEndSilence() / time.Millisecond)
+	}
+	return max(1, ms/frameMs)
 }
 
 // ─── Stage 3: transcript → decision → speech ─────────────────────────────
@@ -450,25 +583,21 @@ func (c *Client) handleUtterances(ctx context.Context, in <-chan capturedUtteran
 				return
 			}
 			prior := utt.startState
-			// Show "processing" while transcribing, but only from states where
-			// that is a truthful thing to display. Muted must stay muted —
-			// transcription there exists solely to catch "otto wake up", and
-			// flipping to processing would both lie to the UI and, on the way
-			// back out, silently un-mute. Speaking must stay speaking so the
-			// barge-in branch sees the state it reasons about.
-			if prior == StateIdle || prior == StateArmed {
+			// An armed utterance is a request, so the microphone goes off here
+			// — before transcription, and for the whole of think and speak.
+			//
+			// An idle one must not close the device: it is only a check for the
+			// wake word, and going deaf for the few hundred milliseconds
+			// whisper takes would drop the very next thing said, which is quite
+			// often the wake word itself.
+			if prior == StateArmed {
 				c.setState(StateProcessing)
 			}
 			c.processUtterance(ctx, utt.samples, prior)
-			// Nothing advanced the state, so return to where we came from. An
-			// unrecognized noise mid-conversation must leave the conversation
-			// open rather than quietly dropping back to idle.
+			// Nothing advanced the state, so the request produced no turn.
+			// Return to the conversation rather than dropping out of it.
 			if c.State() == StateProcessing {
-				if prior == StateArmed {
-					c.setState(StateArmed)
-				} else {
-					c.setState(StateIdle)
-				}
+				c.setState(StateArmed)
 			}
 		}
 	}
@@ -505,44 +634,19 @@ func (c *Client) processUtterance(ctx context.Context, samples []int16, prior st
 		if hit && IsWakeCommand(command) {
 			c.logger.Printf("wake command while muted → idle")
 			c.emit(TranscriptEvent{Text: command, Raw: text})
-			c.setState(StateIdle)
 			c.speakAck(ctx, PickUnmuteAck(), StateIdle)
 			return
 		}
 		c.logger.Printf("muted: ignoring")
 		return
 
-	case StateSpeaking:
-		// Otto's own voice reaches the mic, and he says his own name in
-		// replies, so treating every wake-word hit as barge-in produces
-		// constant self-interruption. Only an explicit stop gets through;
-		// anything else waits and is heard as a normal follow-up once he
-		// finishes.
-		if AnyMatches(variants, IsMuteCommand) {
-			c.logger.Printf("mute during playback → muted")
-			c.player.Interrupt()
-			c.emit(TranscriptEvent{Text: command, Raw: text})
-			c.setState(StateMuted)
-			return
-		}
-		if AnyMatches(variants, IsCloserCommand) {
-			c.logger.Printf("closer during playback → idle")
-			c.player.Interrupt()
-			c.emit(TranscriptEvent{Text: command, Raw: text})
-			c.setState(StateIdle)
-			c.speakAck(ctx, PickCloserAck(), StateIdle)
-			return
-		}
-		c.logger.Printf("playback continues (not a barge-in phrase)")
-		return
-
 	case StateArmed:
 		// Mid-conversation: closers and mutes need no wake word, since the user
-		// is already talking to Otto.
+		// is already talking to Otto. Both are fast paths with no model call,
+		// so ending a conversation is instant.
 		if AnyMatches(variants, IsCloserCommand) {
 			c.logger.Printf("closer → idle")
 			c.emit(TranscriptEvent{Text: command, Raw: text})
-			c.setState(StateIdle)
 			c.speakAck(ctx, PickCloserAck(), StateIdle)
 			return
 		}
@@ -569,11 +673,18 @@ func (c *Client) processUtterance(ctx context.Context, samples []int16, prior st
 		c.logger.Printf("no wake word, ignoring")
 		return
 	}
+	// A closer said with the wake word while already idle asks for nothing.
+	// Acknowledging it would start the very conversation it is trying to end.
+	if command != "" && IsCloserCommand(command) {
+		c.logger.Printf("closer while idle, already closed")
+		return
+	}
 	if command == "" {
-		// Wake word alone: acknowledge and wait for the request.
+		// Wake word alone: acknowledge and wait for the request. speakAck takes
+		// the state through speaking (device off) and lands on armed, so the
+		// greeting is never captured as the request.
 		c.logger.Printf("bare wake word → armed")
 		c.emit(TranscriptEvent{Text: "", Raw: text})
-		c.setState(StateArmed)
 		c.speakAck(ctx, PickGreeting(), StateArmed)
 		return
 	}
@@ -583,6 +694,11 @@ func (c *Client) processUtterance(ctx context.Context, samples []int16, prior st
 }
 
 // respond hands the transcript to Otto and speaks each sentence as it arrives.
+//
+// The microphone is already off when this is called and stays off until the
+// last sentence has played, which is what makes streaming safe: earlier the
+// first spoken sentence would be captured and evaluated as a barge-in against
+// the ones still being generated.
 func (c *Client) respond(ctx context.Context, userText string) {
 	c.setState(StateProcessing)
 	start := time.Now()
@@ -595,23 +711,20 @@ func (c *Client) respond(ctx context.Context, userText string) {
 		return
 	}
 
-	var spoken []string
-	first := true
+	spoken := 0
 	for utt := range stream {
 		if utt.Text == "" {
 			continue
 		}
-		if first {
+		if spoken == 0 {
 			c.logger.Printf("first sentence after %s", time.Since(start))
-			first = false
 		}
-		spoken = append(spoken, utt.Text)
+		spoken++
 		c.emit(ReplyEvent{UserText: userText, ReplyText: utt.Text, Persona: utt.Persona})
-		// A barge-in during playback moves us to muted or idle. Stop consuming
-		// so the rest of the reply is not spoken over the user's objection.
-		// Processing (the first iteration) and speaking both mean "carry on".
-		if s := c.State(); s == StateMuted || s == StateIdle {
-			c.logger.Printf("playback abandoned mid-stream (state=%s)", s)
+		// A keyboard mute is the only thing that lands here mid-reply. Honor it
+		// and stop speaking the rest.
+		if c.State() == StateMuted {
+			c.logger.Printf("playback abandoned mid-stream (muted)")
 			drain(stream)
 			return
 		}
@@ -619,14 +732,15 @@ func (c *Client) respond(ctx context.Context, userText string) {
 		c.speak(ctx, utt.Persona, utt.Text)
 	}
 
-	if len(spoken) == 0 {
+	if spoken == 0 {
 		c.logger.Printf("responder produced nothing to say")
 	}
-	// Only advance from speaking: if a barge-in already moved us to muted or
-	// idle, honoring that matters more than re-arming.
-	if c.State() == StateSpeaking {
-		c.setState(StateArmed)
+	if c.State() == StateMuted {
+		return
 	}
+	// Re-arm: the reply is finished, the speakers are quiet, and the microphone
+	// comes back on for a follow-up that needs no wake word.
+	c.setState(StateArmed)
 }
 
 // drain consumes the remainder of an abandoned stream so the producer is never
@@ -639,18 +753,21 @@ func drain(ch <-chan Utterance) {
 }
 
 // speakAck says a short canned phrase, preferring the pre-rendered cache, then
-// returns to resumeTo. resumeTo is explicit rather than read back from state to
-// avoid racing a concurrent transition.
+// lands on resumeTo. resumeTo is explicit rather than read back from state
+// because the whole point is to choose where the conversation goes next.
 func (c *Client) speakAck(ctx context.Context, text, resumeTo string) {
 	model := c.cfg.VoiceFor(PersonaOtto)
 	wav := c.cache.Get(model, text)
 	if wav == nil {
+		// Synthesis happens before the state flips so a piper failure does not
+		// leave the microphone shut for a phrase that is never spoken.
 		sctx, cancel := context.WithTimeout(ctx, speakTimeout)
 		var err error
 		wav, err = c.tts.Speak(sctx, text, model)
 		cancel()
 		if err != nil {
 			c.logger.Printf("ack tts failed: %v", err)
+			c.setState(resumeTo)
 			return
 		}
 		// Store for next time — acks recur constantly, so one live synthesis
@@ -663,7 +780,7 @@ func (c *Client) speakAck(ctx context.Context, text, resumeTo string) {
 	if err := c.player.Play(ctx, wav); err != nil && ctx.Err() == nil {
 		c.logger.Printf("ack playback failed: %v", err)
 	}
-	// A mute landing during the ack must stick.
+	// A keyboard mute landing during the ack must stick.
 	if c.State() == StateSpeaking {
 		c.setState(resumeTo)
 	}
@@ -694,8 +811,48 @@ func (c *Client) speak(ctx context.Context, persona, text string) {
 	}
 }
 
+// ─── The conversation timeout ────────────────────────────────────────────
+
+// watchConversation closes an armed conversation nobody came back to.
+//
+// Without it, staying armed after a reply means every subsequent word spoken in
+// the room — to a colleague, on a call — is transcribed and sent to the model as
+// though it were addressed to Otto. The wake word exists precisely to prevent
+// that, so the armed window has to be bounded.
+func (c *Client) watchConversation(ctx context.Context) {
+	timeout := c.cfg.ConversationTimeout()
+	if timeout <= 0 {
+		return
+	}
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			c.mu.Lock()
+			expired := c.state == StateArmed && time.Since(c.lastActive) > timeout
+			c.mu.Unlock()
+			if expired {
+				c.logger.Printf("conversation idle for %s → idle", timeout)
+				c.setState(StateIdle)
+			}
+		}
+	}
+}
+
+// noteActivity marks the conversation as alive, deferring the timeout.
+func (c *Client) noteActivity() {
+	c.mu.Lock()
+	c.lastActive = time.Now()
+	c.mu.Unlock()
+}
+
 // ─── Plumbing ────────────────────────────────────────────────────────────
 
+// setState moves the machine and, with it, the microphone. Every transition
+// goes through here, so micLive is the only rule deciding when Otto records.
 func (c *Client) setState(s string) {
 	c.mu.Lock()
 	if c.state == s {
@@ -704,9 +861,27 @@ func (c *Client) setState(s string) {
 	}
 	prev := c.state
 	c.state = s
+	if s == StateArmed {
+		// Entering armed restarts the abandonment clock, so the timeout is
+		// measured from the end of Otto's reply rather than from the start of
+		// the user's last sentence.
+		c.lastActive = time.Now()
+	}
 	c.mu.Unlock()
-	c.logger.Printf("state: %s → %s", prev, s)
+
+	c.syncGate()
+	c.logger.Printf("state: %s → %s (mic=%v)", prev, s, micLive(s))
 	c.emit(StateEvent{State: s})
+}
+
+// syncGate brings the capture device in line with the current state. Called on
+// every transition, and once by Start for the initial state.
+func (c *Client) syncGate() {
+	if micLive(c.State()) {
+		c.gate.Open()
+		return
+	}
+	c.gate.Close()
 }
 
 // emit publishes an event, dropping it if the buffer is full rather than

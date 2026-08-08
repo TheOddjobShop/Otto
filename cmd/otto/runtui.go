@@ -9,10 +9,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"otto/internal/config"
 	"otto/internal/tui"
 	"otto/internal/voice"
 )
@@ -49,7 +51,7 @@ func (f *localFanout) Deliver(ctx context.Context, text string, isHTML bool) {
 // not stop the UI from running — you can still type, and the status line says
 // exactly what is wrong — because a front end that refuses to start is far
 // worse than one that starts without sound.
-func runTUI(ctx context.Context, cancel context.CancelFunc, h *handler, mux *muxBot, stateDir string, userID int64) {
+func runTUI(ctx context.Context, cancel context.CancelFunc, h *handler, mux *muxBot, cfg *config.Config, stateDir string, userID int64) {
 	// Bubble Tea owns the terminal, so anything written to stderr would be
 	// painted over the UI. Redirect the log to a file for the session.
 	restoreLog := redirectLogToFile(stateDir)
@@ -58,7 +60,7 @@ func runTUI(ctx context.Context, cancel context.CancelFunc, h *handler, mux *mux
 	bridge := newVoiceBridge(mux, userID)
 	h.voiceSink = bridge
 
-	vc, voiceErr := startVoiceClient(ctx, stateDir, bridge)
+	vc, voiceErr := startVoiceClient(ctx, cfg, stateDir, bridge)
 	if voiceErr != nil {
 		log.Printf("tui: voice unavailable: %v", voiceErr)
 	}
@@ -105,8 +107,8 @@ func voiceController(vc *voice.Client) tui.VoiceController {
 }
 
 // startVoiceClient installs whatever is missing, then builds the listener.
-func startVoiceClient(ctx context.Context, stateDir string, bridge *voiceBridge) (*voice.Client, error) {
-	cfg := voice.DefaultConfig(stateDir)
+func startVoiceClient(ctx context.Context, appCfg *config.Config, stateDir string, bridge *voiceBridge) (*voice.Client, error) {
+	cfg := applyVoiceOverrides(voice.DefaultConfig(stateDir), appCfg)
 
 	if missing := cfg.Missing(); len(missing) > 0 {
 		// Downloads run before the UI takes the terminal, so progress is
@@ -120,7 +122,7 @@ func startVoiceClient(ctx context.Context, stateDir string, bridge *voiceBridge)
 			return nil, err
 		}
 		// Re-resolve: the whisper model path depends on what is now on disk.
-		cfg = voice.DefaultConfig(stateDir)
+		cfg = applyVoiceOverrides(voice.DefaultConfig(stateDir), appCfg)
 	}
 
 	if checks := voice.Diagnose(ctx, cfg, false); voice.HasFailure(checks) {
@@ -134,6 +136,30 @@ func startVoiceClient(ctx context.Context, stateDir string, bridge *voiceBridge)
 		Responder: bridge,
 		Logger:    log.Default(),
 	})
+}
+
+// applyVoiceOverrides layers the optional [voice] keys from config.toml over
+// the conventional defaults.
+//
+// Only keys that were actually set are applied: an absent key must keep the
+// package's default rather than overwrite it with a zero, which for the wake
+// word would mean nothing could ever wake Otto up.
+func applyVoiceOverrides(cfg voice.Config, app *config.Config) voice.Config {
+	if app == nil {
+		return cfg
+	}
+	if w := strings.TrimSpace(app.VoiceWakeWord); w != "" {
+		cfg.WakeWord = w
+	}
+	if app.VoiceEndSilenceMs > 0 {
+		cfg.RequestEndSilenceMs = app.VoiceEndSilenceMs
+	}
+	// Negative is meaningful here — it disables the timeout — so this is the
+	// one override that accepts a value below zero.
+	if app.VoiceConversationTimeoutSec != 0 {
+		cfg.ConversationTimeoutSec = app.VoiceConversationTimeoutSec
+	}
+	return cfg
 }
 
 // redirectLogToFile points the standard logger at <stateDir>/tui.log for the
