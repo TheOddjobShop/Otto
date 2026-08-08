@@ -124,6 +124,11 @@ type Model struct {
 	voiceHeard string
 	voiceReply string
 	voiceErr   string
+	// micOpen mirrors MicEvent. Shown rather than derived from voiceState
+	// because "is it recording right now" is the question this front end most
+	// owes an honest answer to, and the two can legitimately differ for the
+	// moment it takes the capture device to open or die.
+	micOpen bool
 
 	// replies is fed by Deliver from the mux's goroutine.
 	replies chan replyMsg
@@ -311,7 +316,16 @@ func (m *Model) submit(text string) {
 func (m *Model) applyVoiceEvent(evt voice.Event) {
 	switch e := evt.(type) {
 	case voice.LevelEvent:
-		m.waveTargetAmp = amplitudeFor(m.voiceState, e.RMS)
+		m.waveTargetAmp = amplitudeFor(m.voiceState, m.micOpen, e.RMS)
+
+	case voice.MicEvent:
+		m.micOpen = e.Open
+		if !e.Open {
+			// The bars are driven by microphone level, so with the device shut
+			// they have nothing to say. Settling them flat is the visible
+			// signal that Otto has stopped recording.
+			m.waveTargetAmp = idleAmplitude
+		}
 
 	case voice.StateEvent:
 		m.voiceState = e.State
@@ -511,12 +525,16 @@ func (m *Model) statusLine() string {
 		}
 		return "go ahead, I'm listening"
 	case voice.StateProcessing:
-		return "thinking…"
+		// The "mic off" note is not decoration. The mic being live is the
+		// default assumption for anything with a wake word, so the states where
+		// it is not have to say so — otherwise a user watching Otto think has
+		// no way to know he has stopped recording.
+		return "thinking… (mic off)"
 	case voice.StateSpeaking:
 		if m.voiceReply != "" {
-			return "speaking: " + truncate(m.voiceReply, 55)
+			return "speaking: " + truncate(m.voiceReply, 47) + " (mic off)"
 		}
-		return "speaking…"
+		return "speaking… (mic off)"
 	case voice.StateMuted:
 		return `muted — say "otto wake up", or press m`
 	default:
@@ -554,13 +572,20 @@ func (m *Model) renderMessages() string {
 // (nothing happens until the wake word lands) and unsettling.
 const idleAmplitude = 0.08
 
-func amplitudeFor(state string, rms float64) float64 {
+// amplitudeFor maps the voice state and the latest mic level onto the bar
+// cluster's height.
+//
+// A closed microphone always reads flat, whatever the state says. There is no
+// signal to render — the level events stopped arriving — and animating bars
+// over silence would show Otto listening at exactly the moments he is not.
+func amplitudeFor(state string, micOpen bool, rms float64) float64 {
+	if !micOpen {
+		return idleAmplitude
+	}
 	var target float64
 	switch state {
-	case voice.StateArmed, voice.StateProcessing:
+	case voice.StateArmed:
 		target = 0.4 + 4.0*rms
-	case voice.StateSpeaking:
-		target = 0.7 + 3.0*rms
 	default:
 		target = idleAmplitude
 	}

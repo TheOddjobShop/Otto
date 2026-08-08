@@ -19,6 +19,12 @@ const (
 	// updates smoothly (10 Hz) and the VAD reacts promptly, large enough that
 	// per-frame overhead is irrelevant.
 	frameSamples = 1600
+
+	// frameMs is that same frame expressed in milliseconds. Every duration in
+	// the capture pipeline is configured in ms and counted in frames, and
+	// deriving the divisor rather than writing 100 by hand keeps the two from
+	// drifting apart if frameSamples ever changes.
+	frameMs = frameSamples * 1000 / sampleRate
 )
 
 // rms returns a frame's root-mean-square amplitude normalized to [0,1].

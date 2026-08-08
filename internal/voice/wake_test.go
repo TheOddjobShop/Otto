@@ -168,6 +168,41 @@ func TestIsCloserCommand(t *testing.T) {
 	}
 }
 
+// The blunt way to end a conversation. Every dismissal must close it, with or
+// without the wake word attached — this is the list a user goes looking for
+// when they want Otto to stop listening, so a gap here reads as "the shutdown
+// phrase doesn't work".
+func TestDismissalsAreClosers(t *testing.T) {
+	for _, phrase := range dismissals {
+		if !IsCloserCommand(phrase) {
+			t.Errorf("IsCloserCommand(%q) = false, want every dismissal to close", phrase)
+		}
+		withWake := "otto " + phrase
+		cmd, hit := StripWakeWord(withWake, "otto")
+		if !hit {
+			t.Errorf("StripWakeWord(%q) missed the wake word", withWake)
+			continue
+		}
+		if !IsCloserCommand(cmd) {
+			t.Errorf("%q stripped to %q, which no longer closes", withWake, cmd)
+		}
+	}
+}
+
+// Ordinary requests that happen to contain a dismissal's words must survive.
+// "stand down" closes; "tell the team to stand down" is work.
+func TestDismissalsDoNotSwallowRequests(t *testing.T) {
+	for _, phrase := range []string{
+		"what's on my calendar",
+		"remind me to leave at five",
+		"tell me when you're finished",
+	} {
+		if IsCloserCommand(phrase) {
+			t.Errorf("IsCloserCommand(%q) = true, want a real request to reach Otto", phrase)
+		}
+	}
+}
+
 func TestAnyMatches(t *testing.T) {
 	variants := []string{"shut up otto", "shut up", ""}
 	if !AnyMatches(variants, IsMuteCommand) {
