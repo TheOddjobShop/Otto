@@ -249,6 +249,12 @@ func main() {
 		runStorePruner(ctx, memStore)
 	}()
 	go h.runRotator(ctx)
+	// Liveness supervision for the pets. runWatchdog covers Otto only, which
+	// left a wedged Toto able to hold his mutex forever — blocking every later
+	// busy-fallback and, because Toto is how the Otto watchdog talks to the
+	// user, that watchdog's own reboot message too. Store-free, so it needs no
+	// busDrainWG tracking.
+	go runPetWatchdog(ctx, []supervisedPet{toto, toot})
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
