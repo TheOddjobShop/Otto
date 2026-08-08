@@ -17,6 +17,7 @@ import (
 	"otto/internal/memory"
 	"otto/internal/store"
 	"otto/internal/telegram"
+	"otto/internal/voice"
 )
 
 const (
@@ -47,6 +48,17 @@ type handler struct {
 	// default model. Set in production by main; left nil by tests that
 	// don't exercise routing.
 	classifier modelClassifier
+
+	// voiceSTT transcribes Telegram voice notes. Nil means the assets are
+	// absent, in which case a voice note gets an explanatory reply rather
+	// than silence.
+	voiceSTT voice.Transcriber
+
+	// voiceDecode transcodes a voice note into the WAV whisper expects. A
+	// field rather than a direct call so the download → decode → transcribe
+	// path is testable without a real Opus file and a real transcoder. Nil
+	// uses voice.DecodeToWAV.
+	voiceDecode func(ctx context.Context, data []byte, ext string) ([]byte, error)
 
 	// petRotators are the pets (Toto/Toot) whose sessions the rotator clears
 	// on the idle window, so they don't accumulate stale conversation state.
@@ -485,10 +497,21 @@ func (h *handler) runPollingLoop(ctx context.Context) error {
 	}
 }
 
-// isPetAddressed reports whether u would route to a pet in dispatch. The
-// classification mirrors dispatch's own pet check exactly — including the
-// photo carve-out (photos always go to Otto regardless of caption text) —
-// so the batch partition can never disagree with downstream routing.
+// isPetAddressed reports whether u would route to a pet in dispatch, for the
+// batch ordering below. It mirrors dispatch's pet check on the text it can see,
+// including the photo carve-out (photos always go to Otto regardless of caption
+// text).
+//
+// One case it deliberately cannot mirror: a voice note has no text until it has
+// been transcribed, and transcription takes a whisper invocation — far too slow
+// to run inside the polling loop, which must keep draining updates. So a spoken
+// "toto, what's otto up to" is classified as non-pet here and only routed to
+// Toto once dispatch has the transcript. The consequence is limited to batch
+// ordering: the message still reaches the right pet, it just is not moved to
+// the back of a multi-update batch. Since the ordering exists to stop a pet
+// goroutine from snapshotting an idle Otto before a sibling claims the slot,
+// and transcription already delays the voice note by a second or more, the
+// race it guards against cannot realistically occur for one.
 func isPetAddressed(u telegram.Update, pets *petRegistry) bool {
 	if pets == nil || len(u.PhotoIDs) > 0 {
 		return false
@@ -524,6 +547,18 @@ func (h *handler) dispatch(ctx context.Context, u telegram.Update) {
 	if !h.allow.Allows(u.UserID) {
 		log.Printf("dropping message from non-allowlisted user %d", u.UserID)
 		return
+	}
+	// A voice note carries no text, so transcribe before the empty check.
+	// Doing it here rather than inside handleMessage means a spoken message
+	// flows through the identical path as a typed one — commands, pet
+	// routing, the model router and memory all see ordinary text, and
+	// saying "toto, what's otto up to" out loud routes to the cat.
+	if u.VoiceFileID != "" {
+		text, ok := h.resolveVoiceNote(ctx, u)
+		if !ok {
+			return
+		}
+		u.Text = text
 	}
 	if strings.TrimSpace(u.Text) == "" && len(u.PhotoIDs) == 0 {
 		return

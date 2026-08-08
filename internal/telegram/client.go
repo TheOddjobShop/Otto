@@ -28,6 +28,18 @@ type Update struct {
 	UserID   int64
 	Text     string
 	PhotoIDs []string // largest-size photo file_id per photo, if any
+
+	// VoiceFileID is set for a voice note (the microphone button), empty
+	// otherwise. Otto transcribes it locally and treats the result as if it
+	// had been typed.
+	//
+	// Deliberately only Voice, not Audio: Audio is a music or file upload,
+	// where the intent is "here is a file", while Voice is unambiguously
+	// "here is me talking to you".
+	VoiceFileID string
+	// VoiceSeconds is the note's duration, used to reject implausibly long
+	// audio before downloading it.
+	VoiceSeconds int
 }
 
 // BotClient is the surface of Telegram operations Otto needs. Defined as an
@@ -190,6 +202,10 @@ func fromTGUpdate(u tgbotapi.Update) Update {
 		// Telegram returns multiple sizes; pick the largest.
 		largest := u.Message.Photo[len(u.Message.Photo)-1]
 		out.PhotoIDs = []string{largest.FileID}
+	}
+	if u.Message.Voice != nil {
+		out.VoiceFileID = u.Message.Voice.FileID
+		out.VoiceSeconds = u.Message.Voice.Duration
 	}
 	return out
 }
