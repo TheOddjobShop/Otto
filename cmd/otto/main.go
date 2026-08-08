@@ -33,6 +33,19 @@ import (
 var version = "dev"
 
 func main() {
+	// Subcommands are handled before flag parsing so `otto voice-doctor` and
+	// `otto tui` work, while a bare `otto -config …` (what the service unit
+	// runs) keeps parsing exactly as it always has.
+	if handled, code := runSubcommand(os.Args); handled {
+		os.Exit(code)
+	}
+	tuiMode := len(os.Args) > 1 && os.Args[1] == "tui"
+	if tuiMode {
+		// Strip the subcommand so the flag package sees only flags.
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	}
+	_ = tuiMode // wired to the terminal UI in the next change
+
 	configPath := flag.String("config", defaultConfigPath(), "path to config.toml")
 	ttyMode := flag.Bool("tty", false, "test mode: read messages from stdin, write replies to stdout (no Telegram)")
 	flag.Parse()
@@ -185,6 +198,10 @@ func main() {
 		classifier: &execClassifier{binary: cfg.ClaudeBinaryPath, workDir: home, store: memStore},
 		// Pets rotate their own sessions on the idle window too.
 		petRotators: []petRotator{toto, toot},
+		// Telegram voice notes: transcribed locally, then handled as text.
+		// Nil when whisper or its model is absent — voice notes then get an
+		// explanatory reply instead of silence.
+		voiceSTT: newVoiceTranscriber(stateDir),
 	}
 
 	h.rotate = rotateConfig{

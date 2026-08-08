@@ -44,7 +44,47 @@ After `setup.sh` reports success, on Telegram:
 - Send `/restart` — interrupts an in-flight Claude call.
 - Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify / flush), plus an estimated dollar cost broken down by model. The cost is computed from published list prices in `cmd/otto/pricing.go` and assumes the default 5-minute cache TTL; it is an estimate, not a billing figure, and any model without a rate card (e.g. turns that inherited Claude Code's own model) is named as excluded rather than silently counted as free.
 - Send a photo with caption "describe this" — Otto downloads it and forwards to Claude via `@<path>`.
+- Hold the microphone button and say "what's on my calendar today" — Otto transcribes it locally with whisper.cpp and answers as though you had typed it. Commands and pet addressing work too: saying "toto, what's otto up to" routes to the cat. The reply comes back as text, since you're looking at Telegram. Requires `whisper.cpp` plus a model, and `ffmpeg` to decode Telegram's Opus — `otto voice-doctor` reports exactly what's missing.
 - Send "what's on my calendar today?" — exercises the Google Calendar MCP.
+
+## Voice
+
+Otto listens and speaks entirely locally — [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+for speech-to-text, [piper](https://github.com/rhasspy/piper) for text-to-speech.
+No API keys, no per-token cost, nothing leaves the machine. Same reasoning that
+put embeddings on a local Ollama.
+
+Two ways in:
+
+- **Telegram voice notes** — hold the mic button. Transcribed and handled as
+  text; the reply comes back as text, because you're looking at a screen.
+- **`./otto tui`** — a terminal front end with an always-on wake word. Say
+  "otto" and he answers out loud. See the section below.
+
+```bash
+otto voice-doctor      # check every piece and print exactly what's missing
+```
+
+`voice-doctor` is the first thing to run when voice misbehaves. It checks sox,
+whisper, piper, the decoder, playback, every model file (including the
+`.onnx.json` sidecars piper needs but never names in its own errors), and opens
+the microphone to confirm real samples arrive — reporting the `pacman` line for
+whatever is absent.
+
+### Models
+
+Assets live in `<state dir>/voice/` and download on first use, with progress:
+
+| Asset | Size | Purpose |
+|---|---|---|
+| `ggml-small.en.bin` | ~466 MB | speech-to-text. `base.en` or `tiny.en` are honored if already present |
+| `en_US-danny-low` | ~20 MB | Otto's voice |
+| `en_US-amy-low` | ~20 MB | Toto's voice — lighter and quicker |
+| `en_US-lessac-low` | ~20 MB | Toot's voice — crisper, more clipped |
+| piper binary | ~20 MB | the synthesizer itself |
+
+Each persona gets a distinct voice on purpose: when Otto is mid-task and Toto
+covers for him, you hear that it's someone else without being told.
 
 ## Operations
 
@@ -92,6 +132,8 @@ runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags
 │   │                     # markdown stripper, updater, watchdog, idle-gated rotator
 │   └── otto-memory/      # MCP stdio server exposing memory_add/replace/remove + session_search
 ├── internal/
+│   ├── voice/            # local speech: whisper.cpp STT + piper TTS, wake word,
+│   │                     # VAD, barge-in, streaming sentence split, diagnostics
 │   ├── auth/             # single-user allowlist
 │   ├── config/           # TOML config loader
 │   ├── telegram/         # Bot API wrapper, chunking, image download

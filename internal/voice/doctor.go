@@ -86,6 +86,20 @@ func Diagnose(ctx context.Context, cfg Config, probeMic bool) []Check {
 		})
 	}
 
+	// Audio decoding, needed only for Telegram voice notes (OGG/Opus). The
+	// microphone path never touches it, so its absence is a warning rather
+	// than a failure — the TUI works fine without one.
+	if name, ok := DecoderAvailable(); ok {
+		checks = append(checks, Check{Name: "audio decoder", Status: CheckOK, Detail: name + " (for Telegram voice notes)"})
+	} else {
+		checks = append(checks, Check{
+			Name:   "audio decoder",
+			Status: CheckWarn,
+			Detail: "no ffmpeg — Telegram voice notes cannot be decoded (the TUI mic path is unaffected)",
+			Fix:    "pacman -S ffmpeg",
+		})
+	}
+
 	// Playback.
 	if name, _, ok := ResolvePlayer(); ok {
 		checks = append(checks, Check{Name: "audio playback", Status: CheckOK, Detail: name})
