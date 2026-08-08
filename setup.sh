@@ -225,6 +225,60 @@ OTTO_MEMORY_DIR="$OTTO_STATE_DIR/memory"
 OTTO_STATE_DB="$OTTO_STATE_DIR/state.db"
 mkdir -p "$OTTO_MEMORY_DIR"
 
+# ── Deployment mode ─────────────────────────────────────────────────────────
+# Two very different installs share this script:
+#
+#   server  — a machine with no screen or speakers. Otto lives on Telegram.
+#             Voice notes still work (they need whisper + ffmpeg, not a mic),
+#             but there is nothing to install piper or sox for.
+#   desktop — a machine you sit at. Everything above plus the microphone,
+#             speakers and `otto tui`.
+#
+# Asking up front means the rest of the script installs exactly what this
+# machine can use, instead of downloading ~100 MB of voice models onto a
+# headless box that will never play a sound.
+#
+# OTTO_MODE can be preset in the environment for unattended installs.
+if [ -z "${OTTO_MODE:-}" ]; then
+  # Guess from the environment so the default is almost always right: a
+  # graphical session means a desktop.
+  if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] || [ "$OS" = Darwin ]; then
+    OTTO_MODE_DEFAULT=desktop
+  else
+    OTTO_MODE_DEFAULT=server
+  fi
+
+  echo ""
+  echo "  ───────────────────────────────────────────────"
+  echo "    How will you use Otto on this machine?"
+  echo "  ───────────────────────────────────────────────"
+  echo ""
+  echo "    1) Home server — headless, always on."
+  echo "       Otto answers Telegram forever. Voice notes work."
+  echo "       No microphone or speakers needed."
+  echo ""
+  echo "    2) Desktop — you sit at this machine."
+  echo "       Everything above, plus 'otto tui': a wake word,"
+  echo "       spoken replies, and the lightbulb."
+  echo ""
+  if [ "$OTTO_MODE_DEFAULT" = desktop ]; then
+    echo "    Detected a graphical session, so 2 is probably right."
+  else
+    echo "    No display detected, so 1 is probably right."
+  fi
+  read -r -p "  Choose [1/2] (enter for the suggestion): " OTTO_MODE_CHOICE
+  case "$OTTO_MODE_CHOICE" in
+    1) OTTO_MODE=server ;;
+    2) OTTO_MODE=desktop ;;
+    *) OTTO_MODE="$OTTO_MODE_DEFAULT" ;;
+  esac
+fi
+case "$OTTO_MODE" in
+  server)  echo "  [ok] Installing for a headless home server." ;;
+  desktop) echo "  [ok] Installing for a desktop, with voice." ;;
+  *) echo "  [!] Unknown OTTO_MODE=$OTTO_MODE; treating as desktop."; OTTO_MODE=desktop ;;
+esac
+
 # ── Ollama: local embeddings for semantic memory search (optional) ──────────
 # When Ollama + an embedding model are present, session_search uses semantic
 # retrieval; otherwise it degrades cleanly to keyword (FTS5) search. The whole
@@ -269,18 +323,29 @@ fi
 # for TTS. Same reasoning as Ollama above: no API key, no per-token cost,
 # nothing leaves the box.
 #
-# Only the system binaries are installed here, because those need a package
-# manager. The models and the piper binary are plain downloads, so the Go binary
-# fetches whatever is missing on first run (`otto tui`) with visible progress.
-# That split means a fresh machine still works even if this block fails.
+# What gets installed depends on OTTO_MODE. A headless server needs whisper and
+# ffmpeg (Telegram voice notes arrive as OGG/Opus files, which need no audio
+# hardware at all) but has no use for a microphone, speakers or piper.
 #
-# Best-effort throughout: nothing here can abort setup. Without it Otto is
-# exactly the bot he was before — text only.
+# Only system binaries are installed here, because those need a package
+# manager. The models and the piper binary are plain downloads, fetched by the
+# Go binary on the first `otto tui` run with visible progress — so a machine
+# that skipped this block still works.
+#
+# Best-effort throughout: nothing here can abort setup. Without any of it Otto
+# is exactly the bot he was before — text only.
 echo ""
-echo "  Setting up local voice (optional)..."
+echo "  Setting up local voice..."
 
-# sox captures the microphone; ffmpeg decodes Telegram's OGG/Opus voice notes.
-for tool in sox ffmpeg; do
+# ffmpeg decodes Telegram's OGG/Opus voice notes. Needed in BOTH modes: a
+# headless server has no microphone but still receives voice notes from a phone.
+VOICE_PKGS=(ffmpeg)
+if [ "$OTTO_MODE" = desktop ]; then
+  # sox captures the microphone. Only useful where one exists.
+  VOICE_PKGS+=(sox)
+fi
+
+for tool in "${VOICE_PKGS[@]}"; do
   if command -v "$tool" &>/dev/null; then
     echo "  [ok] $tool present"
     continue
@@ -307,22 +372,37 @@ else
   esac
 fi
 
-# Playback. sox's `play` always works as a fallback, so this only matters on a
-# desktop where paplay/aplay give better latency and mixer behaviour.
-if command -v paplay &>/dev/null || command -v aplay &>/dev/null \
-  || command -v play &>/dev/null || command -v afplay &>/dev/null; then
-  echo "  [ok] audio playback available"
+if [ "$OTTO_MODE" = desktop ]; then
+  # Playback. sox's `play` always works as a fallback, so this only matters on
+  # a desktop where paplay/aplay give better latency and mixer behaviour.
+  if command -v paplay &>/dev/null || command -v aplay &>/dev/null \
+    || command -v play &>/dev/null || command -v afplay &>/dev/null; then
+    echo "  [ok] audio playback available"
+  else
+    case "$PKG_MGR" in
+      pacman) sudo pacman -S --needed --noconfirm libpulse || echo "  [!] no audio player — install libpulse (paplay) or alsa-utils (aplay)" ;;
+      brew)   : ;; # afplay ships with macOS
+    esac
+  fi
+
+  # Pre-fetch the models now rather than on first launch. The whole point of
+  # this script is that the machine is ready when it finishes; a half-gigabyte
+  # download the first time you say "otto" is not that.
+  echo ""
+  echo "  Downloading voice models (~500 MB, one time)..."
+  if "$OTTO_BIN" voice-fetch 2>&1 | sed 's/^/  /'; then
+    echo "  [ok] voice models ready"
+  else
+    echo "  [!] model download incomplete — 'otto tui' will retry on first run"
+  fi
 else
-  echo "  [!] no audio player found — install libpulse (paplay) or alsa-utils (aplay)"
+  echo "  [ok] server mode: skipping microphone, speakers and voice models."
+  echo "       Telegram voice notes still work (whisper + ffmpeg above)."
 fi
 
-if command -v "$OTTO_BIN_DIR/otto" &>/dev/null || [ -x "$OTTO_BIN_DIR/otto" ]; then
-  echo ""
-  echo "  Voice check:"
-  "$OTTO_BIN_DIR/otto" voice-doctor 2>&1 | sed 's/^/  /' || true
-  echo ""
-  echo "  Models download automatically on the first \`otto tui\` run (~500 MB)."
-fi
+echo ""
+echo "  Voice check:"
+"$OTTO_BIN" voice-doctor 2>&1 | sed 's/^/  /' || true
 
 # ── Step 1: Google OAuth client (manual, one-time) ──────────────────────────
 if ! $HAS_GCAL_OAUTH; then
@@ -881,11 +961,31 @@ if [ "$OS" = Linux ]; then
   sleep 3
   if systemctl --user is-active --quiet otto.service; then
     echo ""
-    echo "  [ok] otto is running."
-    echo "       Logs:    journalctl --user -u otto -f"
-    echo "       Status:  systemctl --user status otto"
+    echo "  ═══════════════════════════════════════════════"
+    echo "    Otto is running, and will stay running."
+    echo "  ═══════════════════════════════════════════════"
     echo ""
-    echo "  Send 'hi' to your Telegram bot to test."
+    echo "  Lingering is enabled, so he survives logout and reboot."
+    echo ""
+    echo "  Try it now — send your Telegram bot:"
+    echo "    hi"
+    echo "    remember that I use fish, not bash"
+    echo "    /status"
+    echo ""
+    echo "  Hold the mic button and speak — he transcribes it locally."
+    echo ""
+    if [ "$OTTO_MODE" = desktop ]; then
+      echo "  For voice at this machine:"
+      echo "    otto tui"
+      echo ""
+      echo "  Say \"otto\" and he answers out loud. He stops the background"
+      echo "  service while the UI is open and starts it again when you quit,"
+      echo "  so you never have to think about it."
+      echo ""
+    fi
+    echo "  Logs:    journalctl --user -u otto -f"
+    echo "  Status:  systemctl --user status otto"
+    echo "  Health:  otto voice-doctor"
   else
     echo "  [!] otto did not start cleanly."
     echo "      Check: journalctl --user -u otto -n 50"

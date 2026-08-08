@@ -17,6 +17,21 @@ Design specs:
 ./setup.sh
 ```
 
+It asks one question up front — **home server or desktop?** — and installs
+accordingly. Everything after that is automatic; when it finishes, Otto is
+running and stays running.
+
+| | Home server | Desktop |
+|---|---|---|
+| Telegram, memory, MCP tools | ✅ | ✅ |
+| Voice notes (hold the mic button) | ✅ | ✅ |
+| `otto tui` — wake word, spoken replies | — | ✅ |
+| Downloads | ~0 | ~500 MB of speech models |
+
+The default is guessed from `$DISPLAY`/`$WAYLAND_DISPLAY`, so pressing enter is
+almost always right. Preset `OTTO_MODE=server` or `OTTO_MODE=desktop` for an
+unattended install.
+
 The script is idempotent — re-run anytime to add credentials, install missing pieces, or fix things; it skips what's already done. It detects Arch Linux (`pacman`) or macOS (`brew`) and adapts; the systemd unit is Linux-only. It will:
 
 1. Install system deps (`go`, `nodejs`, `npm`, `jq`, `curl`, `python`, `lsof`, plus `base-devel` on Arch).
@@ -24,7 +39,7 @@ The script is idempotent — re-run anytime to add credentials, install missing 
 3. Build the `otto` binary and the **`otto-memory`** MCP server binary into `~/.local/bin/`.
 4. Create the memory directory (`~/.local/state/otto/memory/`) and state DB path.
 5. **Install Ollama** (pacman/brew), start its service, and **pull `embeddinggemma` + `nomic-embed-text`** for local semantic embeddings. Best-effort — if Ollama install or model pull fails, memory search degrades to keyword-only (FTS5) and setup continues.
-6. **Install the voice system binaries** — `sox` (microphone), `ffmpeg` (decodes Telegram's Opus voice notes), `whisper.cpp` (speech-to-text) — then run `otto voice-doctor` and print the result. Also best-effort: without it Otto is exactly the text-only bot he was before. The models and the piper binary are plain downloads, so they fetch on the first `otto tui` run with visible progress (~500 MB) rather than here.
+6. **Install the voice binaries** — `ffmpeg` and `whisper.cpp` in both modes (Telegram voice notes are files, so they need no audio hardware); `sox` and a player only on a desktop. On a desktop it also pre-downloads the speech models so nothing stalls on first launch. Best-effort — without it Otto is exactly the text-only bot he was before. Finishes by printing `otto voice-doctor`.
 7. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
 8. Browser sign-ins for Google Calendar, Drive, Gmail.
 9. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
@@ -92,15 +107,27 @@ him waits and is heard as a follow-up once he stops. That's deliberate: Otto say
 his own name in replies and the microphone hears the speakers, so anything less
 selective self-interrupts constantly.
 
-**One process at a time.** `otto tui` *is* Otto — it polls Telegram too, so your
-phone keeps working while the UI is up. That means you can't run the service at
-the same time: two pollers sharing one bot token would split your messages
-between them at random. Otto takes a lock at startup and refuses with the exact
-command to stop the other one.
+**Just run it — the handover is automatic.**
 
 ```bash
-systemctl --user stop otto     # then: otto tui
+otto tui
 ```
+
+`otto tui` *is* Otto: it polls Telegram too, so your phone keeps working while
+the UI is up. That also means the background service can't run at the same time
+— two pollers sharing one bot token would split your messages between them at
+random — so the TUI stops the service on startup and starts it again when you
+quit.
+
+```
+otto: otto.service is running; stopping it for this session…
+otto: took over from otto.service — it restarts when you quit.
+```
+
+Otto still takes a lock, and still refuses anything it can't account for: if
+something *other* than the service holds it (another terminal, a hand-started
+process), you get the plain refusal rather than a guess. `--no-takeover` opts
+out of the handover entirely.
 
 Logs go to `<state dir>/tui.log` while the UI owns the terminal.
 

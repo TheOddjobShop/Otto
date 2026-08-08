@@ -47,6 +47,7 @@ func main() {
 
 	configPath := flag.String("config", defaultConfigPath(), "path to config.toml")
 	ttyMode := flag.Bool("tty", false, "test mode: read messages from stdin, write replies to stdout (no Telegram)")
+	noTakeover := flag.Bool("no-takeover", false, "with `tui`: refuse to start rather than stopping a running otto service")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -62,13 +63,17 @@ func main() {
 	// Refuse to start alongside another Otto. Two processes long-polling with
 	// one bot token do not error — Telegram just hands each update to whoever
 	// asks first, splitting messages between them at random. See lock.go.
+	// The TUI hands over from the background service automatically: stop it,
+	// run, start it back on exit. Without that, the obvious command fails and
+	// the user carries a correctness constraint by hand every time. The lock
+	// still refuses anything it cannot account for.
 	stateDir := filepath.Dir(cfg.StateDBPath)
-	lock, err := acquireInstanceLock(stateDir)
+	_, releaseLock, err := acquireLockWithHandover(stateDir, tuiMode && !*noTakeover)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "otto: %v\n", err)
 		os.Exit(1)
 	}
-	defer lock.Release()
+	defer releaseLock()
 
 	var bot telegram.BotClient
 	var mux *muxBot
