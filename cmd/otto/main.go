@@ -91,7 +91,6 @@ func main() {
 			bot = mux
 		}
 	}
-	_ = mux // attached to the terminal UI in the next change
 
 	session, err := claude.LoadSession(cfg.SessionIDPath)
 	if err != nil {
@@ -301,6 +300,13 @@ func main() {
 		log.Printf("otto: received %s, shutting down", s)
 		cancel()
 	}()
+
+	// With every background goroutine running, hand the terminal to the UI.
+	// It owns the process from here: closing it cancels ctx, which unwinds the
+	// polling loop and the shutdown sequence below exactly as SIGTERM would.
+	if tuiMode && mux != nil {
+		go runTUI(ctx, cancel, h, mux, stateDir, cfg.TelegramAllowedUserID)
+	}
 
 	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB memory_dir=%s state_db=%s embed=%s",
 		session.ID(), totoSession.ID(), tootSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona), len(tootPersona), cfg.MemoryDir, cfg.StateDBPath, embedder.Name())
