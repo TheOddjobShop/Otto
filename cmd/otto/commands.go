@@ -102,32 +102,75 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 	case "/update":
 		return h.handleUpdateCommand()
 	case "/status":
-		sid := h.session.ID()
-		if sid == "" {
-			sid = "(none yet)"
-		}
-		h.otto.mu.Lock()
-		busy := h.otto.busy
-		inflight := h.otto.currentPrompt
-		lastEvent := h.otto.lastEvent
-		lastModel := h.otto.lastModel
-		h.otto.mu.Unlock()
-
-		state := "idle"
-		if busy {
-			// truncate() is rune-aware (handler.go) — safe for multi-byte
-			// characters sent by the user (e.g. emoji, CJK, Arabic).
-			preview := truncate(inflight, 60)
-			silence := time.Since(lastEvent).Round(time.Second)
-			state = fmt.Sprintf("BUSY (silence=%s) on: %q", silence, preview)
-		}
-		return commandResult{
-			reply: fmt.Sprintf("uptime=%s\nstate=%s\nmodel=%s\nsession=%s",
-				time.Since(h.startedAt).Round(time.Second), state, modelLabel(lastModel), sid),
-			handled: true,
-		}
+		return commandResult{reply: h.statusReport(ctx), handled: true}
 	}
 	return commandResult{}
+}
+
+// statusReport renders /status.
+//
+// Otto runs five things on timers — the model router, the session rotator, the
+// bus drain, the watchdog and the store pruner — and until now none of them was
+// observable without reading the journal. The original spec ruled out a web
+// dashboard as a non-goal; a text command is not that, and the machinery being
+// legible is what makes "he forgot" or "Toto never passed it on" diagnosable
+// from the phone instead of from a terminal.
+//
+// Every lookup here is cheap and non-blocking: in-memory state plus one indexed
+// COUNT. A status command must never be the slow thing, least of all when
+// something is already wrong.
+func (h *handler) statusReport(ctx context.Context) string {
+	sid := h.session.ID()
+	sessionEmpty := sid == ""
+	if sessionEmpty {
+		sid = "(none yet)"
+	}
+
+	h.otto.mu.Lock()
+	busy := h.otto.busy
+	inflight := h.otto.currentPrompt
+	lastEvent := h.otto.lastEvent
+	lastModel := h.otto.lastModel
+	tokens := h.otto.lastInputTokens
+	var idle time.Duration
+	if !h.otto.lastUserMsg.IsZero() {
+		idle = time.Since(h.otto.lastUserMsg)
+	}
+	h.otto.mu.Unlock()
+
+	state := "idle"
+	if busy {
+		// truncate() is rune-aware (handler.go) — safe for multi-byte
+		// characters sent by the user (e.g. emoji, CJK, Arabic).
+		preview := truncate(inflight, 60)
+		silence := time.Since(lastEvent).Round(time.Second)
+		state = fmt.Sprintf("BUSY (silence=%s) on: %q", silence, preview)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "uptime=%s\n", time.Since(h.startedAt).Round(time.Second))
+	fmt.Fprintf(&b, "state=%s\n", state)
+	fmt.Fprintf(&b, "model=%s\n", modelLabel(lastModel))
+	fmt.Fprintf(&b, "session=%s\n", sid)
+	fmt.Fprintf(&b, "rotation=%s\n", describeRotation(tokens, idle, sessionEmpty, h.rotate))
+	fmt.Fprintf(&b, "embeddings=%s\n", embedStatus.describe())
+	fmt.Fprintf(&b, "prune=%s\n", pruneStatus.describe())
+
+	if h.store != nil {
+		if queued, ready, err := h.store.InboxDepth(ctx); err != nil {
+			// Report the failure rather than omitting the line: a silently
+			// missing row reads as "nothing queued", which is the opposite of
+			// what an unreadable inbox means.
+			fmt.Fprintf(&b, "bus=unavailable (%s)", truncate(err.Error(), 60))
+		} else if queued == 0 {
+			b.WriteString("bus=empty")
+		} else {
+			fmt.Fprintf(&b, "bus=%d queued, %d ready now", queued, ready)
+		}
+	} else {
+		b.WriteString("bus=disabled (no store)")
+	}
+	return b.String()
 }
 
 // handleUpdateCommand returns the synchronous reply for /update and,

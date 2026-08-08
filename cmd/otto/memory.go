@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"otto/internal/embed"
@@ -102,6 +103,53 @@ func composePromptWithTimeAndMemory(base string, core *memory.Core) string {
 // reply path and the token is always released via defer.
 var embedSem = make(chan struct{}, 1)
 
+// embedTracker records the outcome of the most recent embedding attempt.
+//
+// /status needs to answer "is semantic recall actually working right now", and
+// the honest alternatives are both worse: a live probe makes a status command
+// block on a network call to Ollama (which, during a cold model load, is exactly
+// when it is slowest), while reporting the configured backend name says only
+// what was asked for, not what happened. Recording the real outcome of the embed
+// path costs nothing — that path already runs on every logged turn.
+type embedTracker struct {
+	mu      sync.Mutex
+	at      time.Time
+	ok      bool
+	lastErr string
+}
+
+// embedStatus is the process-wide tracker, written by embedAndStoreWithSem.
+var embedStatus embedTracker
+
+func (t *embedTracker) record(err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.at = time.Now()
+	t.ok = err == nil
+	if err != nil {
+		t.lastErr = err.Error()
+		return
+	}
+	t.lastErr = ""
+}
+
+// describe renders the tracker for /status. Reports "not exercised yet" rather
+// than implying health when nothing has been attempted — a fresh process with a
+// broken Ollama looks identical to a healthy one until the first turn is logged,
+// and claiming "ok" there would be a lie.
+func (t *embedTracker) describe() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.at.IsZero() {
+		return "not exercised yet (semantic recall untested this run)"
+	}
+	ago := time.Since(t.at).Round(time.Second)
+	if t.ok {
+		return fmt.Sprintf("ok (%s ago)", ago)
+	}
+	return fmt.Sprintf("degraded, keyword-only (%s ago: %s)", ago, truncate(t.lastErr, 80))
+}
+
 // embedAndStore embeds content and persists the vector for turnID, best-effort.
 // Callers run it in a goroutine off the reply path. Errors are logged, never
 // propagated. See embedAndStoreWithSem for the parameterized form used in tests.
@@ -127,6 +175,8 @@ func embedAndStoreWithSem(st *store.Store, emb embed.Embedder, turnID int64, con
 	ctx, cancel := context.WithTimeout(context.Background(), 130*time.Second) // 2×60s + 10s slack
 	defer cancel()
 	r, err := emb.Embed(ctx, content)
+	// Record before branching so both outcomes update the tracker /status reads.
+	embedStatus.record(err)
 	if err != nil {
 		log.Printf("embed turn %d: %v", turnID, err)
 		return
