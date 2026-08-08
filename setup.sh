@@ -83,9 +83,239 @@ fi
 [ ${#EXISTING_GMAIL_LABELS[@]} -gt 0 ] && HAS_GMAIL_AUTHED=true
 [ -f "$GDRIVE_CREDS_PATH" ] && HAS_GDRIVE_AUTHED=true
 
+# ── Credential validation ───────────────────────────────────────────────────
+# Every secret is checked against the service that will actually use it, at the
+# moment it is entered — not trusted until Otto fails hours later with an error
+# the user has to correlate back to a typo they could not see themselves make
+# (the token prompts are silent by necessity).
+#
+# Two rules the validators follow:
+#
+#   1. Never echo a secret, and never put one in argv. `ps` is world-readable
+#      on a default Linux, so a token in a curl URL is visible to every user on
+#      the box. curl reads its URL and headers from a 0600 config file instead.
+#   2. Report the SERVICE's own words. "Unauthorized" from Telegram and
+#      "API token is invalid" from Notion mean different things, and paraphrasing
+#      them into a generic failure throws away the only useful diagnostic.
+#
+# Set OTTO_SKIP_VALIDATION=1 to bypass every network check (offline installs).
+
+VALIDATION_ERROR=""   # one-line diagnosis from the last failed validator
+VALIDATION_NOTE=""    # confirmation detail on success, e.g. the bot's @username
+
+# curl_quiet <config-lines...> — runs curl with url/headers supplied via a
+# 0600 config file so nothing sensitive reaches the process list.
+# Returns 127 when curl itself is absent, which callers treat as "cannot
+# verify" rather than "invalid" — these run before system deps are installed,
+# and rejecting a good token for want of curl would be worse than not checking.
+curl_quiet() {
+  local cfg rc
+  command -v curl >/dev/null 2>&1 || return 127
+  cfg="$(mktemp)"; chmod 600 "$cfg"
+  printf '%s\n' "$@" > "$cfg"
+  printf 'silent\nshow-error\nmax-time = 20\n' >> "$cfg"
+  curl -K "$cfg" 2>/dev/null; rc=$?
+  rm -f "$cfg"
+  return $rc
+}
+
+# strip_ws — tokens never contain whitespace, and a wrapped or space-padded
+# paste is the single most common way these prompts go wrong.
+strip_ws() { printf '%s' "$1" | tr -d '[:space:]'; }
+
+validate_telegram_token() {
+  local token resp
+  token="$(strip_ws "$1")"
+  [ -n "$token" ] || { VALIDATION_ERROR="nothing entered."; return 1; }
+
+  # Shape first: a local check gives a far better message than a 401 would,
+  # and catches pasting the user ID or BotFather's whole sentence.
+  if ! printf '%s' "$token" | grep -qE '^[0-9]{6,12}:[A-Za-z0-9_-]{30,45}$'; then
+    VALIDATION_ERROR="that isn't a bot token. Expected digits, a colon, then ~35 characters — like 123456789:AAH… (got ${#token} characters)."
+    return 1
+  fi
+  [ "${OTTO_SKIP_VALIDATION:-}" = 1 ] && { VALIDATION_NOTE="shape ok (network check skipped)"; return 0; }
+
+  resp="$(curl_quiet "url = \"https://api.telegram.org/bot$token/getMe\"")"
+  case $? in
+    0) ;;
+    127) VALIDATION_NOTE="shape ok (curl not installed yet — will verify on the next run)"; return 0 ;;
+    *)  VALIDATION_ERROR="could not reach api.telegram.org. Check the network, or re-run with OTTO_SKIP_VALIDATION=1."
+        return 1 ;;
+  esac
+  if printf '%s' "$resp" | grep -q '"ok":true'; then
+    VALIDATION_NOTE="@$(printf '%s' "$resp" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')"
+    return 0
+  fi
+  VALIDATION_ERROR="Telegram rejected it: $(printf '%s' "$resp" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p')"
+  case "$resp" in
+    *Unauthorized*) VALIDATION_ERROR="$VALIDATION_ERROR
+      That means the token is wrong or was revoked. In @BotFather: /mybots → your bot → API Token." ;;
+  esac
+  return 1
+}
+
+validate_telegram_user_id() {
+  local id
+  id="$(strip_ws "$1")"
+  [ -n "$id" ] || { VALIDATION_ERROR="nothing entered."; return 1; }
+  printf '%s' "$id" | grep -qE '^[0-9]{5,15}$' || {
+    VALIDATION_ERROR="a user ID is all digits (like 123456789). If you pasted a username or the bot token, that's the wrong value."
+    return 1
+  }
+  VALIDATION_NOTE="id $id"
+  return 0
+}
+
+validate_notion_token() {
+  local token resp
+  token="$(strip_ws "$1")"
+  [ -n "$token" ] || { VALIDATION_ERROR="nothing entered."; return 1; }
+  case "$token" in
+    ntn_*|secret_*) ;;
+    *) VALIDATION_ERROR="a Notion integration secret starts with ntn_ (or secret_ on older integrations)."; return 1 ;;
+  esac
+  [ "${OTTO_SKIP_VALIDATION:-}" = 1 ] && { VALIDATION_NOTE="shape ok (network check skipped)"; return 0; }
+
+  resp="$(curl_quiet \
+    "url = \"https://api.notion.com/v1/users/me\"" \
+    "header = \"Authorization: Bearer $token\"" \
+    "header = \"Notion-Version: 2022-06-28\"")"
+  case $? in
+    0) ;;
+    127) VALIDATION_NOTE="shape ok (curl not installed yet)"; return 0 ;;
+    *)  VALIDATION_ERROR="could not reach api.notion.com."; return 1 ;;
+  esac
+  if printf '%s' "$resp" | grep -q '"object":"user"'; then
+    VALIDATION_NOTE="integration \"$(printf '%s' "$resp" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')\""
+    return 0
+  fi
+  VALIDATION_ERROR="Notion rejected it: $(printf '%s' "$resp" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p')"
+  return 1
+}
+
+validate_google_client_secret() {
+  local file="$1" cid
+  [ -s "$file" ] || { VALIDATION_ERROR="file is missing or empty: $file"; return 1; }
+  jq -e . "$file" >/dev/null 2>&1 || { VALIDATION_ERROR="not valid JSON. Re-download it from the Google Cloud console."; return 1; }
+  # Desktop clients nest under .installed; web clients under .web. Anything
+  # else is the wrong artifact — usually a service-account key, which cannot
+  # do the user-consent flow Otto needs.
+  cid="$(jq -r '.installed.client_id // .web.client_id // empty' "$file" 2>/dev/null)"
+  if [ -z "$cid" ]; then
+    if jq -e '.type == "service_account"' "$file" >/dev/null 2>&1; then
+      VALIDATION_ERROR="that's a service-account key. Otto needs an OAuth *Desktop app* client, which is what asks for your consent in a browser."
+    else
+      VALIDATION_ERROR="no client_id inside. Expected the OAuth client JSON with an \"installed\" or \"web\" section."
+    fi
+    return 1
+  fi
+  [ -n "$(jq -r '.installed.client_secret // .web.client_secret // empty' "$file" 2>/dev/null)" ] || {
+    VALIDATION_ERROR="client_id present but client_secret missing — the file is truncated."
+    return 1
+  }
+  VALIDATION_NOTE="client ${cid%%-*}…"
+  return 0
+}
+
+# prompt_validated <secret|plain> <validator-fn> <prompt> — reads until the
+# value validates, or the user chooses to stop. Result lands in PROMPT_RESULT.
+PROMPT_RESULT=""
+prompt_validated() {
+  local mode="$1" validator="$2" prompt="$3" value again
+  while :; do
+    if [ "$mode" = secret ]; then
+      read -rs -p "$prompt" value; echo
+    else
+      read -r -p "$prompt" value
+    fi
+    value="$(strip_ws "$value")"
+    VALIDATION_ERROR=""; VALIDATION_NOTE=""
+    if "$validator" "$value"; then
+      PROMPT_RESULT="$value"
+      [ -n "$VALIDATION_NOTE" ] && echo "  [ok] verified — $VALIDATION_NOTE" || echo "  [ok] verified"
+      return 0
+    fi
+    echo ""
+    echo "  [!] $VALIDATION_ERROR"
+    echo ""
+    read -r -p "  Try again? [Y/n] " again
+    case "$again" in
+      [Nn]*) PROMPT_RESULT=""; return 1 ;;
+    esac
+  done
+}
+
+# detect_telegram_user_id <token> — asks the user to message the bot and reads
+# their numeric id straight off the update.
+#
+# Better than sending them to @userinfobot for a number to copy: the id that
+# arrives here is by construction the one that will be on their messages, so
+# the allowlist cannot be subtly wrong. A wrong allowlist is a miserable bug —
+# Otto silently drops every message and looks simply dead.
+DETECTED_USER_ID=""
+DETECTED_USER_NAME=""
+detect_telegram_user_id() {
+  local token="$1" resp last id i
+  command -v jq >/dev/null 2>&1 || return 1
+
+  # Note where the backlog ends so we react to a fresh message, not one sent
+  # months ago — possibly from a different account.
+  resp="$(curl_quiet "url = \"https://api.telegram.org/bot$token/getUpdates?offset=-1&timeout=0\"")" || return 1
+  case "$resp" in
+    *Conflict*)
+      # Something else is already long-polling this token; asking again would
+      # just fight it.
+      VALIDATION_ERROR="another Otto is already polling this bot. Stop it first: systemctl --user stop otto"
+      return 1 ;;
+  esac
+  last="$(printf '%s' "$resp" | jq -r '[.result[].update_id] | max // 0' 2>/dev/null)" || last=0
+  [ -n "$last" ] || last=0
+
+  echo ""
+  echo "  Now send your bot any message — just say hi."
+  echo "  (waiting up to 90 seconds; ctrl-c to enter the ID by hand)"
+  for i in $(seq 1 30); do
+    resp="$(curl_quiet "url = \"https://api.telegram.org/bot$token/getUpdates?offset=$((last+1))&timeout=3\"")" || return 1
+    id="$(printf '%s' "$resp" | jq -r '[.result[].message.from.id] | last // empty' 2>/dev/null)"
+    if [ -n "$id" ]; then
+      DETECTED_USER_ID="$id"
+      DETECTED_USER_NAME="$(printf '%s' "$resp" | jq -r '[.result[].message.from.first_name] | last // empty' 2>/dev/null)"
+      return 0
+    fi
+  done
+  VALIDATION_ERROR="no message arrived."
+  return 1
+}
+
 if [ -f "$CONFIG_FILE" ]; then
   grep -qE '^telegram_bot_token *= *"[^"]+' "$CONFIG_FILE" 2>/dev/null && HAS_TELEGRAM=true
   grep -qE '^notion_api_key *= *"[^"]+' "$CONFIG_FILE" 2>/dev/null && HAS_NOTION=true
+
+  # A value being PRESENT is not the same as it being VALID. Re-check anything
+  # already on disk, because the failure it causes lands far from its cause:
+  # setup reports success, then Otto exits at boot with "telegram: Unauthorized"
+  # and the user has to work backwards to a token they were never shown.
+  # Revocation, a half-finished earlier run and an edited file all look
+  # identical here otherwise.
+  if $HAS_TELEGRAM; then
+    EXISTING_TG_TOKEN="$(sed -n 's/^telegram_bot_token *= *"\([^"]*\)".*/\1/p' "$CONFIG_FILE" | head -1)"
+    if validate_telegram_token "$EXISTING_TG_TOKEN"; then
+      TELEGRAM_TOKEN_NOTE="$VALIDATION_NOTE"
+    else
+      HAS_TELEGRAM=false
+      TELEGRAM_STALE_REASON="$VALIDATION_ERROR"
+    fi
+    unset EXISTING_TG_TOKEN
+  fi
+  if $HAS_NOTION; then
+    EXISTING_NOTION_TOKEN="$(sed -n 's/^notion_api_key *= *"\([^"]*\)".*/\1/p' "$CONFIG_FILE" | head -1)"
+    if ! validate_notion_token "$EXISTING_NOTION_TOKEN"; then
+      HAS_NOTION=false
+      NOTION_STALE_REASON="$VALIDATION_ERROR"
+    fi
+    unset EXISTING_NOTION_TOKEN
+  fi
 fi
 
 # Claude Code stores credentials as an artifact — ~/.claude/.credentials.json
@@ -128,8 +358,12 @@ else
   echo "    • Gmail accounts — needed"
 fi
 $HAS_GDRIVE_AUTHED && echo "    [ok] Google Drive signed in"        || echo "    • Google Drive — needed"
-$HAS_NOTION        && echo "    [ok] Notion token saved"            || echo "    • Notion token — needed"
-$HAS_TELEGRAM      && echo "    [ok] Telegram bot configured"       || echo "    • Telegram bot — needed"
+if $HAS_NOTION; then echo "    [ok] Notion token verified"
+elif [ -n "${NOTION_STALE_REASON:-}" ]; then echo "    [!] Notion token on file was rejected — will re-ask"
+else echo "    • Notion token — needed"; fi
+if $HAS_TELEGRAM; then echo "    [ok] Telegram bot verified (${TELEGRAM_TOKEN_NOTE:-ok})"
+elif [ -n "${TELEGRAM_STALE_REASON:-}" ]; then echo "    [!] Telegram token on file was rejected — will re-ask"
+else echo "    • Telegram bot — needed"; fi
 $HAS_CLAUDE_AUTHED && echo "    [ok] Claude Code authenticated"     || echo "    • Claude Code — run 'claude /login' (or set ANTHROPIC_API_KEY)"
 echo ""
 echo "  Will only ask about ones still needed."
@@ -661,8 +895,19 @@ if ! $HAS_NOTION; then
        ⋯ menu → Connections → add your integration
 
 STEP
-  read -rs -p "  Paste your Notion token: " NOTION_TOKEN; echo
-  if [ -z "$NOTION_TOKEN" ]; then echo "  No token entered."; exit 1; fi
+  if [ -n "${NOTION_STALE_REASON:-}" ]; then
+    echo "  The token already in config.toml no longer works:"
+    echo "    $NOTION_STALE_REASON"
+    echo ""
+  fi
+  # Notion is optional: Otto loses the Notion MCP without it but is otherwise
+  # fine, so a user who cannot get one can decline and carry on.
+  if prompt_validated secret validate_notion_token "  Paste your Notion token: "; then
+    NOTION_TOKEN="$PROMPT_RESULT"
+  else
+    NOTION_TOKEN=""
+    echo "  [skip] continuing without Notion — re-run ./setup.sh to add it later."
+  fi
 fi
 
 # ── Step 6: Telegram bot + your user ID ─────────────────────────────────────
@@ -678,13 +923,46 @@ if ! $HAS_TELEGRAM; then
 
   1. On Telegram, message @BotFather → /newbot → pick name + username
      Copy the token (looks like 123456789:ABC...).
-  2. Message @userinfobot to get your numeric user ID.
+
+  Your user ID is detected automatically — no second bot needed.
 
 STEP
-  read -rs -p "  Paste bot token: " TELEGRAM_BOT_TOKEN; echo
-  read -r -p "  Paste your user ID: " TELEGRAM_USER_ID
-  if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_USER_ID" ]; then
-    echo "  Both required."; exit 1
+  if [ -n "${TELEGRAM_STALE_REASON:-}" ]; then
+    echo "  The token already in config.toml no longer works:"
+    echo "    $TELEGRAM_STALE_REASON"
+    echo ""
+  fi
+
+  # Checked against getMe before it is written anywhere. The prompt is silent,
+  # so a truncated paste is invisible — verifying here is the only way the user
+  # ever learns they mistyped it.
+  if ! prompt_validated secret validate_telegram_token "  Paste bot token: "; then
+    echo "  Can't continue without a working bot token."
+    exit 1
+  fi
+  TELEGRAM_BOT_TOKEN="$PROMPT_RESULT"
+
+  # Read the user ID off a real message rather than asking them to copy a
+  # number from @userinfobot. The id that arrives here is by construction the
+  # one that will be on their messages, so the allowlist cannot be subtly
+  # wrong — and a wrong allowlist is a miserable bug, because Otto silently
+  # drops every message and simply looks dead.
+  TELEGRAM_USER_ID=""
+  if detect_telegram_user_id "$TELEGRAM_BOT_TOKEN"; then
+    TELEGRAM_USER_ID="$DETECTED_USER_ID"
+    echo "  [ok] got it${DETECTED_USER_NAME:+ — hello, $DETECTED_USER_NAME} (id $TELEGRAM_USER_ID)"
+  else
+    # Assigned first rather than inlined as ${VAR:-...}: an apostrophe inside
+    # that expansion is parsed as an opening quote even within double quotes.
+    DETECT_FAIL="${VALIDATION_ERROR:-no message arrived}"
+    echo "  [!] $DETECT_FAIL"
+    echo "      Message @userinfobot on Telegram; it replies with your numeric ID."
+    echo ""
+    if ! prompt_validated plain validate_telegram_user_id "  Paste your user ID: "; then
+      echo "  Can't continue without a user ID — Otto would ignore every message."
+      exit 1
+    fi
+    TELEGRAM_USER_ID="$PROMPT_RESULT"
   fi
 fi
 
