@@ -203,8 +203,10 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 | `mcp_config_path` | required | `~/.config/otto/mcp.json` |
 | `session_id_path` | required | `~/.local/state/otto/session_id` |
 | `system_prompt_path` | optional | copied from `SYSTEM.md` |
-| `toto_persona_path` / `toto_session_id_path` | optional | from `TOTO.md` |
-| `toot_persona_path` / `toot_session_id_path` | optional | from `TOOT.md` |
+| `toto_persona_path` | optional | copied from `TOTO.md` |
+| `toto_session_id_path` | `<session_id_path>_toto` | Toto's own session, so his history never mixes with Otto's |
+| `toot_persona_path` | optional | copied from `TOOT.md` |
+| `toot_session_id_path` | `<session_id_path>_toot` | Toot's own session |
 | `memory_dir` | `<session dir>/memory` | USER.md + MEMORY.md live here |
 | `state_db_path` | `<session dir>/state.db` | turn log + vectors |
 | `embed_ollama_url` | `http://localhost:11434` | local Ollama |
