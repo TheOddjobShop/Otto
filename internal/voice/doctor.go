@@ -71,7 +71,11 @@ func Diagnose(ctx context.Context, cfg Config, probeMic bool) []Check {
 			Name:   "whisper-cli",
 			Status: CheckFail,
 			Detail: "not found on PATH (looked for " + strings.Join(whisperBinaries, ", ") + ")",
-			Fix:    "pacman -S whisper.cpp   (or build from github.com/ggerganov/whisper.cpp)",
+			// whisper.cpp is not in Arch's official repos — only the AUR — so
+			// `pacman -S whisper.cpp` always fails, and suggesting it sends the
+			// user down a dead end. setup.sh builds it when no package is
+			// available, which is the reliable route.
+			Fix: "re-run ./setup.sh — it installs from the AUR or builds from source (`yay -S whisper.cpp` also works)",
 		})
 	}
 

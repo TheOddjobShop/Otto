@@ -381,7 +381,7 @@ echo ""
 case "$PKG_MGR" in
   pacman)
     NEED_PKGS=()
-    for pkg in go nodejs npm jq curl base-devel python lsof; do
+    for pkg in go nodejs npm jq curl base-devel cmake git python lsof; do
       if ! pacman -Qi "$pkg" &>/dev/null; then NEED_PKGS+=("$pkg"); fi
     done
     if [ ${#NEED_PKGS[@]} -gt 0 ]; then
@@ -590,21 +590,85 @@ for tool in "${VOICE_PKGS[@]}"; do
   esac
 done
 
-# whisper.cpp ships its CLI as `whisper-cli` (newer) or `whisper` (older), and
-# distros disagree about the package name, so probe for either binary first.
-if command -v whisper-cli &>/dev/null || command -v whisper &>/dev/null; then
-  echo "  [ok] whisper CLI present"
-else
+# whisper.cpp is the one dependency no package manager reliably provides. It is
+# NOT in Arch's official repos — only the AUR — so `pacman -S whisper.cpp`
+# always fails, and telling the user to "install it from the AUR" leaves them
+# stuck if they have no AUR helper. So try every route and, failing all of
+# them, build it: it is a small C++ project and the build is genuinely quick.
+#
+# The CLI is `whisper-cli` on current versions and `whisper` on older ones;
+# probe for either before doing anything.
+install_whisper() {
+  if command -v whisper-cli &>/dev/null || command -v whisper &>/dev/null; then
+    echo "  [ok] whisper CLI present ($(command -v whisper-cli 2>/dev/null || command -v whisper))"
+    return 0
+  fi
+
+  # 1. The package manager, in case it ever lands in a repo.
   case "$PKG_MGR" in
-    pacman)
-      sudo pacman -S --needed --noconfirm whisper.cpp 2>/dev/null \
-        || echo "  [!] whisper.cpp not in the repos — build it from github.com/ggerganov/whisper.cpp, or install from the AUR"
-      ;;
-    brew)
-      brew install whisper-cpp || echo "  [!] whisper-cpp install failed"
-      ;;
+    brew)   brew install whisper-cpp 2>/dev/null && { echo "  [ok] installed whisper-cpp via brew"; return 0; } ;;
+    pacman) sudo pacman -S --needed --noconfirm whisper.cpp 2>/dev/null && { echo "  [ok] installed whisper.cpp via pacman"; return 0; } ;;
   esac
-fi
+
+  # 2. An AUR helper, if one happens to be installed.
+  if [ "$PKG_MGR" = pacman ]; then
+    for helper in yay paru; do
+      if command -v "$helper" &>/dev/null; then
+        echo "  Installing whisper.cpp from the AUR with $helper..."
+        "$helper" -S --needed --noconfirm whisper.cpp 2>/dev/null \
+          && { echo "  [ok] installed whisper.cpp from the AUR"; return 0; }
+        echo "  [!] $helper could not install it; falling back to a source build."
+        break
+      fi
+    done
+  fi
+
+  # 3. Build it. Statically linked, so the result is one self-contained file
+  #    that can simply be dropped in ~/.local/bin with nothing else to install.
+  echo ""
+  echo "  whisper.cpp isn't available from a package manager on this system."
+  echo "  It can be built from source — a few minutes, no lasting dependencies."
+  read -r -p "  Build it now? [Y/n] " BUILD_WHISPER
+  case "$BUILD_WHISPER" in
+    [Nn]*)
+      echo "  [skip] no speech-to-text. Voice notes and 'otto tui' will decline politely."
+      echo "         Install it later, then re-run ./setup.sh."
+      return 1 ;;
+  esac
+
+  for tool in git cmake; do
+    command -v "$tool" &>/dev/null || { echo "  [!] $tool is required to build whisper.cpp"; return 1; }
+  done
+
+  WHISPER_SRC="$OTTO_STATE_DIR/whisper.cpp"
+  echo "  Fetching source into $WHISPER_SRC..."
+  rm -rf "$WHISPER_SRC"
+  git clone --depth 1 https://github.com/ggerganov/whisper.cpp "$WHISPER_SRC" 2>&1 | sed 's/^/    /' || {
+    echo "  [!] clone failed"; return 1; }
+
+  echo "  Building (this is the slow part)..."
+  # BUILD_SHARED_LIBS=OFF is what makes the result a single self-contained
+  # binary; a shared build would need libwhisper/libggml installed alongside it
+  # and would break the moment the source tree is deleted.
+  cmake -S "$WHISPER_SRC" -B "$WHISPER_SRC/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DWHISPER_BUILD_TESTS=OFF >/dev/null 2>&1 || { echo "  [!] cmake configure failed"; return 1; }
+  cmake --build "$WHISPER_SRC/build" --config Release \
+        -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)" >/dev/null 2>&1 || {
+    echo "  [!] build failed. Try it by hand to see the error:"
+    echo "        cmake --build $WHISPER_SRC/build --config Release"
+    return 1; }
+
+  if [ ! -x "$WHISPER_SRC/build/bin/whisper-cli" ]; then
+    echo "  [!] build finished but produced no whisper-cli"; return 1
+  fi
+  install -m 755 "$WHISPER_SRC/build/bin/whisper-cli" "$OTTO_BIN_DIR/whisper-cli"
+  # The binary is static, so the ~1 GB source tree has no further purpose.
+  rm -rf "$WHISPER_SRC"
+  echo "  [ok] built and installed $OTTO_BIN_DIR/whisper-cli"
+}
+install_whisper || true
 
 if [ "$OTTO_MODE" = desktop ]; then
   # Playback. sox's `play` always works as a fallback, so this only matters on
