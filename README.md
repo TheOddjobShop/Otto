@@ -9,6 +9,7 @@ Design specs:
 - [`docs/superpowers/specs/2026-07-21-agent-bus-design.md`](docs/superpowers/specs/2026-07-21-agent-bus-design.md) — the inter-agent message bus (inbox table, drain loop, hop cap). *Retroactive.*
 - [`docs/superpowers/specs/2026-07-21-model-router-design.md`](docs/superpowers/specs/2026-07-21-model-router-design.md) — the per-turn Haiku model classifier (CODE vs CHAT routing). *Retroactive.*
 - [`docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md`](docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md) — the multi-persona pet system (Toto/Toot) and the liveness watchdog. *Retroactive.*
+- [`docs/superpowers/specs/2026-08-07-voice-tui-design.md`](docs/superpowers/specs/2026-08-07-voice-tui-design.md) — the surface mux, the local voice pipeline (wake word → whisper → Otto → piper), and the `./otto tui` front end.
 
 ## Quick start
 
@@ -23,11 +24,12 @@ The script is idempotent — re-run anytime to add credentials, install missing 
 3. Build the `otto` binary and the **`otto-memory`** MCP server binary into `~/.local/bin/`.
 4. Create the memory directory (`~/.local/state/otto/memory/`) and state DB path.
 5. **Install Ollama** (pacman/brew), start its service, and **pull `embeddinggemma` + `nomic-embed-text`** for local semantic embeddings. Best-effort — if Ollama install or model pull fails, memory search degrades to keyword-only (FTS5) and setup continues.
-6. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
-7. Browser sign-ins for Google Calendar, Drive, Gmail.
-8. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
-9. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms. `mcp.json` registers the local `otto-memory` server alongside the community MCPs.
-10. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy. On macOS, install a launchd user agent at `~/Library/LaunchAgents/com.otto.bot.plist` (with `KeepAlive=true` so `/update`'s SIGTERM auto-respawns) and bootstrap it into the current session.
+6. **Install the voice system binaries** — `sox` (microphone), `ffmpeg` (decodes Telegram's Opus voice notes), `whisper.cpp` (speech-to-text) — then run `otto voice-doctor` and print the result. Also best-effort: without it Otto is exactly the text-only bot he was before. The models and the piper binary are plain downloads, so they fetch on the first `otto tui` run with visible progress (~500 MB) rather than here.
+7. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
+8. Browser sign-ins for Google Calendar, Drive, Gmail.
+9. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
+10. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms. `mcp.json` registers the local `otto-memory` server alongside the community MCPs.
+11. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy. On macOS, install a launchd user agent at `~/Library/LaunchAgents/com.otto.bot.plist` (with `KeepAlive=true` so `/update`'s SIGTERM auto-respawns) and bootstrap it into the current session.
 
 ## Manual smoke test
 
@@ -39,11 +41,111 @@ After `setup.sh` reports success, on Telegram:
 - Send `/new` then `What's my name?` — should not remember (session cleared); but `Do you know my VS Code preference?` should still answer "light mode" because the memory core survives `/new`.
 - Send `What did we talk about earlier?` — Otto calls `session_search` (semantic + keyword) over `state.db`.
 - Send `/whoami` — prints your Telegram user ID and current session ID.
-- Send `/status` — prints uptime + session.
+- Send `/status` — prints uptime, busy/idle state, the model the last turn ran on, the session id, and the state of the background machinery: how full the session is and how long until it rotates, whether embeddings are actually working (from the last real attempt, not a probe), when the store was last pruned and how many rows went, and how many bus messages are queued vs. ready to deliver now. Every lookup is in-memory or one indexed `COUNT`, so it stays fast even when something is wrong.
 - Send `/restart` — interrupts an in-flight Claude call.
 - Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify / flush), plus an estimated dollar cost broken down by model. The cost is computed from published list prices in `cmd/otto/pricing.go` and assumes the default 5-minute cache TTL; it is an estimate, not a billing figure, and any model without a rate card (e.g. turns that inherited Claude Code's own model) is named as excluded rather than silently counted as free.
 - Send a photo with caption "describe this" — Otto downloads it and forwards to Claude via `@<path>`.
+- Hold the microphone button and say "what's on my calendar today" — Otto transcribes it locally with whisper.cpp and answers as though you had typed it. Commands and pet addressing work too: saying "toto, what's otto up to" routes to the cat. The reply comes back as text, since you're looking at Telegram. Requires `whisper.cpp` plus a model, and `ffmpeg` to decode Telegram's Opus — `otto voice-doctor` reports exactly what's missing.
 - Send "what's on my calendar today?" — exercises the Google Calendar MCP.
+
+## Voice
+
+Otto listens and speaks entirely locally — [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+for speech-to-text, [piper](https://github.com/rhasspy/piper) for text-to-speech.
+No API keys, no per-token cost, nothing leaves the machine. Same reasoning that
+put embeddings on a local Ollama.
+
+Two ways in:
+
+- **Telegram voice notes** — hold the mic button. Transcribed and handled as
+  text; the reply comes back as text, because you're looking at a screen.
+- **`./otto tui`** — a terminal front end with an always-on wake word. Say
+  "otto" and he answers out loud. See the section below.
+
+```bash
+otto tui               # the front end: wake word, spoken replies, lightbulb
+otto voice-doctor      # check every piece and print exactly what's missing
+```
+
+### `otto tui`
+
+A boot reveal, then a spinning lightbulb over an audio-reactive bar cluster and
+one line of status. Say **"otto"** and he answers out loud.
+
+| | |
+|---|---|
+| `otto` | wake word. Say it alone for an acknowledgment, or with your request in the same breath |
+| — | once he's answered you're still armed: follow-ups need no wake word |
+| "thanks" / "that's all" / "bye" | ends the conversation. No model call — it's a fast path |
+| "otto, shut up" | mutes instantly, killing playback mid-sentence |
+| "otto, wake up" | unmutes |
+| any key | type to open the chat pane; `esc` closes it and keeps your draft |
+| `m` | mute toggle (on an empty input) |
+| `ctrl+c` | quit |
+
+Otto starts speaking **before he finishes thinking** — his reply is split into
+sentences as it streams, so the first one plays while the rest is still being
+generated.
+
+While he's speaking, only "shut up" and closers interrupt. A question asked over
+him waits and is heard as a follow-up once he stops. That's deliberate: Otto says
+his own name in replies and the microphone hears the speakers, so anything less
+selective self-interrupts constantly.
+
+**One process at a time.** `otto tui` *is* Otto — it polls Telegram too, so your
+phone keeps working while the UI is up. That means you can't run the service at
+the same time: two pollers sharing one bot token would split your messages
+between them at random. Otto takes a lock at startup and refuses with the exact
+command to stop the other one.
+
+```bash
+systemctl --user stop otto     # then: otto tui
+```
+
+Logs go to `<state dir>/tui.log` while the UI owns the terminal.
+
+`voice-doctor` is the first thing to run when voice misbehaves. It checks sox,
+whisper, piper, the decoder, playback, every model file (including the
+`.onnx.json` sidecars piper needs but never names in its own errors), and opens
+the microphone to confirm real samples arrive — reporting the `pacman` line for
+whatever is absent.
+
+### Models
+
+Assets live in `<state dir>/voice/` and download on first use, with progress:
+
+| Asset | Size | Purpose |
+|---|---|---|
+| `ggml-small.en.bin` | ~466 MB | speech-to-text. `base.en` or `tiny.en` are honored if already present |
+| `en_US-danny-low` | ~20 MB | Otto's voice |
+| `en_US-amy-low` | ~20 MB | Toto's voice — lighter and quicker |
+| `en_US-lessac-low` | ~20 MB | Toot's voice — crisper, more clipped |
+| piper binary | ~20 MB | the synthesizer itself |
+
+Each persona gets a distinct voice on purpose: when Otto is mid-task and Toto
+covers for him, you hear that it's someone else without being told.
+
+## Scheduled work — `otto say`
+
+```bash
+otto say "good morning — give me today's brief"
+otto say -to toot "what version are we on?"
+echo "$(cat report.txt)" | otto say
+```
+
+Hands a message to the running Otto, who answers it with full context and logs
+the exchange to memory like any other turn. This is how a launchd job, systemd
+timer or cron entry should reach you.
+
+The distinction matters. A script that posts to the Telegram API directly sends
+text Otto never saw: it isn't in his session, isn't in `recent_turns`, and when
+you reply "yes, do that" he has nothing to resolve it against. Through `otto
+say`, the briefing *is* his turn, so replying to it just continues the
+conversation.
+
+`-timeout` waits for the daemon to pick the message up, which is how a script
+can tell Otto is actually running — the enqueue itself succeeds either way,
+since the queue is just a table.
 
 ## Operations
 
@@ -76,15 +178,26 @@ go test -race ./...
 go build ./cmd/otto-memory   # build the MCP server binary
 ```
 
+CI runs the same checks on every push to `master` and every pull request
+(`.github/workflows/test.yml`): gofmt, `go vet`, `go build`, and `go test -race`,
+plus a cross-build matrix over the four release targets (linux/darwin ×
+amd64/arm64) so a platform-specific break is caught without needing those
+runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags.
+
 ## Layout
 
 ```
 .
 ├── cmd/
 │   ├── otto/             # bot daemon: handler, commands, personas (Toto, Toot),
-│   │                     # markdown stripper, updater, watchdog, idle-gated rotator
+│   │                     # markdown stripper, updater, watchdog, idle-gated rotator,
+│   │                     # surface mux, voice bridge, instance lock
 │   └── otto-memory/      # MCP stdio server exposing memory_add/replace/remove + session_search
 ├── internal/
+│   ├── voice/            # local speech: whisper.cpp STT + piper TTS, wake word,
+│   │                     # VAD, barge-in, streaming sentence split, diagnostics
+│   ├── tui/              # Bubble Tea front end: minimal (art) and chat modes
+│   ├── artanim/          # 3D lightbulb rasterizer, Siri bars, boot reveal
 │   ├── auth/             # single-user allowlist
 │   ├── config/           # TOML config loader
 │   ├── telegram/         # Bot API wrapper, chunking, image download
@@ -105,7 +218,8 @@ go build ./cmd/otto-memory   # build the MCP server binary
 ├── TOTO.md               # Toto's persona (cat, busy-fallback + name-addressed chat)
 ├── TOOT.md               # Toot's persona (owl, release announcer + chat)
 └── go.mod                # Go 1.26; deps: BurntSushi/toml, go-telegram-bot-api/v5,
-                          # modernc.org/sqlite (pure-Go), modelcontextprotocol/go-sdk
+                          # modernc.org/sqlite (pure-Go), modelcontextprotocol/go-sdk,
+                          # charm.land/bubbletea+bubbles+lipgloss v2 (TUI only)
 ```
 
 ## Memory system
@@ -196,8 +310,10 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 | `mcp_config_path` | required | `~/.config/otto/mcp.json` |
 | `session_id_path` | required | `~/.local/state/otto/session_id` |
 | `system_prompt_path` | optional | copied from `SYSTEM.md` |
-| `toto_persona_path` / `toto_session_id_path` | optional | from `TOTO.md` |
-| `toot_persona_path` / `toot_session_id_path` | optional | from `TOOT.md` |
+| `toto_persona_path` | optional | copied from `TOTO.md` |
+| `toto_session_id_path` | `<session_id_path>_toto` | Toto's own session, so his history never mixes with Otto's |
+| `toot_persona_path` | optional | copied from `TOOT.md` |
+| `toot_session_id_path` | `<session_id_path>_toot` | Toot's own session |
 | `memory_dir` | `<session dir>/memory` | USER.md + MEMORY.md live here |
 | `state_db_path` | `<session dir>/state.db` | turn log + vectors |
 | `embed_ollama_url` | `http://localhost:11434` | local Ollama |
@@ -225,6 +341,9 @@ backstop, so this hook patch is optional but cleaner.
 - **Telegram messages not arriving:** check the bot token in `config.toml`, and that `telegram_allowed_user_id` matches the user you're texting from. Non-allowlisted users are silently dropped.
 - **Google auth expired:** re-run `setup.sh`; it will re-prompt for whichever credential is missing.
 - **Memory not persisting facts:** confirm `otto-memory` is in `mcp.json` (`grep otto-memory ~/.config/otto/mcp.json`) and that `~/.local/state/otto/memory/` is writable. Logs print `turn log` / `embed turn` errors at the `otto` journal.
+- **Voice not working:** run `otto voice-doctor`. It checks every piece — sox, whisper, piper, the decoder, playback, each model file including the `.onnx.json` sidecars piper needs but never names in its own errors — opens the microphone to confirm real samples arrive, and prints the `pacman` line for whatever is absent.
+- **`otto tui` refuses to start:** another Otto holds the lock, almost certainly the background service. `systemctl --user stop otto` (or `launchctl bootout gui/$(id -u)/com.otto.bot` on macOS), then retry. Two processes cannot share one bot token — Telegram would hand each message to whichever polled first.
+- **Otto talks over himself, or interrupts constantly:** the microphone is hearing the speakers. Only "shut up" and closers are meant to interrupt playback; if ordinary speech is cutting him off, lower the output volume or move the mic. Check `<state dir>/tui.log` for the wake-decision trail.
 - **Semantic search not working:** check Ollama (`systemctl --user status ollama` on Linux, `brew services list` on macOS) and `ollama list`. Without a pulled embedding model, `session_search` falls back to keyword (FTS5) and logs `session_search: embed unavailable, keyword-only`. To enable semantic recall after a fresh install: `ollama pull embeddinggemma`.
 - **Session never rotates:** the rotator fires when idle ≥ `rotate_idle_minutes` (regardless of session size), OR when `input_tokens` ≥ `rotate_hard_pct × model_context_tokens` AND you have paused for at least 5 minutes — whichever comes first. Otto must also be free (not mid-turn). The journal logs `rotator: rotated session ...` on success. Rotation cannot be disabled; to make it fire less often, raise `rotate_idle_minutes` and/or `model_context_tokens` (values ≤ 0 for either are reset to their defaults).
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.

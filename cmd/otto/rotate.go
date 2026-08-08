@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 )
@@ -61,6 +62,48 @@ func shouldRotate(tokens int, idle time.Duration, c rotateConfig) bool {
 		return true
 	}
 	return false
+}
+
+// describeRotation renders the rotator's state for /status: how full the
+// session is and how long until it clears.
+//
+// Rotation is the single most confusing thing Otto does from the outside — the
+// user experiences it as "he forgot", with no visible cause — so the countdown
+// is worth surfacing plainly. sessionEmpty distinguishes "already cleared" from
+// "tracking nothing yet", which look the same in the token count but mean
+// opposite things.
+func describeRotation(tokens int, idle time.Duration, sessionEmpty bool, c rotateConfig) string {
+	if c.ctxTokens <= 0 {
+		return "disabled"
+	}
+	if sessionEmpty {
+		return "no active session — next message starts fresh"
+	}
+	if tokens <= 0 {
+		return "no turn observed yet this session"
+	}
+	pct := float64(tokens) / float64(c.ctxTokens) * 100
+	usage := fmt.Sprintf("%d tok (%.0f%% of %d)", tokens, pct, c.ctxTokens)
+
+	if shouldRotate(tokens, idle, c) {
+		// Due, but the rotator still has to win the Otto slot, so say why it
+		// might not have happened yet rather than implying it has.
+		return usage + " — due now, clears at the next tick Otto is free"
+	}
+
+	// Both paths can be pending at once; report whichever fires first.
+	untilIdle := c.idleWindow - idle
+	best := untilIdle
+	reason := "idle reset"
+	if float64(tokens)/float64(c.ctxTokens) >= c.hard {
+		if untilGrace := hardRotateActiveGrace - idle; untilGrace < best {
+			best, reason = untilGrace, "hard cap (over budget, waiting for a pause)"
+		}
+	}
+	if best < 0 {
+		best = 0
+	}
+	return fmt.Sprintf("%s — %s in %s", usage, reason, best.Round(time.Second))
 }
 
 // runRotator is a long-lived goroutine (started from main) that periodically

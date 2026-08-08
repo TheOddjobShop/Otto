@@ -33,6 +33,18 @@ import (
 var version = "dev"
 
 func main() {
+	// Subcommands are handled before flag parsing so `otto voice-doctor` and
+	// `otto tui` work, while a bare `otto -config …` (what the service unit
+	// runs) keeps parsing exactly as it always has.
+	if handled, code := runSubcommand(os.Args); handled {
+		os.Exit(code)
+	}
+	tuiMode := len(os.Args) > 1 && os.Args[1] == "tui"
+	if tuiMode {
+		// Strip the subcommand so the flag package sees only flags.
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	}
+
 	configPath := flag.String("config", defaultConfigPath(), "path to config.toml")
 	ttyMode := flag.Bool("tty", false, "test mode: read messages from stdin, write replies to stdout (no Telegram)")
 	flag.Parse()
@@ -47,14 +59,36 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Refuse to start alongside another Otto. Two processes long-polling with
+	// one bot token do not error — Telegram just hands each update to whoever
+	// asks first, splitting messages between them at random. See lock.go.
+	stateDir := filepath.Dir(cfg.StateDBPath)
+	lock, err := acquireInstanceLock(stateDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "otto: %v\n", err)
+		os.Exit(1)
+	}
+	defer lock.Release()
+
 	var bot telegram.BotClient
-	if *ttyMode {
+	var mux *muxBot
+	switch {
+	case *ttyMode:
 		bot = newTTYBot(ctx, cfg.TelegramAllowedUserID, cancel)
 		fmt.Fprintln(os.Stderr, "[tty] type messages and press enter; ctrl-d to exit")
-	} else {
-		bot, err = telegram.NewBotClient(cfg.TelegramBotToken, "https://api.telegram.org/bot%s/%s")
-		if err != nil {
-			log.Fatalf("telegram: %v", err)
+	default:
+		tg, tgErr := telegram.NewBotClient(cfg.TelegramBotToken, "https://api.telegram.org/bot%s/%s")
+		if tgErr != nil {
+			log.Fatalf("telegram: %v", tgErr)
+		}
+		bot = tg
+		if tuiMode {
+			// The mux fans Telegram and the local front end into one update
+			// stream and routes each reply back to whichever surface it came
+			// from. Because it satisfies telegram.BotClient, nothing
+			// downstream — handler, pets, bus, commands — changes at all.
+			mux = newMuxBot(tg)
+			bot = mux
 		}
 	}
 
@@ -102,7 +136,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("toto persona: %v", err)
 	}
-	stateDir := filepath.Dir(cfg.StateDBPath)
 	petMCPPath, err := writeScopedPetMCPConfig(stateDir, cfg.MCPConfigPath)
 	if err != nil {
 		log.Fatalf("pet mcp config: %v", err)
@@ -185,6 +218,10 @@ func main() {
 		classifier: &execClassifier{binary: cfg.ClaudeBinaryPath, workDir: home, store: memStore},
 		// Pets rotate their own sessions on the idle window too.
 		petRotators: []petRotator{toto, toot},
+		// Telegram voice notes: transcribed locally, then handled as text.
+		// Nil when whisper or its model is absent — voice notes then get an
+		// explanatory reply instead of silence.
+		voiceSTT: newVoiceTranscriber(stateDir),
 	}
 
 	h.rotate = rotateConfig{
@@ -249,6 +286,12 @@ func main() {
 		runStorePruner(ctx, memStore)
 	}()
 	go h.runRotator(ctx)
+	// Liveness supervision for the pets. runWatchdog covers Otto only, which
+	// left a wedged Toto able to hold his mutex forever — blocking every later
+	// busy-fallback and, because Toto is how the Otto watchdog talks to the
+	// user, that watchdog's own reboot message too. Store-free, so it needs no
+	// busDrainWG tracking.
+	go runPetWatchdog(ctx, []supervisedPet{toto, toot})
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -257,6 +300,13 @@ func main() {
 		log.Printf("otto: received %s, shutting down", s)
 		cancel()
 	}()
+
+	// With every background goroutine running, hand the terminal to the UI.
+	// It owns the process from here: closing it cancels ctx, which unwinds the
+	// polling loop and the shutdown sequence below exactly as SIGTERM would.
+	if tuiMode && mux != nil {
+		go runTUI(ctx, cancel, h, mux, stateDir, cfg.TelegramAllowedUserID)
+	}
 
 	log.Printf("otto: starting; session=%s toto_session=%s toot_session=%s allowed_user=%d cwd=%s sysprompt=%dB toto_persona=%dB toot_persona=%dB memory_dir=%s state_db=%s embed=%s",
 		session.ID(), totoSession.ID(), tootSession.ID(), cfg.TelegramAllowedUserID, home, len(systemPrompt), len(totoPersona), len(tootPersona), cfg.MemoryDir, cfg.StateDBPath, embedder.Name())

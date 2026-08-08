@@ -39,9 +39,10 @@ chain — with a hard bound on chain depth.
 - **Dynamic agent registration.** `validTargets` is a closed set
   (`inbox.go:27`); adding a target requires a matching `switch` arm in
   `dispatchBusMessage`.
-- **User-sourced enqueue.** `source = "user"` is accepted and dispatched
-  (`bus.go:133-139`), but nothing in-tree produces such a row today. It is a
-  supported shape, not a live path.
+- ~~**User-sourced enqueue.**~~ **Now live — 2026-08-07.** `source = "user"` was
+  a supported shape with no producer; `otto say` (`cmd/otto/say.go`) is that
+  producer, so scheduled work can reach Otto as an ordinary turn. See
+  "Proactive messages" below.
 
 ## The inbox table
 
@@ -237,7 +238,37 @@ Otto's in-flight prompt and reply-tail snippet (`h.toto.BusyReply`). This is why
 delivered, so a bus message that arrives while Otto is busy is answered by Toto
 and then gone — consistent with the at-most-once contract above.
 
+## Proactive messages
+
+**Added 2026-08-07** (`cmd/otto/say.go`), replacing the non-goal above.
+
+`otto say "<message>"` enqueues a `source = "user"` row for the running daemon.
+The drain loop picks it up within 250 ms and `dispatchBusToOtto` hands it
+straight to `handleMessage` with no BUS CONTEXT block — telling Otto he is
+mid-chain when a cron job pinged him would be false.
+
+The motivation is what the alternative was. `SYSTEM.md` instructs Otto to build
+automations by writing scripts that call the Telegram Bot API directly with the
+token from his own config. Those messages land on the user's phone but never
+touch Otto: no session, no memory, no turn log. A morning briefing sent that way
+is invisible to `recent_turns` the moment the user replies to it, and Otto has
+no idea he "said" it — so "yes, do that" arrives with nothing to resolve
+against.
+
+Routed through the inbox instead, the same message becomes an ordinary turn:
+Otto composes it with his full context, it lands in memory like anything else,
+and a reply continues the conversation. `SYSTEM.md` now says to prefer `otto
+say`, reserving the raw API for notifications that are deliberately *not*
+conversations.
+
+`-to` targets a pet; `-timeout` waits for the row to be picked up, which is how
+a script can tell the daemon is actually running (the enqueue itself succeeds
+regardless — the queue is just a table).
+
 ## Testing
+
+`cmd/otto/say_test.go` covers the row shape (`source="user"`, empty sender,
+hop 0), target validation, message-size bounds, and stdin/argument resolution.
 
 `cmd/otto/bus_test.go` and `internal/store/inbox_test.go` cover: enqueue
 validation (targets, sources, sender/source pairing, empty body, negative and

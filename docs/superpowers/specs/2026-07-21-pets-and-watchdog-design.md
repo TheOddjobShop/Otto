@@ -37,9 +37,12 @@ that notices when Otto stops emitting and, failing recovery, kills and reports.
   about it" does not route.
 - **A generic pet plugin system.** Adding a pet is a code change: implement
   `Pet`, append to the registry in `main.go`.
-- **Watchdog coverage of pet turns.** `runWatchdog` observes `ottoState` only.
-  Toto and Toot each serialize on their own mutex and have no liveness
-  supervision.
+- ~~**Watchdog coverage of pet turns.**~~ **Superseded 2026-08-07 — pets are now
+  supervised.** `runWatchdog` still observes `ottoState` only, but a second
+  goroutine (`runPetWatchdog`, `cmd/otto/petwatchdog.go`) bounds pet turns. The
+  original reasoning — that a pet is cheap and short so a hang is tolerable —
+  missed that a pet holds its own mutex for the whole subprocess run, which made
+  a single wedge cascade. See "Pet liveness" below.
 
 ## The `Pet` interface
 
@@ -314,8 +317,54 @@ Holding `mu` across check + suppress + cancel also closes the TOCTOU window wher
 `cancel()` does not re-enter `mu`, so this cannot deadlock. `/restart` uses the
 same `cancelInflight(gen)` contract.
 
+## Pet liveness
+
+**Added 2026-08-07** (`cmd/otto/petwatchdog.go`), replacing the non-goal above.
+
+A pet holds its own `mu` for the entire Claude subprocess run. That makes a
+wedged pet turn qualitatively worse than a slow one, in two ways the original
+non-goal did not account for:
+
+- Every later call into that pet blocks forever. `dispatch` calls
+  `toto.BusyReply` synchronously on the dispatch goroutine, so each busy message
+  leaks a goroutine that never returns — and the user gets silence during exactly
+  the window Toto exists to cover.
+- `Toto.SystemMessage` takes the same mutex, and that is the channel Otto's own
+  watchdog uses to report. A wedged Toto therefore swallows the "otto wedged, i
+  rebooted him" notification: one hang silently disables the reporting path for a
+  different hang.
+
+`petLiveness` mirrors `ottoState`'s in-flight tracking in miniature —
+`begin` / `markEvent` / `end` / `cancelIfSilent` — and each pet exposes it via
+`supervisedPet.liveness()`. `runPetWatchdog` ticks every 30 s and cancels any
+pet silent for `petWatchdogCancelAfter` (2 minutes).
+
+Three deliberate differences from Otto's watchdog:
+
+- **No generation counter.** `ottoState.cancelInflight` needs one because the
+  watchdog sends Telegram messages between snapshotting and cancelling, so its
+  observation can go stale. `cancelIfSilent` observes and acts inside one
+  critical section, so there is no window to guard.
+- **No warn stage.** Otto's watchdog warns *through* Toto; a warning about Toto
+  has no messenger. A killed pet turn already surfaces as that pet's in-voice
+  fallback ("mrow. (sorry, brain not working…)"), which is the same information
+  in the register the user expects.
+- **Two minutes, not ten.** Pets run Haiku on a small prompt with three allowed
+  tools and no shell or filesystem. A healthy pet turn is seconds.
+
+The subprocess runs on a derived `callCtx` while the reply sends keep the
+uncancelled parent, so a killed turn still delivers its fallback rather than
+failing silently. Lock ordering is one-way — pet `mu` then `petLiveness.mu`, and
+the watchdog only ever takes the latter — so the pair cannot deadlock.
+
 ## Testing
 
+- `cmd/otto/petwatchdog_test.go` — silence-triggered cancellation, fresh turns
+  left alone, `markEvent` deferring the kill, idle and finished turns being
+  inert, cancel firing exactly once across repeated ticks, both pets satisfying
+  `supervisedPet`, clean exit on context cancellation, and a reproduction of the
+  original failure: a waiter blocked on a wedged turn's mutex is released once
+  the watchdog fires.
 - `cmd/otto/pets_test.go` — `TestPetRegistryMatch` covers the address grammar
   (every recognized form, the `hey` peel and its rejections, non-matching
   prefixes, body stripping); `TestPetRegistryFirstMatchWins` covers ordering.
@@ -337,6 +386,7 @@ same `cancelInflight(gen)` contract.
 ## Affected files
 
 - `cmd/otto/pets.go` — `Pet`, `petRegistry`, address matching.
+- `cmd/otto/petwatchdog.go` — `petLiveness`, `supervisedPet`, `runPetWatchdog`.
 - `cmd/otto/toto.go` — Toto persona, busy/direct/bus modes, `rotateIfIdle`,
   `SystemMessage`.
 - `cmd/otto/toot.go` — Toot persona, announce vs chat, update markers,

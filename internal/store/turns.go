@@ -7,6 +7,27 @@ import (
 	"time"
 )
 
+// Via records how a turn reached Otto.
+const (
+	// ViaText is a typed message — the default for every turn logged before
+	// voice existed, and for every Telegram message since.
+	ViaText = "text"
+	// ViaVoice is an exchange that happened in the spoken channel — the TUI's
+	// microphone, where the reply was said out loud rather than displayed.
+	//
+	// A Telegram voice note is deliberately NOT tagged this way: its input was
+	// spoken but its reply is ordinary text, so the stored exchange is as rich
+	// as any typed one. What this tag marks is the *reply* being speech, which
+	// is what makes the row different.
+	//
+	// It matters because spoken replies are held to two or three sentences, so
+	// a voice-heavy stretch leaves a thinner trail in memory than the same
+	// conversation typed. That is honest — the exchange really was terser —
+	// but a reader of session_search results should be able to tell, and a
+	// future change could weight or expand these rows without a migration.
+	ViaVoice = "voice"
+)
+
 // Turn is one logged exchange row.
 type Turn struct {
 	ID      int64
@@ -14,14 +35,23 @@ type Turn struct {
 	Role    string // "user" | "assistant"
 	Content string
 	TS      time.Time
+	Via     string // ViaText | ViaVoice
 }
 
 // AppendTurn inserts one turn and returns its row id. The AFTER INSERT trigger
 // keeps the FTS5 mirror in sync automatically.
 func (s *Store) AppendTurn(ctx context.Context, persona, role, content string) (int64, error) {
+	return s.AppendTurnVia(ctx, persona, role, content, ViaText)
+}
+
+// AppendTurnVia is AppendTurn with an explicit delivery channel.
+func (s *Store) AppendTurnVia(ctx context.Context, persona, role, content, via string) (int64, error) {
+	if via == "" {
+		via = ViaText
+	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO turns(persona, role, content, ts) VALUES (?, ?, ?, ?)`,
-		persona, role, content, time.Now().Unix(),
+		`INSERT INTO turns(persona, role, content, ts, via) VALUES (?, ?, ?, ?, ?)`,
+		persona, role, content, time.Now().Unix(), via,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: append turn: %w", err)
@@ -46,7 +76,7 @@ func (s *Store) SearchFTS(ctx context.Context, query string, limit int) ([]Turn,
 		limit = 10
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.id, t.persona, t.role, t.content, t.ts
+		SELECT t.id, t.persona, t.role, t.content, t.ts, t.via
 		FROM turns_fts f
 		JOIN turns t ON t.id = f.rowid
 		WHERE turns_fts MATCH ?
@@ -61,7 +91,7 @@ func (s *Store) SearchFTS(ctx context.Context, query string, limit int) ([]Turn,
 	for rows.Next() {
 		var tr Turn
 		var ts int64
-		if err := rows.Scan(&tr.ID, &tr.Persona, &tr.Role, &tr.Content, &ts); err != nil {
+		if err := rows.Scan(&tr.ID, &tr.Persona, &tr.Role, &tr.Content, &ts, &tr.Via); err != nil {
 			return nil, fmt.Errorf("store: scan: %w", err)
 		}
 		tr.TS = time.Unix(ts, 0)
@@ -90,8 +120,8 @@ func (s *Store) RecentTurns(ctx context.Context, limit int, beforeID int64) ([]T
 	// The inner query takes the newest rows; the outer flips them back into
 	// chronological order for the reader.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, persona, role, content, ts FROM (
-			SELECT id, persona, role, content, ts
+		SELECT id, persona, role, content, ts, via FROM (
+			SELECT id, persona, role, content, ts, via
 			FROM turns
 			WHERE (? <= 0 OR id < ?)
 			ORDER BY id DESC
@@ -107,7 +137,7 @@ func (s *Store) RecentTurns(ctx context.Context, limit int, beforeID int64) ([]T
 	for rows.Next() {
 		var tr Turn
 		var ts int64
-		if err := rows.Scan(&tr.ID, &tr.Persona, &tr.Role, &tr.Content, &ts); err != nil {
+		if err := rows.Scan(&tr.ID, &tr.Persona, &tr.Role, &tr.Content, &ts, &tr.Via); err != nil {
 			return nil, fmt.Errorf("store: scan recent turn: %w", err)
 		}
 		tr.TS = time.Unix(ts, 0)
