@@ -1,0 +1,74 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel an in-flight run when new commits land on the same ref — a stale
+# run's result is never the one anyone acts on.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: gofmt
+        # `gofmt -l` exits 0 even when it lists files, so the listing itself
+        # has to be the failure signal. Mirrors `make vet`.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needs to run on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test (race)
+        # The tree is full of goroutine coordination — the bus drain, the
+        # rotator, the watchdog, the pruner and every dispatch path — so the
+        # race detector is the point of running tests here at all.
+        run: go test -race ./...
+
+  # The bot runs on Arch and macOS, but CI only has ubuntu runners. A build
+  # matrix over the release targets catches a platform-specific break (a
+  # syscall, a build tag, a darwin-only path) without needing those runners.
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build ./...

@@ -77,6 +77,12 @@ go test -race ./...
 go build ./cmd/otto-memory   # build the MCP server binary
 ```
 
+CI runs the same checks on every push to `master` and every pull request
+(`.github/workflows/test.yml`): gofmt, `go vet`, `go build`, and `go test -race`,
+plus a cross-build matrix over the four release targets (linux/darwin ×
+amd64/arm64) so a platform-specific break is caught without needing those
+runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags.
+
 ## Layout
 
 ```
