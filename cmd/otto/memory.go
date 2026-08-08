@@ -201,10 +201,16 @@ func embedAndStoreWithSem(st *store.Store, emb embed.Embedder, turnID int64, con
 // closed" error is logged and harmless (WAL keeps the DB consistent; at worst
 // one turn's vector is lost and that turn is still keyword-searchable).
 func logTurn(ctx context.Context, st *store.Store, emb embed.Embedder, persona, role, content string) {
+	logTurnVia(ctx, st, emb, persona, role, content, store.ViaText)
+}
+
+// logTurnVia is logTurn with an explicit delivery channel (store.ViaText or
+// store.ViaVoice). See store.ViaVoice for why spoken turns are distinguished.
+func logTurnVia(ctx context.Context, st *store.Store, emb embed.Embedder, persona, role, content, via string) {
 	if st == nil || strings.TrimSpace(content) == "" {
 		return
 	}
-	id, err := st.AppendTurn(ctx, persona, role, content)
+	id, err := st.AppendTurnVia(ctx, persona, role, content, via)
 	if err != nil {
 		log.Printf("turn log (%s/%s): %v", persona, role, err)
 		return

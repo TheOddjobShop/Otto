@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS turns (
 	persona TEXT    NOT NULL,
 	role    TEXT    NOT NULL,
 	content TEXT    NOT NULL,
-	ts      INTEGER NOT NULL
+	ts      INTEGER NOT NULL,
+	via     TEXT    NOT NULL DEFAULT 'text'
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts
 	USING fts5(content, content='turns', content_rowid='id');
@@ -133,6 +134,9 @@ func Open(path string) (*Store, error) {
 // authoritative description rather than a historical artifact.
 var columnMigrations = []struct{ table, column, definition string }{
 	{"inbox", "hop", "INTEGER NOT NULL DEFAULT 0"},
+	// via records how a turn reached Otto: 'text' or 'voice'. Defaulting to
+	// 'text' makes every pre-existing row correct without a backfill.
+	{"turns", "via", "TEXT NOT NULL DEFAULT 'text'"},
 	// deliver_after / attempts back deferred bus delivery: a message for a
 	// busy Otto is returned to the queue with a future deliver_after instead
 	// of being dropped, and attempts bounds how long that can go on.

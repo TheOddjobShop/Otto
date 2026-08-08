@@ -103,7 +103,7 @@ func (s *Store) SearchSemanticModel(ctx context.Context, query []float32, model 
 	// the vectors_dim index; the model predicate, when requested, narrows
 	// further within the same-dimension rows.
 	sqlStmt := `
-		SELECT t.id, t.persona, t.role, t.content, t.ts, v.vec
+		SELECT t.id, t.persona, t.role, t.content, t.ts, t.via, v.vec
 		FROM vectors v
 		JOIN turns t ON t.id = v.turn_id
 		WHERE v.dim = ?`
@@ -132,7 +132,7 @@ func (s *Store) SearchSemanticModel(ctx context.Context, query []float32, model 
 		var tr Turn
 		var ts int64
 		var blob []byte
-		if err := rows.Scan(&tr.ID, &tr.Persona, &tr.Role, &tr.Content, &ts, &blob); err != nil {
+		if err := rows.Scan(&tr.ID, &tr.Persona, &tr.Role, &tr.Content, &ts, &tr.Via, &blob); err != nil {
 			return nil, fmt.Errorf("store: semantic scan: %w", err)
 		}
 		tr.TS = time.Unix(ts, 0)

@@ -44,7 +44,6 @@ func main() {
 		// Strip the subcommand so the flag package sees only flags.
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 	}
-	_ = tuiMode // wired to the terminal UI in the next change
 
 	configPath := flag.String("config", defaultConfigPath(), "path to config.toml")
 	ttyMode := flag.Bool("tty", false, "test mode: read messages from stdin, write replies to stdout (no Telegram)")
@@ -60,16 +59,39 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Refuse to start alongside another Otto. Two processes long-polling with
+	// one bot token do not error — Telegram just hands each update to whoever
+	// asks first, splitting messages between them at random. See lock.go.
+	stateDir := filepath.Dir(cfg.StateDBPath)
+	lock, err := acquireInstanceLock(stateDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "otto: %v\n", err)
+		os.Exit(1)
+	}
+	defer lock.Release()
+
 	var bot telegram.BotClient
-	if *ttyMode {
+	var mux *muxBot
+	switch {
+	case *ttyMode:
 		bot = newTTYBot(ctx, cfg.TelegramAllowedUserID, cancel)
 		fmt.Fprintln(os.Stderr, "[tty] type messages and press enter; ctrl-d to exit")
-	} else {
-		bot, err = telegram.NewBotClient(cfg.TelegramBotToken, "https://api.telegram.org/bot%s/%s")
-		if err != nil {
-			log.Fatalf("telegram: %v", err)
+	default:
+		tg, tgErr := telegram.NewBotClient(cfg.TelegramBotToken, "https://api.telegram.org/bot%s/%s")
+		if tgErr != nil {
+			log.Fatalf("telegram: %v", tgErr)
+		}
+		bot = tg
+		if tuiMode {
+			// The mux fans Telegram and the local front end into one update
+			// stream and routes each reply back to whichever surface it came
+			// from. Because it satisfies telegram.BotClient, nothing
+			// downstream — handler, pets, bus, commands — changes at all.
+			mux = newMuxBot(tg)
+			bot = mux
 		}
 	}
+	_ = mux // attached to the terminal UI in the next change
 
 	session, err := claude.LoadSession(cfg.SessionIDPath)
 	if err != nil {
@@ -115,7 +137,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("toto persona: %v", err)
 	}
-	stateDir := filepath.Dir(cfg.StateDBPath)
 	petMCPPath, err := writeScopedPetMCPConfig(stateDir, cfg.MCPConfigPath)
 	if err != nil {
 		log.Fatalf("pet mcp config: %v", err)

@@ -700,13 +700,25 @@ func (h *handler) handleMessage(ctx context.Context, u telegram.Update) {
 	}
 	h.otto.setModel(model)
 
+	// A turn from the local front end will be SPOKEN, which needs a different
+	// register entirely — the operational footer's bullets and ALL-CAPS labels
+	// are meaningless aloud, and a six-line answer that skims fine on a phone
+	// is interminable read out. Source "voice" also gives /tokens its own line
+	// for the spoken channel.
+	source := "main"
+	systemPrompt := composePromptWithTimeAndMemory(h.baseSystemPrompt, h.mem)
+	if isTUIChat(u.ChatID) {
+		source = "voice"
+		systemPrompt = composeVoicePrompt(systemPrompt)
+	}
+
 	h.runAndReply(callCtx, ctx, u.ChatID, claude.RunArgs{
 		Prompt:             u.Text,
 		SessionID:          h.session.ID(),
 		ImagePaths:         imagePaths,
 		Model:              model,
-		Source:             "main",
-		AppendSystemPrompt: composePromptWithTimeAndMemory(h.baseSystemPrompt, h.mem),
+		Source:             source,
+		AppendSystemPrompt: systemPrompt,
 	}, h.runner)
 }
 
@@ -875,8 +887,15 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	// Log turns only on the success path (reached after the error/non-success
 	// early returns above), so session_search surfaces real conversation
 	// content rather than "⚠️ Claude error" noise. Keep these here, not earlier.
-	logTurn(sendCtx, h.store, h.embedder, "otto", "user", args.Prompt)
-	logTurn(sendCtx, h.store, h.embedder, "otto", "assistant", out)
+	// Tag the channel: a spoken reply is held to a few sentences, so these
+	// rows are systematically thinner than typed ones and a later reader
+	// should be able to tell why (see store.ViaVoice).
+	via := store.ViaText
+	if isTUIChat(chatID) {
+		via = store.ViaVoice
+	}
+	logTurnVia(sendCtx, h.store, h.embedder, "otto", "user", args.Prompt, via)
+	logTurnVia(sendCtx, h.store, h.embedder, "otto", "assistant", out, via)
 	if len(lastResult.PermissionDenials) > 0 {
 		h.surfaceDenials(sendCtx, chatID, lastResult.PermissionDenials)
 	}
