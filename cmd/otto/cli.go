@@ -24,6 +24,7 @@ const usageText = `otto — single-user Telegram bot wrapping Claude Code
 Usage:
   otto [flags]           run the bot daemon (this is what the service runs)
   otto tui [flags]       run the daemon with a terminal UI and voice
+  otto say <message>     hand a message to the running Otto (for scheduled work)
   otto voice-doctor      check that everything the voice stack needs is present
 
 Flags:
@@ -42,6 +43,8 @@ func runSubcommand(args []string) (handled bool, code int) {
 		// The TUI shares the daemon's flag set; main handles it after
 		// stripping the subcommand.
 		return false, 0
+	case "say":
+		return true, runSay(args[2:])
 	case "voice-doctor":
 		return true, runVoiceDoctor(args[2:])
 	case "help", "-h", "--help":
