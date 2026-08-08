@@ -264,6 +264,66 @@ else
   echo "  [note] Ollama not installed — memory search will use keyword (FTS5) only."
 fi
 
+# ── Voice: local speech-to-text and text-to-speech (optional) ───────────────
+# Otto listens and speaks entirely on this machine — whisper.cpp for STT, piper
+# for TTS. Same reasoning as Ollama above: no API key, no per-token cost,
+# nothing leaves the box.
+#
+# Only the system binaries are installed here, because those need a package
+# manager. The models and the piper binary are plain downloads, so the Go binary
+# fetches whatever is missing on first run (`otto tui`) with visible progress.
+# That split means a fresh machine still works even if this block fails.
+#
+# Best-effort throughout: nothing here can abort setup. Without it Otto is
+# exactly the bot he was before — text only.
+echo ""
+echo "  Setting up local voice (optional)..."
+
+# sox captures the microphone; ffmpeg decodes Telegram's OGG/Opus voice notes.
+for tool in sox ffmpeg; do
+  if command -v "$tool" &>/dev/null; then
+    echo "  [ok] $tool present"
+    continue
+  fi
+  case "$PKG_MGR" in
+    pacman) sudo pacman -S --needed --noconfirm "$tool" || echo "  [!] $tool install failed" ;;
+    brew)   brew install "$tool" || echo "  [!] $tool install failed" ;;
+  esac
+done
+
+# whisper.cpp ships its CLI as `whisper-cli` (newer) or `whisper` (older), and
+# distros disagree about the package name, so probe for either binary first.
+if command -v whisper-cli &>/dev/null || command -v whisper &>/dev/null; then
+  echo "  [ok] whisper CLI present"
+else
+  case "$PKG_MGR" in
+    pacman)
+      sudo pacman -S --needed --noconfirm whisper.cpp 2>/dev/null \
+        || echo "  [!] whisper.cpp not in the repos — build it from github.com/ggerganov/whisper.cpp, or install from the AUR"
+      ;;
+    brew)
+      brew install whisper-cpp || echo "  [!] whisper-cpp install failed"
+      ;;
+  esac
+fi
+
+# Playback. sox's `play` always works as a fallback, so this only matters on a
+# desktop where paplay/aplay give better latency and mixer behaviour.
+if command -v paplay &>/dev/null || command -v aplay &>/dev/null \
+  || command -v play &>/dev/null || command -v afplay &>/dev/null; then
+  echo "  [ok] audio playback available"
+else
+  echo "  [!] no audio player found — install libpulse (paplay) or alsa-utils (aplay)"
+fi
+
+if command -v "$OTTO_BIN_DIR/otto" &>/dev/null || [ -x "$OTTO_BIN_DIR/otto" ]; then
+  echo ""
+  echo "  Voice check:"
+  "$OTTO_BIN_DIR/otto" voice-doctor 2>&1 | sed 's/^/  /' || true
+  echo ""
+  echo "  Models download automatically on the first \`otto tui\` run (~500 MB)."
+fi
+
 # ── Step 1: Google OAuth client (manual, one-time) ──────────────────────────
 if ! $HAS_GCAL_OAUTH; then
   clear
