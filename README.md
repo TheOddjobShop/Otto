@@ -124,6 +124,28 @@ Assets live in `<state dir>/voice/` and download on first use, with progress:
 Each persona gets a distinct voice on purpose: when Otto is mid-task and Toto
 covers for him, you hear that it's someone else without being told.
 
+## Scheduled work — `otto say`
+
+```bash
+otto say "good morning — give me today's brief"
+otto say -to toot "what version are we on?"
+echo "$(cat report.txt)" | otto say
+```
+
+Hands a message to the running Otto, who answers it with full context and logs
+the exchange to memory like any other turn. This is how a launchd job, systemd
+timer or cron entry should reach you.
+
+The distinction matters. A script that posts to the Telegram API directly sends
+text Otto never saw: it isn't in his session, isn't in `recent_turns`, and when
+you reply "yes, do that" he has nothing to resolve it against. Through `otto
+say`, the briefing *is* his turn, so replying to it just continues the
+conversation.
+
+`-timeout` waits for the daemon to pick the message up, which is how a script
+can tell Otto is actually running — the enqueue itself succeeds either way,
+since the queue is just a table.
+
 ## Operations
 
 ```bash
