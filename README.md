@@ -39,12 +39,13 @@ The script is idempotent — re-run anytime to add credentials, install missing 
 3. Build the `otto` binary and the **`otto-memory`** MCP server binary into `~/.local/bin/`.
 4. Create the memory directory (`~/.local/state/otto/memory/`) and state DB path.
 5. **Install Ollama** (pacman/brew), start its service, and **pull `embeddinggemma` + `nomic-embed-text`** for local semantic embeddings. Best-effort — if Ollama install or model pull fails, memory search degrades to keyword-only (FTS5) and setup continues.
-6. **Install the voice binaries** — `ffmpeg` and `whisper.cpp` in both modes (Telegram voice notes are files, so they need no audio hardware); `sox` and a player only on a desktop. On a desktop it also pre-downloads the speech models so nothing stalls on first launch. Best-effort — without it Otto is exactly the text-only bot he was before. Finishes by printing `otto voice-doctor`.
-7. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
-8. Browser sign-ins for Google Calendar, Drive, Gmail.
-9. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
-10. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms. `mcp.json` registers the local `otto-memory` server alongside the community MCPs.
-11. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy. On macOS, install a launchd user agent at `~/Library/LaunchAgents/com.otto.bot.plist` (with `KeepAlive=true` so `/update`'s SIGTERM auto-respawns) and bootstrap it into the current session.
+6. **Verify every credential against the service that will use it** — the Telegram token via `getMe`, the Notion token via `/v1/users/me`, the Google client JSON by shape. A bad value is caught at the prompt, with the service's own error, and you get to retype it. Values already in `config.toml` are re-checked too, so a revoked token surfaces here rather than at boot.
+7. **Install the voice binaries** — `ffmpeg` and `whisper.cpp` in both modes (Telegram voice notes are files, so they need no audio hardware); `sox` and a player only on a desktop. On a desktop it also pre-downloads the speech models so nothing stalls on first launch. Best-effort — without it Otto is exactly the text-only bot he was before. Finishes by printing `otto voice-doctor`.
+8. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
+9. Browser sign-ins for Google Calendar, Drive, Gmail.
+10. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
+11. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms. `mcp.json` registers the local `otto-memory` server alongside the community MCPs.
+12. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy. On macOS, install a launchd user agent at `~/Library/LaunchAgents/com.otto.bot.plist` (with `KeepAlive=true` so `/update`'s SIGTERM auto-respawns) and bootstrap it into the current session.
 
 ## Manual smoke test
 
@@ -365,6 +366,8 @@ backstop, so this hook patch is optional but cleaner.
 
 - **`go build` fails:** check `go.mod`'s `go` directive matches your installed Go (`go version`).
 - **Otto not starting:** `journalctl --user -u otto -n 100`. Common causes: missing `~/.config/otto/client_secret.json`, missing `claude` on PATH (the unit's `Environment=PATH=` covers `~/.local/bin` and standard locations).
+- **`telegram: Unauthorized` at startup:** the bot token is wrong or was revoked. Re-run `./setup.sh` — it now re-checks the token already in `config.toml` against `getMe`, tells you Telegram's own reason, and re-prompts. Get a fresh one from @BotFather → `/mybots` → your bot → API Token.
+- **Otto ignores every message:** `telegram_allowed_user_id` doesn't match your account, so messages are dropped silently by design. Re-run `./setup.sh`; it detects your ID from a message you send rather than asking you to copy it.
 - **Telegram messages not arriving:** check the bot token in `config.toml`, and that `telegram_allowed_user_id` matches the user you're texting from. Non-allowlisted users are silently dropped.
 - **Google auth expired:** re-run `setup.sh`; it will re-prompt for whichever credential is missing.
 - **Memory not persisting facts:** confirm `otto-memory` is in `mcp.json` (`grep otto-memory ~/.config/otto/mcp.json`) and that `~/.local/state/otto/memory/` is writable. Logs print `turn log` / `embed turn` errors at the `otto` journal.
