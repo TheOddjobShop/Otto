@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -54,6 +55,12 @@ type handler struct {
 	// than silence.
 	voiceSTT voice.Transcriber
 
+	// voiceSink taps streamed assistant text for turns addressed to the local
+	// surface, so the front end can begin speaking before generation
+	// finishes. Nil disables streaming — replies are then spoken whole once
+	// they arrive.
+	voiceSink voiceStreamSink
+
 	// voiceDecode transcodes a voice note into the WAV whisper expects. A
 	// field rather than a direct call so the download → decode → transcribe
 	// path is testable without a real Opus file and a real transcoder. Nil
@@ -77,6 +84,17 @@ type handler struct {
 	// still hold the Otto slot.
 	dispatchWG sync.WaitGroup
 }
+
+// voiceStreamSink receives assistant text as it streams, plus a signal that
+// the turn is over. Implemented by voiceBridge.
+type voiceStreamSink interface {
+	Chunk(text string)
+	Finish()
+}
+
+// errQueueFull is returned when the front end submits faster than Otto can
+// accept. Surfaced rather than swallowed so the UI can say so.
+var errQueueFull = errors.New("otto: local message queue is full")
 
 // WaitDispatches blocks until all dispatch goroutines spawned by the
 // polling loop have returned. Call after runPollingLoop returns to ensure
@@ -758,6 +776,10 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 		})
 	}
 
+	// A turn bound for the local surface streams its sentences to the voice
+	// bridge as they form, so speech starts before generation finishes.
+	voiceTurn := isTUIChat(chatID) && h.voiceSink != nil
+
 	go func() {
 		defer close(doneParsing)
 		for ev := range events {
@@ -766,6 +788,9 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 			case claude.AssistantTextEvent:
 				assistantText.WriteString(e.Text)
 				h.otto.appendSnippet(e.Text)
+				if voiceTurn {
+					h.voiceSink.Chunk(e.Text)
+				}
 			case claude.SessionEvent:
 				capturedSessionID = e.ID
 			case claude.ToolUseEvent:
@@ -798,6 +823,14 @@ func (h *handler) runAndReply(callCtx, sendCtx context.Context, chatID int64, ar
 	err := runner.Run(callCtx, args)
 	close(events)
 	<-doneParsing
+
+	// Close the spoken turn as soon as the stream ends, flushing any trailing
+	// clause. Deliberately before the error branches below: a failed turn must
+	// still release the listener, or it would sit in "thinking…" unable to
+	// hear the user ask what went wrong.
+	if voiceTurn {
+		h.voiceSink.Finish()
+	}
 
 	// Close the bookend. Recorded before the error/non-success early returns
 	// below so a failed turn is still marked finished rather than looking

@@ -62,8 +62,46 @@ Two ways in:
   "otto" and he answers out loud. See the section below.
 
 ```bash
+otto tui               # the front end: wake word, spoken replies, lightbulb
 otto voice-doctor      # check every piece and print exactly what's missing
 ```
+
+### `otto tui`
+
+A boot reveal, then a spinning lightbulb over an audio-reactive bar cluster and
+one line of status. Say **"otto"** and he answers out loud.
+
+| | |
+|---|---|
+| `otto` | wake word. Say it alone for an acknowledgment, or with your request in the same breath |
+| — | once he's answered you're still armed: follow-ups need no wake word |
+| "thanks" / "that's all" / "bye" | ends the conversation. No model call — it's a fast path |
+| "otto, shut up" | mutes instantly, killing playback mid-sentence |
+| "otto, wake up" | unmutes |
+| any key | type to open the chat pane; `esc` closes it and keeps your draft |
+| `m` | mute toggle (on an empty input) |
+| `ctrl+c` | quit |
+
+Otto starts speaking **before he finishes thinking** — his reply is split into
+sentences as it streams, so the first one plays while the rest is still being
+generated.
+
+While he's speaking, only "shut up" and closers interrupt. A question asked over
+him waits and is heard as a follow-up once he stops. That's deliberate: Otto says
+his own name in replies and the microphone hears the speakers, so anything less
+selective self-interrupts constantly.
+
+**One process at a time.** `otto tui` *is* Otto — it polls Telegram too, so your
+phone keeps working while the UI is up. That means you can't run the service at
+the same time: two pollers sharing one bot token would split your messages
+between them at random. Otto takes a lock at startup and refuses with the exact
+command to stop the other one.
+
+```bash
+systemctl --user stop otto     # then: otto tui
+```
+
+Logs go to `<state dir>/tui.log` while the UI owns the terminal.
 
 `voice-doctor` is the first thing to run when voice misbehaves. It checks sox,
 whisper, piper, the decoder, playback, every model file (including the
@@ -129,11 +167,14 @@ runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags
 .
 ├── cmd/
 │   ├── otto/             # bot daemon: handler, commands, personas (Toto, Toot),
-│   │                     # markdown stripper, updater, watchdog, idle-gated rotator
+│   │                     # markdown stripper, updater, watchdog, idle-gated rotator,
+│   │                     # surface mux, voice bridge, instance lock
 │   └── otto-memory/      # MCP stdio server exposing memory_add/replace/remove + session_search
 ├── internal/
 │   ├── voice/            # local speech: whisper.cpp STT + piper TTS, wake word,
 │   │                     # VAD, barge-in, streaming sentence split, diagnostics
+│   ├── tui/              # Bubble Tea front end: minimal (art) and chat modes
+│   ├── artanim/          # 3D lightbulb rasterizer, Siri bars, boot reveal
 │   ├── auth/             # single-user allowlist
 │   ├── config/           # TOML config loader
 │   ├── telegram/         # Bot API wrapper, chunking, image download
@@ -154,7 +195,8 @@ runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags
 ├── TOTO.md               # Toto's persona (cat, busy-fallback + name-addressed chat)
 ├── TOOT.md               # Toot's persona (owl, release announcer + chat)
 └── go.mod                # Go 1.26; deps: BurntSushi/toml, go-telegram-bot-api/v5,
-                          # modernc.org/sqlite (pure-Go), modelcontextprotocol/go-sdk
+                          # modernc.org/sqlite (pure-Go), modelcontextprotocol/go-sdk,
+                          # charm.land/bubbletea+bubbles+lipgloss v2 (TUI only)
 ```
 
 ## Memory system
