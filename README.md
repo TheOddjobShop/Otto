@@ -24,11 +24,12 @@ The script is idempotent — re-run anytime to add credentials, install missing 
 3. Build the `otto` binary and the **`otto-memory`** MCP server binary into `~/.local/bin/`.
 4. Create the memory directory (`~/.local/state/otto/memory/`) and state DB path.
 5. **Install Ollama** (pacman/brew), start its service, and **pull `embeddinggemma` + `nomic-embed-text`** for local semantic embeddings. Best-effort — if Ollama install or model pull fails, memory search degrades to keyword-only (FTS5) and setup continues.
-6. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
-7. Browser sign-ins for Google Calendar, Drive, Gmail.
-8. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
-9. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms. `mcp.json` registers the local `otto-memory` server alongside the community MCPs.
-10. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy. On macOS, install a launchd user agent at `~/Library/LaunchAgents/com.otto.bot.plist` (with `KeepAlive=true` so `/update`'s SIGTERM auto-respawns) and bootstrap it into the current session.
+6. **Install the voice system binaries** — `sox` (microphone), `ffmpeg` (decodes Telegram's Opus voice notes), `whisper.cpp` (speech-to-text) — then run `otto voice-doctor` and print the result. Also best-effort: without it Otto is exactly the text-only bot he was before. The models and the piper binary are plain downloads, so they fetch on the first `otto tui` run with visible progress (~500 MB) rather than here.
+7. Walk through one-time Google Cloud Console setup (OAuth Desktop client).
+8. Browser sign-ins for Google Calendar, Drive, Gmail.
+9. Prompt for Notion integration token, Telegram bot token + your Telegram user ID. (Anthropic auth is delegated to Claude Code — see "Claude Code authentication" below.)
+10. Write `~/.config/otto/{config.toml, mcp.json, client_secret.json}` with `0600` perms. `mcp.json` registers the local `otto-memory` server alongside the community MCPs.
+11. On Linux, install a `systemd --user` service at `~/.config/systemd/user/otto.service`, enable lingering, start the service, and tail the journal briefly to confirm it's healthy. On macOS, install a launchd user agent at `~/Library/LaunchAgents/com.otto.bot.plist` (with `KeepAlive=true` so `/update`'s SIGTERM auto-respawns) and bootstrap it into the current session.
 
 ## Manual smoke test
 
@@ -340,6 +341,9 @@ backstop, so this hook patch is optional but cleaner.
 - **Telegram messages not arriving:** check the bot token in `config.toml`, and that `telegram_allowed_user_id` matches the user you're texting from. Non-allowlisted users are silently dropped.
 - **Google auth expired:** re-run `setup.sh`; it will re-prompt for whichever credential is missing.
 - **Memory not persisting facts:** confirm `otto-memory` is in `mcp.json` (`grep otto-memory ~/.config/otto/mcp.json`) and that `~/.local/state/otto/memory/` is writable. Logs print `turn log` / `embed turn` errors at the `otto` journal.
+- **Voice not working:** run `otto voice-doctor`. It checks every piece — sox, whisper, piper, the decoder, playback, each model file including the `.onnx.json` sidecars piper needs but never names in its own errors — opens the microphone to confirm real samples arrive, and prints the `pacman` line for whatever is absent.
+- **`otto tui` refuses to start:** another Otto holds the lock, almost certainly the background service. `systemctl --user stop otto` (or `launchctl bootout gui/$(id -u)/com.otto.bot` on macOS), then retry. Two processes cannot share one bot token — Telegram would hand each message to whichever polled first.
+- **Otto talks over himself, or interrupts constantly:** the microphone is hearing the speakers. Only "shut up" and closers are meant to interrupt playback; if ordinary speech is cutting him off, lower the output volume or move the mic. Check `<state dir>/tui.log` for the wake-decision trail.
 - **Semantic search not working:** check Ollama (`systemctl --user status ollama` on Linux, `brew services list` on macOS) and `ollama list`. Without a pulled embedding model, `session_search` falls back to keyword (FTS5) and logs `session_search: embed unavailable, keyword-only`. To enable semantic recall after a fresh install: `ollama pull embeddinggemma`.
 - **Session never rotates:** the rotator fires when idle ≥ `rotate_idle_minutes` (regardless of session size), OR when `input_tokens` ≥ `rotate_hard_pct × model_context_tokens` AND you have paused for at least 5 minutes — whichever comes first. Otto must also be free (not mid-turn). The journal logs `rotator: rotated session ...` on success. Rotation cannot be disabled; to make it fire less often, raise `rotate_idle_minutes` and/or `model_context_tokens` (values ≤ 0 for either are reset to their defaults).
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.
