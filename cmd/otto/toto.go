@@ -131,7 +131,15 @@ type Toto struct {
 
 	mu         sync.Mutex // serializes Toto's own --resume against the toto session
 	lastActive time.Time  // last reply time; drives idle session rotation (guarded by mu)
+
+	// live bounds an in-flight turn so a wedged subprocess can't hold mu
+	// forever — which would block every later busy-fallback AND the Otto
+	// watchdog's SystemMessage. See petwatchdog.go.
+	live petLiveness
 }
+
+// liveness exposes Toto's in-flight turn state to runPetWatchdog.
+func (t *Toto) liveness() *petLiveness { return &t.live }
 
 // rotateIfIdle clears Toto's session if it has gone idle for at least window,
 // mirroring Otto's idle reset. Pet sessions otherwise live forever and answer
@@ -272,6 +280,15 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 	defer t.mu.Unlock()
 	t.lastActive = time.Now()
 
+	// Bound this turn (petwatchdog.go). callCtx is what the subprocess runs
+	// under; the sends below deliberately keep using the uncancelled parent
+	// ctx, so a killed turn still delivers Toto's in-voice fallback rather
+	// than failing silently — which is the whole point of having a fallback.
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	t.live.begin(cancel)
+	defer t.live.end()
+
 	systemPrompt := t.persona
 	if bc != nil {
 		// Bus-sourced turn: prepend the BUS CONTEXT + HOPS REMAINING block
@@ -342,6 +359,9 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 	go func() {
 		defer close(doneParsing)
 		for ev := range events {
+			// Any event means the subprocess is alive, so a slow-but-working
+			// turn is never killed — the watchdog measures silence, not age.
+			t.live.markEvent()
 			switch e := ev.(type) {
 			case claude.AssistantTextEvent:
 				assistantText.WriteString(e.Text)
@@ -379,7 +399,7 @@ func (t *Toto) replyWithContext(ctx context.Context, chatID int64, userMessage s
 		hop = bc.Hop
 	}
 	runner := t.runner.WithEnv(busEnv(hop, "toto"))
-	err := runner.Run(ctx, claude.RunArgs{
+	err := runner.Run(callCtx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),
 		Model:              totoModel,

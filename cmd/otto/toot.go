@@ -93,7 +93,14 @@ type Toot struct {
 
 	mu         sync.Mutex // serializes Toot's own --resume against the toot session
 	lastActive time.Time  // last reply time; drives idle session rotation (guarded by mu)
+
+	// live bounds an in-flight turn so a wedged subprocess can't hold mu
+	// forever. See petwatchdog.go.
+	live petLiveness
 }
+
+// liveness exposes Toot's in-flight turn state to runPetWatchdog.
+func (t *Toot) liveness() *petLiveness { return &t.live }
 
 // tootUpdateMarker is the literal string Toot's LLM is instructed to
 // emit when the user has authorized an install during chat. The
@@ -194,6 +201,13 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 	defer t.mu.Unlock()
 	t.lastActive = time.Now()
 
+	// Bound this turn (petwatchdog.go). Sends below keep the uncancelled
+	// parent ctx so a killed turn still delivers Toot's static fallback.
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	t.live.begin(cancel)
+	defer t.live.end()
+
 	// Build the per-call system prompt with a strings.Builder to avoid the
 	// quadratic allocation behaviour of repeated += on a growing string.
 	// Each += copies all accumulated bytes so far; with ~40 concatenations
@@ -289,6 +303,9 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 	go func() {
 		defer close(doneParsing)
 		for ev := range events {
+			// Any event means the subprocess is alive; the watchdog measures
+			// silence, not age, so a slow-but-working turn is never killed.
+			t.live.markEvent()
 			switch e := ev.(type) {
 			case claude.AssistantTextEvent:
 				assistantText.WriteString(e.Text)
@@ -310,7 +327,7 @@ func (t *Toot) reply(ctx context.Context, chatID int64, userMessage string, bc *
 		hop = bc.Hop
 	}
 	runner := t.runner.WithEnv(busEnv(hop, "toot"))
-	err := runner.Run(ctx, claude.RunArgs{
+	err := runner.Run(callCtx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),
 		Model:              tootModel,
@@ -408,6 +425,13 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 	defer t.mu.Unlock()
 	t.lastActive = time.Now()
 
+	// Bound this turn (petwatchdog.go). Announce runs from the updater's
+	// goroutine, so a wedge here would hold t.mu against every chat turn too.
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	t.live.begin(cancel)
+	defer t.live.end()
+
 	systemPrompt := t.persona
 	if systemPrompt != "" {
 		systemPrompt += "\n\n"
@@ -453,6 +477,9 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 	go func() {
 		defer close(doneParsing)
 		for ev := range events {
+			// Any event means the subprocess is alive; the watchdog measures
+			// silence, not age, so a slow-but-working turn is never killed.
+			t.live.markEvent()
 			switch e := ev.(type) {
 			case claude.AssistantTextEvent:
 				assistantText.WriteString(e.Text)
@@ -465,7 +492,7 @@ func (t *Toot) Announce(ctx context.Context, chatID int64, currentVersion, newTa
 		}
 	}()
 
-	err := t.runner.Run(ctx, claude.RunArgs{
+	err := t.runner.Run(callCtx, claude.RunArgs{
 		Prompt:             prompt,
 		SessionID:          t.session.ID(),
 		Model:              tootModel,

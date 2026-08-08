@@ -40,7 +40,7 @@ After `setup.sh` reports success, on Telegram:
 - Send `/new` then `What's my name?` — should not remember (session cleared); but `Do you know my VS Code preference?` should still answer "light mode" because the memory core survives `/new`.
 - Send `What did we talk about earlier?` — Otto calls `session_search` (semantic + keyword) over `state.db`.
 - Send `/whoami` — prints your Telegram user ID and current session ID.
-- Send `/status` — prints uptime + session.
+- Send `/status` — prints uptime, busy/idle state, the model the last turn ran on, the session id, and the state of the background machinery: how full the session is and how long until it rotates, whether embeddings are actually working (from the last real attempt, not a probe), when the store was last pruned and how many rows went, and how many bus messages are queued vs. ready to deliver now. Every lookup is in-memory or one indexed `COUNT`, so it stays fast even when something is wrong.
 - Send `/restart` — interrupts an in-flight Claude call.
 - Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify / flush), plus an estimated dollar cost broken down by model. The cost is computed from published list prices in `cmd/otto/pricing.go` and assumes the default 5-minute cache TTL; it is an estimate, not a billing figure, and any model without a rate card (e.g. turns that inherited Claude Code's own model) is named as excluded rather than silently counted as free.
 - Send a photo with caption "describe this" — Otto downloads it and forwards to Claude via `@<path>`.
@@ -76,6 +76,12 @@ make vet                # go vet + gofmt check
 go test -race ./...
 go build ./cmd/otto-memory   # build the MCP server binary
 ```
+
+CI runs the same checks on every push to `master` and every pull request
+(`.github/workflows/test.yml`): gofmt, `go vet`, `go build`, and `go test -race`,
+plus a cross-build matrix over the four release targets (linux/darwin ×
+amd64/arm64) so a platform-specific break is caught without needing those
+runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags.
 
 ## Layout
 
@@ -197,8 +203,10 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 | `mcp_config_path` | required | `~/.config/otto/mcp.json` |
 | `session_id_path` | required | `~/.local/state/otto/session_id` |
 | `system_prompt_path` | optional | copied from `SYSTEM.md` |
-| `toto_persona_path` / `toto_session_id_path` | optional | from `TOTO.md` |
-| `toot_persona_path` / `toot_session_id_path` | optional | from `TOOT.md` |
+| `toto_persona_path` | optional | copied from `TOTO.md` |
+| `toto_session_id_path` | `<session_id_path>_toto` | Toto's own session, so his history never mixes with Otto's |
+| `toot_persona_path` | optional | copied from `TOOT.md` |
+| `toot_session_id_path` | `<session_id_path>_toot` | Toot's own session |
 | `memory_dir` | `<session dir>/memory` | USER.md + MEMORY.md live here |
 | `state_db_path` | `<session dir>/state.db` | turn log + vectors |
 | `embed_ollama_url` | `http://localhost:11434` | local Ollama |

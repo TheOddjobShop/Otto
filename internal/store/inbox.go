@@ -218,6 +218,23 @@ func (s *Store) DequeueAll(ctx context.Context) ([]InboxMsg, error) {
 	return out, nil
 }
 
+// InboxDepth reports how many inbox rows are still waiting: total undelivered,
+// and how many of those are visible right now (deliver_after has elapsed).
+//
+// The two differ precisely when a message has been deferred for a busy Otto,
+// which is the case worth being able to see — "3 queued, 1 ready" says the bus
+// is working through a backlog, while "3 queued, 3 ready" alongside a healthy
+// drain loop would say something is wrong with dispatch itself.
+func (s *Store) InboxDepth(ctx context.Context) (queued, ready int, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(CASE WHEN deliver_after <= ? THEN 1 ELSE 0 END), 0)
+		FROM inbox WHERE delivered = 0`, time.Now().Unix())
+	if err := row.Scan(&queued, &ready); err != nil {
+		return 0, 0, fmt.Errorf("store: inbox depth: %w", err)
+	}
+	return queued, ready, nil
+}
+
 // MaxDeliveryAttempts bounds how many times a message may be deferred before
 // the bus gives up on it. Paired with the dispatcher's retry delay this sets
 // the total window a message will wait for a busy recipient; the dispatcher
