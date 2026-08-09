@@ -95,9 +95,15 @@ one line of status. Say **"otto"** and he answers out loud.
 | "otto, go away" | ends the conversation, back to waiting for the wake word |
 | "thanks" / "that's all" / "bye" | same thing, politely. No model call — it's a fast path |
 | "otto, shut up" | mutes; `m` or "otto, wake up" brings him back |
-| any key | type to open the chat pane; `esc` closes it and keeps your draft |
+| any key | type to open the chat pane; `enter` sends, `esc` closes it and keeps your draft |
+| `/new`, `/status`, … | every slash command works from the chat pane, exactly as on Telegram |
 | `m` | mute toggle (on an empty input) |
 | `ctrl+c` | quit |
+
+Typing goes through the same handler as everything else, so the commands are
+the ones you already know. `/new` starts Otto a fresh session **and clears the
+transcript on screen** — the pane never outlives the context it describes,
+whether you send it from here or from your phone.
 
 **The microphone is off while Otto thinks and speaks.** Not ignored — released.
 The moment your request is endpointed there is no capture process at all, and

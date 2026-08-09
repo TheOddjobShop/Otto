@@ -72,6 +72,9 @@ func runTUI(ctx context.Context, cancel context.CancelFunc, h *handler, mux *mux
 		Version: version,
 	})
 	mux.AttachSurface(&localFanout{ui: ui, bridge: bridge})
+	// /new clears Otto's session from either surface; the pane on screen must
+	// not outlive the context it belongs to.
+	h.onSessionReset = ui.SessionReset
 
 	if vc != nil {
 		go func() {

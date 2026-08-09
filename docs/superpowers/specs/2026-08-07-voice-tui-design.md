@@ -295,8 +295,19 @@ with the academic-lockdown mode dropped — that was a feature of the other proj
   `heard: "…"` / `thinking…` / `speaking: "…"` / `muted`.
 - **Chat mode** — type any printable character to enter; scrollback plus input.
   Voice turns mirror into the same scrollback, so one transcript covers both.
-- **Keys** — `m` mute toggle (on an empty input), `esc` back to minimal,
-  `ctrl+c` quit.
+- **Keys** — `enter` sends, `m` mute toggle (on an empty input), `esc` back to
+  minimal keeping the draft, `ctrl+c` quit. `handleKey` reports whether it
+  consumed the press; anything it did not consume falls through to the textarea,
+  which is what makes ordinary editing (characters, backspace, arrows) work.
+- **Slash commands** — typed text goes through `muxBot.Submit` like any other
+  message, so `handler.tryCommand` sees it and every command works from the pane
+  unchanged.
+- **Session resets clear the scrollback.** `/new` fires `handler.onSessionReset`
+  on the branch that actually cleared, and the front end wipes its transcript.
+  A transcript that outlives its session is worse than stale: it invites the
+  referential follow-up ("do the second one") that a cleared session cannot
+  resolve. The signal rides the reply channel so the wipe is ordered *before*
+  its own confirmation.
 
 ### Streaming TTS
 

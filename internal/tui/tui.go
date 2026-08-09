@@ -59,6 +59,11 @@ type animTickMsg time.Time
 type replyMsg struct {
 	text string
 	html bool
+	// reset clears the transcript instead of appending to it. It rides the
+	// same channel as replies rather than a channel of its own so ordering is
+	// preserved: /new wipes the pane and *then* prints its confirmation, which
+	// is the opposite of what two independent channels would race into.
+	reset bool
 }
 
 type voiceEventMsg struct {
@@ -167,6 +172,21 @@ func (m *Model) Deliver(ctx context.Context, text string, isHTML bool) {
 	}
 }
 
+// SessionReset clears the transcript. Called when Otto's conversation session
+// is cleared — by /new from here or from Telegram — so what is on screen never
+// outlives the context it belongs to.
+//
+// Blocks briefly rather than dropping, unlike Deliver: a dropped reply costs one
+// line, while a dropped reset leaves the pane permanently misrepresenting what
+// Otto remembers. The timeout is there so a dead UI still cannot wedge the
+// caller.
+func (m *Model) SessionReset() {
+	select {
+	case m.replies <- replyMsg{reset: true}:
+	case <-time.After(time.Second):
+	}
+}
+
 // Init starts the animation loop and the event pumps.
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{animTick(), waitReply(m.replies)}
@@ -218,10 +238,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize(msg.Width, msg.Height)
 
 	case tea.KeyPressMsg:
-		return m.handleKey(msg)
+		// A consumed key is one the UI acted on itself — enter, esc, the mute
+		// toggle. Everything else is ordinary text editing and has to fall
+		// through to the textarea below, which is the whole point of not
+		// returning here.
+		cmd, consumed := m.handleKey(msg)
+		if consumed {
+			return m, cmd
+		}
+		cmds = append(cmds, cmd)
 
 	case replyMsg:
-		m.appendMessage("otto", cleanForDisplay(msg.text, msg.html))
+		if msg.reset {
+			m.clearTranscript()
+		} else {
+			m.appendMessage("otto", cleanForDisplay(msg.text, msg.html))
+		}
 		return m, waitReply(m.replies)
 
 	case voiceEventMsg:
@@ -243,42 +275,46 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+// handleKey acts on the keys the UI owns and reports whether it consumed the
+// press. An unconsumed key belongs to the textarea — Update forwards it there.
+func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	key := msg.String()
 
 	if key == "ctrl+c" {
-		return m, tea.Quit
+		return tea.Quit, true
 	}
 	if m.booting {
 		// Any key skips the boot animation. Nobody wants to watch it twice.
 		m.booting = false
-		return m, m.textarea.Focus()
+		return m.textarea.Focus(), true
 	}
 
 	if m.mode == modeMinimal {
 		switch {
 		case key == "m" || key == "M":
 			m.toggleMute()
-			return m, nil
+			return nil, true
 		case key == "enter":
 			m.mode = modeChat
-			return m, m.textarea.Focus()
+			return m.textarea.Focus(), true
 		case len(key) == 1 && key >= " " && key <= "~":
 			// Typing anything opens chat with that character already in the
-			// box, so there is no "press enter first" step.
+			// box, so there is no "press enter first" step. Consumed, because
+			// the character is placed here — letting it through as well would
+			// type it twice.
 			m.mode = modeChat
 			m.textarea.SetValue(key)
 			m.textarea.CursorEnd()
-			return m, m.textarea.Focus()
+			return m.textarea.Focus(), true
 		}
-		return m, nil
+		return nil, true
 	}
 
 	// Chat mode. 'm' on an empty box is the mute toggle; with text present it
 	// types normally, so messages can use the letter freely.
 	if (key == "m" || key == "M") && strings.TrimSpace(m.textarea.Value()) == "" {
 		m.toggleMute()
-		return m, nil
+		return nil, true
 	}
 
 	switch key {
@@ -286,19 +322,21 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Keep whatever is half-typed; only the chrome goes away.
 		m.mode = modeMinimal
 		m.textarea.Blur()
-		return m, nil
+		return nil, true
 	case "enter":
 		val := strings.TrimSpace(m.textarea.Value())
 		if val == "" {
 			m.mode = modeMinimal
 			m.textarea.Blur()
-			return m, nil
+			return nil, true
 		}
 		m.textarea.Reset()
 		m.submit(val)
-		return m, nil
+		return nil, true
 	}
-	return m, nil
+	// Ordinary editing: characters, backspace, arrows, paste. The textarea owns
+	// all of it.
+	return nil, false
 }
 
 func (m *Model) submit(text string) {
@@ -368,6 +406,19 @@ func (m *Model) toggleMute() {
 		return
 	}
 	m.opts.Voice.Mute()
+}
+
+// clearTranscript empties the scrollback. Called when Otto's session is
+// cleared: the conversation on screen describes a context he no longer has, and
+// leaving it up invites follow-ups ("do the second one") that he cannot resolve.
+func (m *Model) clearTranscript() {
+	m.messages = nil
+	m.voiceHeard = ""
+	m.voiceReply = ""
+	if m.ready {
+		m.viewport.SetContent(m.renderMessages())
+		m.viewport.GotoTop()
+	}
 }
 
 func (m *Model) appendMessage(role, text string) {
@@ -494,7 +545,7 @@ func (m *Model) renderChat() string {
 	b.WriteString("\n")
 	b.WriteString(m.textarea.View())
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("enter: send  ·  esc: back  ·  m (empty): mute  ·  ctrl+c: quit"))
+	b.WriteString(helpStyle.Render("enter: send  ·  /new: fresh session  ·  esc: back  ·  m (empty): mute  ·  ctrl+c: quit"))
 	return b.String()
 }
 

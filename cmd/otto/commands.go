@@ -41,6 +41,12 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		if err != nil {
 			return commandResult{reply: fmt.Sprintf("⚠️ clear failed: %v", err), handled: true}
 		}
+		// Fired only on the branch that actually cleared, so a front end that
+		// wipes its transcript here can never claim a reset that did not
+		// happen. Before the reply, so the confirmation survives the wipe.
+		if h.onSessionReset != nil {
+			h.onSessionReset()
+		}
 		return commandResult{reply: "✨ Started new session — your next message will start a fresh conversation.", handled: true}
 	case "/whoami":
 		sid := h.session.ID()

@@ -69,6 +69,8 @@ func key(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "esc":
 		return tea.KeyPressMsg{Code: tea.KeyEscape}
+	case "backspace":
+		return tea.KeyPressMsg{Code: tea.KeyBackspace}
 	}
 	return tea.KeyPressMsg{}
 }
@@ -88,6 +90,91 @@ func TestTypingOpensChatWithCharacter(t *testing.T) {
 	}
 	if got := m.textarea.Value(); got != "h" {
 		t.Errorf("textarea = %q, want the typed character preserved", got)
+	}
+}
+
+// Every keystroke after the first has to reach the textarea. handleKey used to
+// return before the update loop ever forwarded the message, so exactly one
+// character could be typed and enter then submitted that single letter — the
+// input box looked completely dead.
+func TestTypingBuildsUpAMessage(t *testing.T) {
+	sub := &fakeSubmitter{}
+	m := newTestModel(sub, nil)
+	for _, r := range "hello" {
+		m.Update(key(string(r)))
+	}
+	if got := m.textarea.Value(); got != "hello" {
+		t.Fatalf("textarea = %q, want every keystroke to land", got)
+	}
+	m.Update(key("enter"))
+	if got := sub.submitted(); len(got) != 1 || got[0] != "hello" {
+		t.Errorf("submitted %v, want the whole typed message", got)
+	}
+}
+
+// Backspace is a key like any other and must reach the textarea too.
+func TestBackspaceEdits(t *testing.T) {
+	m := newTestModel(&fakeSubmitter{}, nil)
+	for _, r := range "helo" {
+		m.Update(key(string(r)))
+	}
+	m.Update(key("backspace"))
+	if got := m.textarea.Value(); got != "hel" {
+		t.Errorf("textarea = %q, want the last character removed", got)
+	}
+}
+
+// A slash command is ordinary text as far as the front end is concerned — it
+// goes through the same Submit, so the handler's command dispatch sees it and
+// /new works from the TUI exactly as it does from Telegram.
+func TestSlashCommandsSubmitLikeAnyMessage(t *testing.T) {
+	sub := &fakeSubmitter{}
+	m := newTestModel(sub, nil)
+	for _, r := range "/new" {
+		m.Update(key(string(r)))
+	}
+	m.Update(key("enter"))
+
+	if got := sub.submitted(); len(got) != 1 || got[0] != "/new" {
+		t.Fatalf("submitted %v, want the command passed through verbatim", got)
+	}
+}
+
+// The transcript must not outlive the session it describes: once Otto's context
+// is cleared, a visible history invites follow-ups he cannot resolve.
+func TestSessionResetClearsTheTranscript(t *testing.T) {
+	m := newTestModel(&fakeSubmitter{}, nil)
+	m.appendMessage("user", "what's on my calendar")
+	m.appendMessage("otto", "three things")
+	if len(m.messages) != 2 {
+		t.Fatalf("scrollback = %d messages, want the fixture", len(m.messages))
+	}
+
+	m.SessionReset()
+	m.Update(<-m.replies)
+
+	if len(m.messages) != 0 {
+		t.Errorf("scrollback = %v, want it emptied with the session", m.messages)
+	}
+}
+
+// The reset rides the reply channel precisely so it lands before the "started a
+// new session" confirmation. If it did not, the wipe would swallow the one
+// message telling you the wipe happened.
+func TestResetIsOrderedBeforeItsConfirmation(t *testing.T) {
+	m := newTestModel(&fakeSubmitter{}, nil)
+	m.appendMessage("user", "old context")
+
+	m.SessionReset()
+	m.Deliver(context.Background(), "✨ Started new session", false)
+	m.Update(<-m.replies)
+	m.Update(<-m.replies)
+
+	if len(m.messages) != 1 {
+		t.Fatalf("scrollback = %v, want only the confirmation", m.messages)
+	}
+	if !strings.Contains(m.messages[0].text, "Started new session") {
+		t.Errorf("scrollback = %q, want the confirmation to survive the wipe", m.messages[0].text)
 	}
 }
 
