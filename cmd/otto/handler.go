@@ -61,6 +61,15 @@ type handler struct {
 	// they arrive.
 	voiceSink voiceStreamSink
 
+	// onSessionReset fires after /new has actually cleared Otto's session.
+	//
+	// The local front end uses it to wipe its transcript. Without it the pane
+	// keeps displaying a conversation Otto no longer remembers, which is worse
+	// than merely stale: it invites exactly the referential follow-up ("do the
+	// second one") that a cleared session cannot resolve. Nil on the
+	// Telegram-only path, where the client owns its own scrollback.
+	onSessionReset func()
+
 	// voiceDecode transcodes a voice note into the WAV whisper expects. A
 	// field rather than a direct call so the download → decode → transcribe
 	// path is testable without a real Opus file and a real transcoder. Nil

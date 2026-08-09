@@ -40,6 +40,52 @@ func TestCommandNewClearsSession(t *testing.T) {
 	}
 }
 
+// The front end wipes its transcript from this callback, so it must fire when
+// and only when the session was really cleared.
+func TestCommandNewSignalsTheSessionReset(t *testing.T) {
+	bot := &fakeBot{
+		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "/new"}}},
+	}
+	h := newTestHandler(t, bot, &fakeRunner{respond: "ignored"})
+	resets := 0
+	h.onSessionReset = func() { resets++ }
+
+	runForBriefWindow(t, h)
+
+	if resets != 1 {
+		t.Errorf("session-reset callback fired %d times, want 1", resets)
+	}
+}
+
+// /new refuses while Otto is mid-turn — and a front end must not clear its
+// transcript on the strength of a reset that did not happen.
+func TestCommandNewDoesNotSignalWhenItRefuses(t *testing.T) {
+	bot := &fakeBot{
+		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "/new"}}},
+	}
+	h := newTestHandler(t, bot, &fakeRunner{respond: "ignored"})
+	resets := 0
+	h.onSessionReset = func() { resets++ }
+
+	// Hold the slot so /new takes the mid-turn branch.
+	if !h.otto.tryAcquire("(test)") {
+		t.Fatal("could not take the otto slot")
+	}
+	defer h.otto.release()
+
+	if err := h.session.Set("preexisting-session"); err != nil {
+		t.Fatal(err)
+	}
+	runForBriefWindow(t, h)
+
+	if resets != 0 {
+		t.Errorf("session-reset callback fired %d times, want 0 — nothing was cleared", resets)
+	}
+	if h.session.ID() != "preexisting-session" {
+		t.Errorf("session = %q, want it untouched while Otto is busy", h.session.ID())
+	}
+}
+
 func TestCommandWhoami(t *testing.T) {
 	bot := &fakeBot{
 		updates: [][]telegram.Update{{{UpdateID: 1, ChatID: 100, UserID: 99, Text: "/whoami"}}},
