@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"otto/internal/claude"
 	"otto/internal/telegram"
 )
 
@@ -40,6 +41,13 @@ func (h *handler) tryCommand(ctx context.Context, u telegram.Update) commandResu
 		h.otto.release()
 		if err != nil {
 			return commandResult{reply: fmt.Sprintf("⚠️ clear failed: %v", err), handled: true}
+		}
+		// The local backstop keeps its own rolling context, since Ollama has no
+		// sessions to resume. Clearing it here makes /new mean one thing rather
+		// than two, and stops a fresh Claude session from being shadowed by an
+		// outage conversation the user thought they had ended.
+		if h.fallback != nil {
+			h.fallback.ForgetHistory()
 		}
 		// Fired only on the branch that actually cleared, so a front end that
 		// wipes its transcript here can never claim a reset that did not
@@ -161,6 +169,7 @@ func (h *handler) statusReport(ctx context.Context) string {
 	fmt.Fprintf(&b, "rotation=%s\n", describeRotation(tokens, idle, sessionEmpty, h.rotate))
 	fmt.Fprintf(&b, "embeddings=%s\n", embedStatus.describe())
 	fmt.Fprintf(&b, "prune=%s\n", pruneStatus.describe())
+	fmt.Fprintf(&b, "fallback=%s\n", h.fallbackStatus(ctx))
 
 	if h.store != nil {
 		if queued, ready, err := h.store.InboxDepth(ctx); err != nil {
@@ -177,6 +186,38 @@ func (h *handler) statusReport(ctx context.Context) string {
 		b.WriteString("bus=disabled (no store)")
 	}
 	return b.String()
+}
+
+// fallbackStatus describes the local backstop.
+//
+// It probes rather than reporting a verdict cached at boot, because the only
+// question this line answers is "will it catch me if Claude goes down right
+// now" — and Ollama is a service that can be stopped, or have its model
+// removed, long after Otto started. The probe is one request to localhost with
+// a short deadline, so it stays within the cheap-and-non-blocking rule the rest
+// of this report follows.
+func (h *handler) fallbackStatus(ctx context.Context) string {
+	if h.fallback == nil {
+		return "disabled"
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	state := "ready"
+	if err := h.fallback.Available(probeCtx); err != nil {
+		state = "UNAVAILABLE — " + truncate(err.Error(), 80)
+	}
+	out := h.fallback.Name() + " " + state
+
+	// How often it has fired is the part worth noticing: a backstop that has
+	// served turns means Claude has been failing, which is easy to miss when
+	// the answers keep arriving.
+	if fr, ok := h.runner.(*claude.FallbackRunner); ok {
+		if used, reason := fr.Stats(); used > 0 {
+			out += fmt.Sprintf(" (served %d turn(s); last: %s)", used, reason)
+		}
+	}
+	return out
 }
 
 // handleUpdateCommand returns the synchronous reply for /update and,

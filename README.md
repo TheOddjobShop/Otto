@@ -10,6 +10,7 @@ Design specs:
 - [`docs/superpowers/specs/2026-07-21-model-router-design.md`](docs/superpowers/specs/2026-07-21-model-router-design.md) — the per-turn Haiku model classifier (CODE vs CHAT routing). *Retroactive.*
 - [`docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md`](docs/superpowers/specs/2026-07-21-pets-and-watchdog-design.md) — the multi-persona pet system (Toto/Toot) and the liveness watchdog. *Retroactive.*
 - [`docs/superpowers/specs/2026-08-07-voice-tui-design.md`](docs/superpowers/specs/2026-08-07-voice-tui-design.md) — the surface mux, the local voice pipeline (wake word → whisper → Otto → piper), and the `./otto tui` front end.
+- [`docs/superpowers/specs/2026-08-16-claude-outage-fallback-design.md`](docs/superpowers/specs/2026-08-16-claude-outage-fallback-design.md) — the local Ollama backstop that answers when Claude Code is unreachable.
 
 ## Quick start
 
@@ -211,6 +212,61 @@ conversation.
 can tell Otto is actually running — the enqueue itself succeeds either way,
 since the queue is just a table.
 
+## When Claude Code is down
+
+Claude Code is a network service behind a subprocess. It fails when the API is
+overloaded, when auth expires, when the house internet drops, and when an npm
+update leaves the binary missing. Every one of those used to turn Otto into a
+bot that replies `⚠️ Claude error` and nothing else — which, on a machine you
+talk to out loud, tends to happen exactly when you wanted to ask it something.
+
+So there is a second brain on the same box. When a turn fails, Otto re-asks it
+locally through [Ollama](https://ollama.com), and the reply says so:
+
+> Heads up: Claude Code is unreachable, so this answer is from the local model
+> (gpt-oss:20b) with no tools and no memory access.
+>
+> …
+
+**It is a real step down, not a seamless failover.** The local model has no
+tools: no shell, no files, no Notion, Gmail, Drive or Calendar, no memory
+writes, no web. It can only talk. Its system prompt says so explicitly, so it
+declines rather than inventing an email it never sent — but the notice is on
+every fallback reply because a degraded answer mistaken for a full one is worse
+than an error.
+
+It keeps three exchanges of its own context, since Ollama has no sessions to
+resume, and `/new` clears that alongside Otto's session.
+
+```bash
+ollama pull gpt-oss:20b     # ~13 GB — setup.sh does NOT pull this for you
+```
+
+Nothing is pulled automatically because the model is an order of magnitude
+larger than the embedding models, and Otto is perfectly usable without it. Until
+it is pulled, `/status` says so:
+
+```
+fallback=ollama:gpt-oss:20b UNAVAILABLE — ollama model "gpt-oss:20b" not pulled — run `ollama pull gpt-oss:20b`
+```
+
+Once it is working, that line reads `ready`, and grows a count the moment the
+backstop actually serves a turn — which is how you notice Claude has been
+failing while the answers kept arriving:
+
+```
+fallback=ollama:gpt-oss:20b ready (served 3 turn(s); last: claude rate-limited or overloaded)
+```
+
+**Two failures deliberately do not fall back.** A cancelled turn (`/restart`,
+shutdown, the hang watchdog) is somebody deciding it should stop, so answering
+it anyway on a second brain ignores the instruction. And a turn that already
+produced text is left alone — Claude sometimes dies partway through a reply that
+was largely fine, and appending a second, worse answer would leave you with two
+and no way to tell which to trust.
+
+Set `fallback_disabled = true` to turn the whole thing off.
+
 ## Operations
 
 ```bash
@@ -266,7 +322,8 @@ runners. `.github/workflows/release.yml` is separate and fires only on `v*` tags
 │   ├── auth/             # single-user allowlist
 │   ├── config/           # TOML config loader
 │   ├── telegram/         # Bot API wrapper, chunking, image download
-│   ├── claude/           # subprocess Runner + stream-json parser + session ID persistence
+│   ├── claude/           # subprocess Runner + stream-json parser + session ID persistence,
+│   │                     # plus the local Ollama backstop for when Claude is down
 │   ├── store/            # SQLite turn log + FTS5 keyword search + vectors table + semantic search
 │   ├── memory/           # bounded curated-memory core (USER.md/MEMORY.md): load/inject,
 │   │                     # add/replace/remove, security scan, capacity guard, RWMutex-safe
@@ -387,6 +444,12 @@ All written by `setup.sh`. The memory/embed/rotation keys have sensible defaults
 | `rotate_hard_pct` | `0.85` | rotate when tokens ≥ this fraction of context and user has paused ≥ 5 min |
 | `rotate_idle_minutes` | `15` | minutes of silence after which the session clears regardless of size |
 | `rotate_flush` | `true` | run a cheap Haiku pass over a session before clearing it, saving durable facts to the memory core |
+| `fallback_ollama_url` | `<embed_ollama_url>` | local Ollama serving the outage backstop |
+| `fallback_model` | `gpt-oss:20b` | model that answers when Claude Code is unreachable |
+| `fallback_disabled` | `false` | set `true` to see Claude failures as errors instead |
+| `voice_wake_word` | `otto` | filler words are skipped, so "hey otto" works either way |
+| `voice_end_silence_ms` | `2000` | silence that ends your request and closes the mic |
+| `voice_conversation_timeout_sec` | `30` | follow-up window before the wake word is needed again; negative never closes |
 
 ### Caveman skill (or other SessionStart prose-changers)
 
@@ -414,6 +477,8 @@ backstop, so this hook patch is optional but cleaner.
 - **Otto cuts you off mid-sentence:** he endpoints your request after 2 seconds of silence. Raise `voice_end_silence_ms` in `config.toml` if you pause longer than that while thinking.
 - **Otto answers things you said to somebody else:** after a reply he stays armed for 30 seconds so follow-ups need no wake word. Say "otto, go away" to close the conversation immediately, or lower `voice_conversation_timeout_sec`.
 - **A long reply won't stop:** by design — once the microphone is closed there is nothing to hear "shut up" with. Press `m`.
+- **Every reply starts with "Claude Code is unreachable":** the backstop is doing its job and Claude is failing. `/status` names the last cause (auth, rate limit, network, missing binary); `journalctl --user -u otto | grep fallback:` has the trail. Fix Claude, and the notice stops on the next turn — nothing needs restarting.
+- **Otto says the fallback is unavailable:** `/status` prints why. Either Ollama is not running (`systemctl --user status ollama`) or the model is not pulled (`ollama pull gpt-oss:20b`, ~13 GB).
 - **Semantic search not working:** check Ollama (`systemctl --user status ollama` on Linux, `brew services list` on macOS) and `ollama list`. Without a pulled embedding model, `session_search` falls back to keyword (FTS5) and logs `session_search: embed unavailable, keyword-only`. To enable semantic recall after a fresh install: `ollama pull embeddinggemma`.
 - **Session never rotates:** the rotator fires when idle ≥ `rotate_idle_minutes` (regardless of session size), OR when `input_tokens` ≥ `rotate_hard_pct × model_context_tokens` AND you have paused for at least 5 minutes — whichever comes first. Otto must also be free (not mid-turn). The journal logs `rotator: rotated session ...` on success. Rotation cannot be disabled; to make it fire less often, raise `rotate_idle_minutes` and/or `model_context_tokens` (values ≤ 0 for either are reset to their defaults).
 - **Claude `@<path>` image syntax wrong:** if images don't work, check `internal/claude/runner.go` and adjust against the installed Claude Code version's CLI.

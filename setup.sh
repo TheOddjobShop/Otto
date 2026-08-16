@@ -548,8 +548,19 @@ if command -v ollama &>/dev/null; then
     fi
   done
   echo "  [ok] Ollama configured for semantic memory"
+  # The Claude-outage backstop. Deliberately NOT pulled automatically: the
+  # model is ~13 GB, which is a different order of download from the embedding
+  # models above, and Otto works fine without it — a Claude failure simply
+  # surfaces as an error the way it always did.
+  if ollama list 2>/dev/null | grep -q "^gpt-oss"; then
+    echo "  [ok] Claude-outage fallback model present: gpt-oss:20b"
+  else
+    echo "  [note] No fallback model. If Claude Code goes down, Otto has nothing to answer with."
+    echo "         To arm the local backstop (~13 GB):  ollama pull gpt-oss:20b"
+  fi
 else
-  echo "  [note] Ollama not installed — memory search will use keyword (FTS5) only."
+  echo "  [note] Ollama not installed — memory search will use keyword (FTS5) only,"
+  echo "         and there is no local fallback when Claude Code is unreachable."
 fi
 
 # ── Voice: local speech-to-text and text-to-speech (optional) ───────────────
