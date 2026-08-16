@@ -60,6 +60,20 @@ type Config struct {
 	// RotateIdleMinutes: minutes of user silence after which the session is
 	// cleared regardless of size — the periodic "reset on inactivity". Default 15.
 	RotateIdleMinutes int `toml:"rotate_idle_minutes"`
+	// FallbackOllamaURL is the local Ollama server used when Claude Code
+	// cannot run. Defaults to EmbedOllamaURL, since it is the same server.
+	FallbackOllamaURL string `toml:"fallback_ollama_url"`
+	// FallbackModel is the Ollama model that answers during a Claude outage.
+	// Default "gpt-oss:20b" — big enough to hold a conversation, small enough
+	// to run on a desktop GPU or a patient CPU.
+	FallbackModel string `toml:"fallback_model"`
+	// FallbackDisabled turns the local backstop off entirely, so a Claude
+	// failure surfaces as an error the way it did before.
+	//
+	// Off by default: a degraded answer beats no answer, and the reply says
+	// which brain produced it. Set `fallback_disabled = true` if you would
+	// rather see the failure.
+	FallbackDisabled bool `toml:"fallback_disabled"`
 	// VoiceWakeWord is the word that arms the local listener in `otto tui`.
 	// Default "otto". Filler words in front of it are skipped either way, so
 	// "hey otto" and "okay otto" work without being configured.
@@ -110,6 +124,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.EmbedOllamaURL == "" {
 		cfg.EmbedOllamaURL = "http://localhost:11434"
+	}
+	if cfg.FallbackOllamaURL == "" {
+		cfg.FallbackOllamaURL = cfg.EmbedOllamaURL
+	}
+	if cfg.FallbackModel == "" {
+		cfg.FallbackModel = "gpt-oss:20b"
 	}
 	if len(cfg.EmbedModels) == 0 {
 		cfg.EmbedModels = []string{"embeddinggemma", "nomic-embed-text"}

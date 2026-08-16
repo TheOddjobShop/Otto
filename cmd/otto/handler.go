@@ -61,6 +61,11 @@ type handler struct {
 	// they arrive.
 	voiceSink voiceStreamSink
 
+	// fallback is the local backstop wrapped around runner, kept here only so
+	// /new can clear its rolling history and /status can report on it. Nil
+	// when the backstop is disabled.
+	fallback *claude.OllamaFallback
+
 	// onSessionReset fires after /new has actually cleared Otto's session.
 	//
 	// The local front end uses it to wipe its transcript. Without it the pane

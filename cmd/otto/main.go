@@ -114,6 +114,23 @@ func main() {
 
 	runner := claude.NewExecRunner(cfg.ClaudeBinaryPath, cfg.MCPConfigPath, systemPrompt, home)
 
+	// The local backstop. Claude Code is a network service behind a
+	// subprocess: when it is down, rate-limited, unauthenticated or simply
+	// missing, Otto has nothing to say. Wrapping the runner means a failed
+	// turn is answered by a local model instead of an error nobody can act
+	// on — degraded, clearly labelled, but an answer.
+	//
+	// Availability is not probed here. Ollama may be starting alongside Otto
+	// at boot, and a check now would disable the fallback for the whole
+	// process lifetime over a few seconds of startup ordering; it is checked
+	// per turn instead, when it actually matters.
+	var ottoFallback *claude.OllamaFallback
+	if !cfg.FallbackDisabled {
+		ottoFallback = claude.NewOllamaFallback(cfg.FallbackOllamaURL, cfg.FallbackModel)
+		runner = claude.NewFallbackRunner(runner, ottoFallback, log.Default())
+		log.Printf("fallback: local backstop armed (%s at %s)", cfg.FallbackModel, cfg.FallbackOllamaURL)
+	}
+
 	// Open the conversation turn-log store. store.Open creates the DB file but
 	// not its parent directory, so ensure the directory exists first.
 	if err := os.MkdirAll(filepath.Dir(cfg.StateDBPath), 0700); err != nil {
@@ -207,6 +224,7 @@ func main() {
 		allow:            allow,
 		session:          session,
 		runner:           runner,
+		fallback:         ottoFallback,
 		startedAt:        time.Now(),
 		otto:             newOttoState(),
 		toto:             toto,
