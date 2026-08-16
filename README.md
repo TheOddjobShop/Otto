@@ -71,12 +71,13 @@ After `setup.sh` reports success, on Telegram:
 - Send `/new` then `What's my name?` — should not remember (session cleared); but `Do you know my VS Code preference?` should still answer "light mode" because the memory core survives `/new`.
 - Send `What did we talk about earlier?` — Otto calls `session_search` (semantic + keyword) over `state.db`.
 - Send `/whoami` — prints your Telegram user ID and current session ID.
-- Send `/status` — prints uptime, busy/idle state, the model the last turn ran on, the session id, and the state of the background machinery: how full the session is and how long until it rotates, whether embeddings are actually working (from the last real attempt, not a probe), when the store was last pruned and how many rows went, and how many bus messages are queued vs. ready to deliver now. Every lookup is in-memory or one indexed `COUNT`, so it stays fast even when something is wrong.
+- Send `/status` — prints uptime, busy/idle state, the model the last turn ran on, the session id, and the state of the background machinery: how full the session is and how long until it rotates, whether embeddings are actually working (from the last real attempt, not a probe), when the store was last pruned and how many rows went, and how many bus messages are queued vs. ready to deliver now, and whether the local Claude-outage fallback would actually catch you right now. Every lookup is in-memory, one indexed `COUNT`, or one request to localhost, so it stays fast even when something is wrong.
 - Send `/restart` — interrupts an in-flight Claude call.
 - Send `/tokens` — prints all-time token usage with a per-source breakdown (main / bus / toto / toot / classify / flush), plus an estimated dollar cost broken down by model. The cost is computed from published list prices in `cmd/otto/pricing.go` and assumes the default 5-minute cache TTL; it is an estimate, not a billing figure, and any model without a rate card (e.g. turns that inherited Claude Code's own model) is named as excluded rather than silently counted as free.
 - Send a photo with caption "describe this" — Otto downloads it and forwards to Claude via `@<path>`.
 - Hold the microphone button and say "what's on my calendar today" — Otto transcribes it locally with whisper.cpp and answers as though you had typed it. Commands and pet addressing work too: saying "toto, what's otto up to" routes to the cat. The reply comes back as text, since you're looking at Telegram. Requires `whisper.cpp` plus a model, and `ffmpeg` to decode Telegram's Opus — `otto voice-doctor` reports exactly what's missing.
 - Send "what's on my calendar today?" — exercises the Google Calendar MCP.
+- To exercise the outage fallback without waiting for a real outage, point a throwaway config at a `claude_binary_path` that exits non-zero and run `otto -tty -config <that file>`. The reply should arrive from the local model, prefixed with the notice. Keep stdin open (`( echo "hi"; sleep 200 ) | otto -tty …`) — closing it cancels the turn, and a cancelled turn deliberately does *not* fall back.
 
 ## Voice
 
@@ -253,6 +254,16 @@ resume, and `/new` clears that alongside Otto's session.
 
 ```bash
 ollama pull gpt-oss:20b     # ~13 GB — setup.sh does NOT pull this for you
+```
+
+**Expect it to be slow.** A 20B model wants more VRAM than most desktop cards
+have — on a 6 GB GTX 1660 Ti, Ollama reports `67%/33% CPU/GPU` and a one-line
+answer takes tens of seconds, plus a cold load the first time. That is a fair
+trade for an outage, but if you would rather have a fast, dumber backstop, point
+`fallback_model` at something that fits your card entirely:
+
+```toml
+fallback_model = "llama3.2"    # ~2 GB, fits in VRAM, answers in a second
 ```
 
 Nothing is pulled automatically because the model is an order of magnitude
