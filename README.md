@@ -1,6 +1,19 @@
-# Otto
+<div align="center">
 
-Single-user Telegram bot wrapping Claude Code with MCP tools (Notion + Gmail + Google Drive + Google Calendar) **plus a local persistent-memory system** (curated core + semantic recall over conversation history). Runs as a `systemd --user` service (Arch Linux) or launchd user agent (macOS). Conversation memory survives messages, restarts, and `/new`.
+<img src="assets/otto.svg" alt="otto" width="330" />
+
+# otto
+
+**A single-user Telegram bot wrapping Claude Code — with local memory, a local voice, and a local brain to fall back on.**<br>
+*Runs as a user service on your own machine. Nothing about it needs the cloud to keep working.*
+
+</div>
+
+---
+
+Otto wraps Claude Code with MCP tools (Notion + Gmail + Google Drive + Google Calendar) **plus a local persistent-memory system** (curated core + semantic recall over conversation history). Runs as a `systemd --user` service (Arch Linux) or launchd user agent (macOS). Conversation memory survives messages, restarts, and `/new`.
+
+Three things run entirely on the machine, with no API keys and no per-token cost: **memory** (Ollama embeddings), **voice** (whisper.cpp + piper), and the **outage fallback** (Ollama again, answering when Claude Code cannot).
 
 Design specs:
 
